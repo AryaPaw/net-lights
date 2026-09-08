@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/NetLights.App/NetLights.App.csproj" />
+    <Project Path="src/NetLights.Core/NetLights.Core.csproj" />
+    <Project Path="src/NetLights.Networking/NetLights.Networking.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj" />
+    <Project Path="tests/NetLights.SoakTests/NetLights.SoakTests.csproj" />
+    <Project Path="tests/NetLights.UnitTests/NetLights.UnitTests.csproj" />
+  </Folder>
+</Solution>

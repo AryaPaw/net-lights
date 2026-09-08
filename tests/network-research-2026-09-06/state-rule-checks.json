@@ -1,0 +1,74 @@
+[
+  {
+    "case": "healthy",
+    "expected": "green",
+    "actual": "green",
+    "passed": true
+  },
+  {
+    "case": "one_dead_target",
+    "expected": "green",
+    "actual": "green",
+    "passed": true
+  },
+  {
+    "case": "one_shared_cdn_dead",
+    "expected": "green",
+    "actual": "green",
+    "passed": true
+  },
+  {
+    "case": "same_cdn_is_not_four_votes",
+    "expected": "gray",
+    "actual": "gray",
+    "passed": true
+  },
+  {
+    "case": "one_route_still_works",
+    "expected": "yellow",
+    "actual": "yellow",
+    "passed": true
+  },
+  {
+    "case": "confirmed_total_failure",
+    "expected": "red",
+    "actual": "red",
+    "passed": true
+  },
+  {
+    "case": "single_wave_not_enough",
+    "expected": "gray",
+    "actual": "gray",
+    "passed": true
+  },
+  {
+    "case": "pending_results_not_red",
+    "expected": "gray",
+    "actual": "gray",
+    "passed": true
+  },
+  {
+    "case": "rate_limits_not_outage",
+    "expected": "gray",
+    "actual": "gray",
+    "passed": true
+  },
+  {
+    "case": "tls_errors_not_proof_of_outage",
+    "expected": "gray",
+    "actual": "gray",
+    "passed": true
+  },
+  {
+    "case": "new_success_wins",
+    "expected": "yellow",
+    "actual": "yellow",
+    "passed": true
+  },
+  {
+    "case": "no_fresh_data",
+    "expected": "gray",
+    "actual": "gray",
+    "passed": true
+  }
+]

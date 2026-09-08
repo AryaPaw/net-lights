@@ -1,0 +1,443 @@
+{
+  "total": 826,
+  "targets": {
+    "yandex": {
+      "n": 54,
+      "ok": 54,
+      "p50_s": 0.125,
+      "p95_s": 0.14,
+      "max_s": 0.281,
+      "errors": []
+    },
+    "google": {
+      "n": 45,
+      "ok": 40,
+      "p50_s": 0.328,
+      "p95_s": 1.5,
+      "max_s": 2.812,
+      "errors": [
+        {
+          "name": "google",
+          "code": "0",
+          "exit": "28",
+          "phase": "fast-1.5s",
+          "error": "Connection timed out after 1513 milliseconds"
+        },
+        {
+          "name": "google",
+          "code": "0",
+          "exit": "28",
+          "phase": "fast-1.5s",
+          "error": "Connection timed out after 1513 milliseconds"
+        },
+        {
+          "name": "google",
+          "code": "0",
+          "exit": "28",
+          "phase": "balanced-2s",
+          "error": "Connection timed out after 2007 milliseconds"
+        },
+        {
+          "name": "google",
+          "code": "0",
+          "exit": "28",
+          "phase": "balanced-2s",
+          "error": "Connection timed out after 2011 milliseconds"
+        },
+        {
+          "name": "google",
+          "code": "0",
+          "exit": "28",
+          "phase": "balanced-2s",
+          "error": "Connection timed out after 2011 milliseconds"
+        }
+      ]
+    },
+    "mail": {
+      "n": 54,
+      "ok": 54,
+      "p50_s": 0.094,
+      "p95_s": 0.109,
+      "max_s": 0.109,
+      "errors": []
+    },
+    "cloudflare": {
+      "n": 54,
+      "ok": 53,
+      "p50_s": 0.328,
+      "p95_s": 0.437,
+      "max_s": 0.563,
+      "errors": [
+        {
+          "name": "cloudflare",
+          "code": "0",
+          "exit": "28",
+          "phase": "balanced-2s",
+          "error": "Connection timed out after 2004 milliseconds"
+        }
+      ]
+    },
+    "rt": {
+      "n": 54,
+      "ok": 54,
+      "p50_s": 0.265,
+      "p95_s": 0.281,
+      "max_s": 0.282,
+      "errors": []
+    },
+    "mozilla": {
+      "n": 54,
+      "ok": 54,
+      "p50_s": 0.328,
+      "p95_s": 0.422,
+      "max_s": 0.468,
+      "errors": []
+    },
+    "selectel": {
+      "n": 54,
+      "ok": 54,
+      "p50_s": 0.125,
+      "p95_s": 0.14,
+      "max_s": 0.14,
+      "errors": []
+    },
+    "fedora": {
+      "n": 54,
+      "ok": 54,
+      "p50_s": 0.656,
+      "p95_s": 0.859,
+      "max_s": 0.875,
+      "errors": []
+    },
+    "beeline": {
+      "n": 53,
+      "ok": 53,
+      "p50_s": 0.125,
+      "p95_s": 0.172,
+      "max_s": 0.203,
+      "errors": []
+    },
+    "apple": {
+      "n": 31,
+      "ok": 19,
+      "p50_s": 0.375,
+      "p95_s": 0.969,
+      "max_s": 0.969,
+      "errors": [
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "baseline-4s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "baseline-4s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "baseline-4s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "baseline-4s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "baseline-4s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "fast-1.5s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "fast-1.5s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "28",
+          "phase": "fast-1.5s",
+          "error": "Connection timed out after 1505 milliseconds"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "balanced-2s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "balanced-2s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "balanced-2s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "balanced-2s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        }
+      ]
+    },
+    "megafon": {
+      "n": 53,
+      "ok": 53,
+      "p50_s": 0.234,
+      "p95_s": 0.265,
+      "max_s": 0.281,
+      "errors": []
+    },
+    "kde": {
+      "n": 45,
+      "ok": 45,
+      "p50_s": 0.328,
+      "p95_s": 0.375,
+      "max_s": 0.5,
+      "errors": []
+    },
+    "timeweb": {
+      "n": 53,
+      "ok": 53,
+      "p50_s": 0.125,
+      "p95_s": 0.359,
+      "max_s": 1.157,
+      "errors": []
+    },
+    "debian": {
+      "n": 54,
+      "ok": 54,
+      "p50_s": 0.609,
+      "p95_s": 1.016,
+      "max_s": 1.609,
+      "errors": []
+    },
+    "mts": {
+      "n": 45,
+      "ok": 45,
+      "p50_s": 0.125,
+      "p95_s": 0.156,
+      "max_s": 0.219,
+      "errors": []
+    },
+    "arch": {
+      "n": 53,
+      "ok": 53,
+      "p50_s": 0.406,
+      "p95_s": 0.547,
+      "max_s": 0.75,
+      "errors": []
+    },
+    "github": {
+      "n": 8,
+      "ok": 8,
+      "p50_s": 0.297,
+      "p95_s": 0.36,
+      "max_s": 0.36,
+      "errors": []
+    },
+    "wikimedia": {
+      "n": 8,
+      "ok": 8,
+      "p50_s": 0.328,
+      "p95_s": 1.375,
+      "max_s": 1.375,
+      "errors": []
+    }
+  },
+  "phases": {
+    "run-20260906-223658/baseline-4s": {
+      "n": 232,
+      "ok": 227,
+      "p50_s": 0.281,
+      "p95_s": 0.781,
+      "max_s": 2.812,
+      "errors": [
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "baseline-4s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "baseline-4s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "baseline-4s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "baseline-4s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "baseline-4s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        }
+      ]
+    },
+    "run-20260906-223658/fast-1.5s": {
+      "n": 236,
+      "ok": 231,
+      "p50_s": 0.281,
+      "p95_s": 0.75,
+      "max_s": 0.969,
+      "errors": [
+        {
+          "name": "google",
+          "code": "0",
+          "exit": "28",
+          "phase": "fast-1.5s",
+          "error": "Connection timed out after 1513 milliseconds"
+        },
+        {
+          "name": "google",
+          "code": "0",
+          "exit": "28",
+          "phase": "fast-1.5s",
+          "error": "Connection timed out after 1513 milliseconds"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "fast-1.5s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "fast-1.5s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "28",
+          "phase": "fast-1.5s",
+          "error": "Connection timed out after 1505 milliseconds"
+        }
+      ]
+    },
+    "run-20260906-223658/balanced-2s": {
+      "n": 238,
+      "ok": 230,
+      "p50_s": 0.265,
+      "p95_s": 0.672,
+      "max_s": 1.5,
+      "errors": [
+        {
+          "name": "google",
+          "code": "0",
+          "exit": "28",
+          "phase": "balanced-2s",
+          "error": "Connection timed out after 2007 milliseconds"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "balanced-2s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "google",
+          "code": "0",
+          "exit": "28",
+          "phase": "balanced-2s",
+          "error": "Connection timed out after 2011 milliseconds"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "balanced-2s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "cloudflare",
+          "code": "0",
+          "exit": "28",
+          "phase": "balanced-2s",
+          "error": "Connection timed out after 2004 milliseconds"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "balanced-2s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "apple",
+          "code": "0",
+          "exit": "35",
+          "phase": "balanced-2s",
+          "error": "schannel: failed to receive handshake, SSL/TLS connection failed"
+        },
+        {
+          "name": "google",
+          "code": "0",
+          "exit": "28",
+          "phase": "balanced-2s",
+          "error": "Connection timed out after 2011 milliseconds"
+        }
+      ]
+    },
+    "run-20260906-224329/balanced-2s": {
+      "n": 120,
+      "ok": 120,
+      "p50_s": 0.281,
+      "p95_s": 0.797,
+      "max_s": 1.375,
+      "errors": []
+    }
+  },
+  "http429": 0,
+  "http403": 0
+}
