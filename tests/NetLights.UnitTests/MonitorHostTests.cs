@@ -101,6 +101,21 @@ public sealed class MonitorHostTests
         await dispose.AsTask().WaitAsync(TimeSpan.FromSeconds(6));
     }
 
+    [Fact]
+    public async Task Host_Pause_DrainsInflight()
+    {
+        var probe = new ScriptedProbe { Delay = TimeSpan.FromSeconds(8) };
+        var kernel = new MonitorKernel(new MonitorConfiguration { Endpoints = TestPools.Independent() }, TimeProvider.System);
+        await using var host = new MonitorHost(kernel, probe, TimeProvider.System);
+        host.Start();
+        await WaitUntilAsync(() => host.Kernel.PhysicalInflight > 0, TimeSpan.FromSeconds(2));
+        host.SetPaused(true);
+        await WaitUntilAsync(() => host.Kernel.PhysicalInflight == 0 && host.Snapshot.Paused, TimeSpan.FromSeconds(3));
+        Assert.Equal(0, host.Kernel.PhysicalInflight);
+        Assert.True(host.Snapshot.Paused);
+        Assert.Equal(ProbeOutcome.Cancelled, probe.LastOutcome);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;

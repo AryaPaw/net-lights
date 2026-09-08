@@ -64,7 +64,13 @@ internal static class DiagnosticExport
 
     public static string FormatTooltip(MonitorSnapshot snapshot)
     {
-        return Truncate($"Провайдер: {Label(snapshot.Ru.Availability)} | VPN: {Label(snapshot.Vpn.Availability)}");
+        string text = $"Провайдер: {Label(snapshot.Ru.Availability)} | VPN: {Label(snapshot.Vpn.Availability)}";
+        if (snapshot.Paused)
+        {
+            text += " | пауза";
+        }
+
+        return Truncate(text);
     }
 
     public static string Label(GroupAvailability availability)

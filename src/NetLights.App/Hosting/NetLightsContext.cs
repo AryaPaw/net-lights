@@ -15,24 +15,33 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly AppSettings _settings;
     private readonly MonitorHost _host;
     private readonly HttpsProbe _probe;
-    private readonly ToolStripMenuItem _autoStartItem;
-    private readonly ToolStripMenuItem _autoUpdateItem;
     private readonly System.Windows.Forms.Timer _heartbeat;
     private readonly TaskbarRestartWindow _taskbar;
     private readonly SynchronizationContext _ui;
     private readonly CancellationTokenSource _diagnosticsCts = new();
+    private readonly GitHubReleaseFeed _feed;
     private readonly UpdateCoordinator _updates;
+    private readonly ToolStripMenuItem _pauseItem;
     private DateTimeOffset _lastNetworkEvent = DateTimeOffset.MinValue;
     private MonitorSnapshot _snapshot;
     private GroupAvailability _historyRu;
     private GroupAvailability _historyVpn;
     private bool _exiting;
+    private bool _syncingToggles;
     private string? _updateNotice;
 
     public NetLightsContext()
     {
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _settings = SettingsStore.Load();
+        if (_settings.SettingsVersion < 1)
+        {
+            _settings.AutoStart = true;
+            _settings.SettingsVersion = 1;
+            SettingsStore.Save(_settings);
+        }
+
+        AutoStartStore.Set(_settings.AutoStart, Application.ExecutablePath);
         (MonitorConfiguration config, string? warning) = SettingsStore.LoadPool();
         _probe = HttpsProbeFactory.CreateProduction(TimeProvider.System, ProductInfo.Version);
         var kernel = new MonitorKernel(config, TimeProvider.System);
@@ -40,7 +49,8 @@ internal sealed class NetLightsContext : ApplicationContext
         _snapshot = kernel.Snapshot;
         _historyRu = _snapshot.Ru.Availability;
         _historyVpn = _snapshot.Vpn.Availability;
-        _updates = new UpdateCoordinator(new GitHubReleaseFeed(), new PendingUpdateStore(), ProductInfo.Version);
+        _feed = new GitHubReleaseFeed();
+        _updates = new UpdateCoordinator(_feed, new PendingUpdateStore(), ProductInfo.Version);
         try
         {
             StateHistoryStore.Prune();
@@ -56,30 +66,27 @@ internal sealed class NetLightsContext : ApplicationContext
         }
 
         _host.SnapshotChanged += OnSnapshot;
+        _status.AutoStartChanged = OnAutoStartFromWindow;
+        _status.AutoUpdateChanged = OnAutoUpdateFromWindow;
+        _status.DiagnoseRequested = DiagnoseAsync;
+        _status.ExportRequested = Export;
+        _status.BindSettings(AutoStartStore.IsEnabled(), _settings.AutoUpdateEnabled, _updateNotice);
         _menu = new ContextMenuStrip();
-        _menu.Items.Add("Состояние", null, (_, _) => ShowStatus());
-        _menu.Items.Add("Проверить сейчас", null, (_, _) => _host.RequestCheckNow());
-        _menu.Items.Add("Диагностика", null, (_, _) => _ = RunDiagnosticsAsync());
-        _autoStartItem = new ToolStripMenuItem("Автозапуск");
-        _autoStartItem.CheckOnClick = true;
-        _autoStartItem.Checked = AutoStartStore.IsEnabled();
-        _autoStartItem.CheckedChanged += (_, _) =>
+        _menu.Items.Add("Открыть окно", null, (_, _) => ShowStatus());
+        _pauseItem = new ToolStripMenuItem("Пауза")
         {
-            AutoStartStore.Set(_autoStartItem.Checked, Application.ExecutablePath);
-            _settings.AutoStart = _autoStartItem.Checked;
-            SettingsStore.Save(_settings);
+            CheckOnClick = true
         };
-        _menu.Items.Add(_autoStartItem);
-        _autoUpdateItem = new ToolStripMenuItem("Автообновление");
-        _autoUpdateItem.CheckOnClick = true;
-        _autoUpdateItem.Checked = _settings.AutoUpdateEnabled;
-        _autoUpdateItem.CheckedChanged += (_, _) =>
+        _pauseItem.CheckedChanged += (_, _) =>
         {
-            _settings.AutoUpdateEnabled = _autoUpdateItem.Checked;
-            SettingsStore.Save(_settings);
+            if (_syncingToggles)
+            {
+                return;
+            }
+
+            _host.SetPaused(_pauseItem.Checked);
         };
-        _menu.Items.Add(_autoUpdateItem);
-        _menu.Items.Add("Экспорт", null, (_, _) => Export());
+        _menu.Items.Add(_pauseItem);
         _menu.Items.Add("Выход", null, (_, _) => ExitThread());
         int iconSize = _renderer.SystemSmallIconSize();
         _icon = new NotifyIcon
@@ -98,10 +105,13 @@ internal sealed class NetLightsContext : ApplicationContext
                 _host.NotifyUnavailable(true);
             }
 
-            CheckSnapshotAge();
+            if (!_snapshot.Paused)
+            {
+                CheckSnapshotAge();
+            }
             if (_settings.AutoUpdateEnabled)
             {
-                _ = _updates.CheckInBackgroundAsync(CancellationToken.None);
+                _ = _updates.CheckInBackgroundAsync(_diagnosticsCts.Token);
             }
         };
         _heartbeat.Start();
@@ -110,6 +120,7 @@ internal sealed class NetLightsContext : ApplicationContext
         Microsoft.Win32.SystemEvents.PowerModeChanged += OnPower;
         _taskbar = new TaskbarRestartWindow(RestoreIcon);
         _host.Start();
+        ShowStatus();
         if (!string.IsNullOrEmpty(warning))
         {
             _icon.BalloonTipTitle = "Net Lights";
@@ -140,6 +151,13 @@ internal sealed class NetLightsContext : ApplicationContext
         if (_icon.Text != tip)
         {
             _icon.Text = tip;
+        }
+
+        if (_pauseItem.Checked != snapshot.Paused)
+        {
+            _syncingToggles = true;
+            _pauseItem.Checked = snapshot.Paused;
+            _syncingToggles = false;
         }
 
         if (snapshot.Ru.Availability != _historyRu || snapshot.Vpn.Availability != _historyVpn)
@@ -183,43 +201,45 @@ internal sealed class NetLightsContext : ApplicationContext
         }
 
         _status.Bind(_snapshot);
+        _status.BindSettings(AutoStartStore.IsEnabled(), _settings.AutoUpdateEnabled, _updateNotice);
         _status.Show();
         _status.Activate();
     }
 
-    private async Task RunDiagnosticsAsync()
+    private void OnAutoStartFromWindow(bool enabled)
     {
-        EndpointView? first = _snapshot.Ru.Endpoints.FirstOrDefault();
-        if (first is null)
+        AutoStartStore.Set(enabled, Application.ExecutablePath);
+        _settings.AutoStart = enabled;
+        SettingsStore.Save(_settings);
+    }
+
+    private void OnAutoUpdateFromWindow(bool enabled)
+    {
+        _settings.AutoUpdateEnabled = enabled;
+        SettingsStore.Save(_settings);
+    }
+
+    private async Task<string> DiagnoseAsync(string endpointId)
+    {
+        EndpointView? view = _snapshot.Ru.Endpoints.Concat(_snapshot.Vpn.Endpoints)
+            .FirstOrDefault(e => string.Equals(e.Id, endpointId, StringComparison.Ordinal));
+        if (view is null)
         {
-            return;
+            return "Узел не найден.";
         }
 
-        EndpointDefinition endpoint = new(first.Id, first.Group, first.Uri, first.InfrastructureId);
-        try
-        {
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(_diagnosticsCts.Token);
-            ManualDiagnosticResult result = await ManualDiagnostics.RunAsync(
-                _probe,
-                endpoint,
-                TimeProvider.System,
-                MonitorConstants.ManualDiagnosticsDeadline,
-                linked.Token).ConfigureAwait(true);
-            MessageBox.Show(
-                $"{result.Note}\nHTTPS: {result.Https.Outcome} {result.Https.HttpStatus}\nICMP: {result.Icmp?.Status}\nTCP: {result.Tcp}\nIP: {result.Address}",
-                "Диагностика",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
-        }
-        catch (OperationCanceledException)
-        {
-            MessageBox.Show("Диагностика отменена.", "Диагностика", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-        catch (Exception ex)
-        {
-            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "diag", ex.Message);
-            MessageBox.Show("Не удалось выполнить диагностику: " + ex.Message, "Диагностика", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
+        EndpointDefinition endpoint = new(view.Id, view.Group, view.Uri, view.InfrastructureId);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_diagnosticsCts.Token);
+        ManualDiagnosticResult result = await ManualDiagnostics.RunAsync(
+            _probe,
+            endpoint,
+            TimeProvider.System,
+            MonitorConstants.ManualDiagnosticsDeadline,
+            linked.Token).ConfigureAwait(true);
+        string icmp = result.Icmp is null ? "нет" : result.Icmp.Status.ToString();
+        string tcp = result.Tcp is null ? "нет" : result.Tcp.Value ? "есть" : "нет";
+        string https = $"{result.Https.Outcome} HTTP {result.Https.HttpStatus?.ToString() ?? "—"}";
+        return $"{view.Id} ({view.Uri.Host})\r\n{result.Note}\r\nHTTPS: {https}\r\nICMP: {icmp}\r\nTCP 443: {tcp}\r\nIP: {result.Address}";
     }
 
     private void Export()
@@ -305,6 +325,7 @@ internal sealed class NetLightsContext : ApplicationContext
 
         try
         {
+            _updates.WaitIdle(TimeSpan.FromSeconds(3));
             if (_settings.AutoUpdateEnabled)
             {
                 UpdateAgentLauncher.TryStart(_updates);
@@ -315,6 +336,8 @@ internal sealed class NetLightsContext : ApplicationContext
             _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "update", ex.Message);
         }
 
+        _updates.Dispose();
+        _feed.Dispose();
         _probe.Dispose();
         _diagnosticsCts.Dispose();
         _icon.Visible = false;

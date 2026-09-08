@@ -5,14 +5,19 @@ namespace NetLights.App;
 internal static class StatusSnapshotProjector
 {
     public static string Fingerprint(MonitorSnapshot snapshot)
-        => string.Join("|", Rows(snapshot).Select(r => $"{r.Group}:{r.Id}:{r.Result}:{r.Http}:{r.Delay}:{r.LastCompleted?.UtcTicks}:{r.Reason}"))
+        => string.Join("|", Rows(snapshot).Select(r => $"{r.Group}:{r.Id}:{r.Result}:{r.Http}:{r.Delay}:{r.LastCompleted?.UtcTicks}:{r.Reason}:{r.Rate}"))
            + "|" + snapshot.Ru.Availability + snapshot.Vpn.Availability
-           + "|" + snapshot.Ru.ConfirmationActive + snapshot.Vpn.ConfirmationActive;
+           + "|" + snapshot.Ru.ConfirmationActive + snapshot.Vpn.ConfirmationActive
+           + "|" + snapshot.Paused;
 
     public static string Summary(MonitorSnapshot snapshot)
     {
         string summary = $"Провайдер: {DiagnosticExport.Label(snapshot.Ru.Availability)}  |  VPN: {DiagnosticExport.Label(snapshot.Vpn.Availability)}";
-        if (snapshot.Ru.ConfirmationActive || snapshot.Vpn.ConfirmationActive)
+        if (snapshot.Paused)
+        {
+            summary += "  |  пауза";
+        }
+        else if (snapshot.Ru.ConfirmationActive || snapshot.Vpn.ConfirmationActive)
         {
             summary += "  |  идёт дополнительная проверка";
         }
@@ -20,8 +25,7 @@ internal static class StatusSnapshotProjector
         return summary;
     }
 
-    public static string Title(MonitorSnapshot snapshot)
-        => $"Net Lights - Провайдер: {DiagnosticExport.Label(snapshot.Ru.Availability)}, VPN: {DiagnosticExport.Label(snapshot.Vpn.Availability)}";
+    public static string Title(MonitorSnapshot snapshot) => "Net Lights";
 
     public static List<EndpointRow> Rows(MonitorSnapshot snapshot)
     {
@@ -108,6 +112,7 @@ internal static class StatusSnapshotProjector
                 endpoint.Elapsed is { } elapsed ? $"{elapsed.TotalMilliseconds:0} мс" : "",
                 endpoint.LastCompletedUtc,
                 reason,
+                Rate(endpoint.Stats),
                 back,
                 fore));
         }
@@ -129,6 +134,9 @@ internal static class StatusSnapshotProjector
             _ => endpoint.Outcome.ToString() ?? "нет данных"
         };
     }
+
+    private static string Rate(EndpointStats stats)
+        => stats.Samples == 0 ? "—" : stats.SuccessPercent + "% / " + stats.Samples;
 }
 
 internal readonly record struct EndpointRow(
@@ -139,5 +147,6 @@ internal readonly record struct EndpointRow(
     string Delay,
     DateTimeOffset? LastCompleted,
     string Reason,
+    string Rate,
     Color Back,
     Color Fore);

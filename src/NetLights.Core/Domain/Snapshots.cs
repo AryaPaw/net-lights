@@ -13,7 +13,8 @@ public sealed record EndpointView(
     bool Fresh,
     bool Paused,
     DateTimeOffset? PauseUntilUtc,
-    bool InFlight);
+    bool InFlight,
+    EndpointStats Stats);
 
 public sealed record GroupSnapshot(
     EndpointGroup Group,
@@ -32,4 +33,5 @@ public sealed record MonitorSnapshot(
     bool UsingBuiltinPool,
     string? ConfigWarning,
     bool CapacityExhausted,
-    string? MonitorError);
+    string? MonitorError,
+    bool Paused);
