@@ -57,14 +57,14 @@ jobs:
         with:
           files: |
             artifacts/NetLights-Setup-win-x64-*.exe
-          generate_release_notes: true
+          generate_release_notes: false
           fail_on_unmatched_files: true
           make_latest: true
           body: |
-            If you are not sure, download **NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe** and run it.
+            Если не уверены, скачайте **NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe** и запустите его. Права администратора не нужны.
 
-            | What you want | Download |
+            | Что нужно | Файл |
             | --- | --- |
-            | **Install** on a typical 64-bit PC (Intel/AMD) | [NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe) |
+            | **Установка** на обычный 64-bit ПК (Intel/AMD) | [NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe) |
 
-            Needs Windows 11 x64. Self-contained build, no extra .NET runtime. Auto-update applies on Exit for the installed copy.
+            Нужен Windows 11 x64. Сборка self-contained, отдельный .NET Runtime не нужен. Автообновление ставит новый Setup при обычном выходе.
