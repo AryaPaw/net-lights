@@ -1,0 +1,87 @@
+{
+  "named_checks": [
+    {
+      "name": "six_alive_one_dead",
+      "expected": "green",
+      "actual": "green",
+      "passed": true
+    },
+    {
+      "name": "two_alive_five_dead",
+      "expected": "green",
+      "actual": "green",
+      "passed": true
+    },
+    {
+      "name": "one_alive_six_dead",
+      "expected": "yellow",
+      "actual": "yellow",
+      "passed": true
+    },
+    {
+      "name": "four_dead_three_unchecked",
+      "expected": "gray",
+      "actual": "gray",
+      "passed": true
+    },
+    {
+      "name": "all_seven_network_failed",
+      "expected": "red",
+      "actual": "red",
+      "passed": true
+    },
+    {
+      "name": "all_service_rejections",
+      "expected": "gray",
+      "actual": "gray",
+      "passed": true
+    },
+    {
+      "name": "expired_green_must_not_stick",
+      "expected": "gray",
+      "actual": "gray",
+      "passed": true
+    },
+    {
+      "name": "late_old_epoch_ignored",
+      "expected": "gray",
+      "actual": "gray",
+      "passed": true
+    },
+    {
+      "name": "future_timestamp_ignored",
+      "expected": "gray",
+      "actual": "gray",
+      "passed": true
+    },
+    {
+      "name": "old_success_cannot_override_latest_failure",
+      "expected": "red",
+      "actual": "red",
+      "passed": true
+    },
+    {
+      "name": "expired_latest_must_not_reveal_old_success",
+      "expected": "gray",
+      "actual": "gray",
+      "passed": true
+    },
+    {
+      "name": "one_cdn_not_independent_green",
+      "expected": "yellow",
+      "actual": "yellow",
+      "passed": true
+    },
+    {
+      "name": "one_cdn_not_independent_red",
+      "expected": "gray",
+      "actual": "gray",
+      "passed": true
+    }
+  ],
+  "combinations": 16384,
+  "http_semantics_checks": 32,
+  "virtual_hours": 72,
+  "passed": true,
+  "scope": "Evidence reducer only; no real outage, timers, rate limiter or tray implementation tested"
+}

@@ -1,0 +1,83 @@
+{
+  "scope": "loopback only; TLS trust supplied per curl process, not installed in Windows",
+  "cases": [
+    {
+      "mode": "ok",
+      "tcp_ok": true,
+      "https_code": 0,
+      "curl_exit": 35,
+      "https_reachable": false,
+      "expected": true,
+      "seconds": 0.003462,
+      "error": "schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e) - No credentials are available in the security package",
+      "passed": false
+    },
+    {
+      "mode": "missing",
+      "tcp_ok": true,
+      "https_code": 0,
+      "curl_exit": 35,
+      "https_reachable": false,
+      "expected": true,
+      "seconds": 0.003117,
+      "error": "schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e) - No credentials are available in the security package",
+      "passed": false
+    },
+    {
+      "mode": "limited",
+      "tcp_ok": true,
+      "https_code": 0,
+      "curl_exit": 35,
+      "https_reachable": false,
+      "expected": true,
+      "seconds": 0.004289,
+      "error": "schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e) - No credentials are available in the security package",
+      "passed": false
+    },
+    {
+      "mode": "tls-stall",
+      "tcp_ok": true,
+      "https_code": 0,
+      "curl_exit": 35,
+      "https_reachable": false,
+      "expected": false,
+      "seconds": 0.003129,
+      "error": "schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e) - No credentials are available in the security package",
+      "passed": true
+    },
+    {
+      "mode": "http-stall",
+      "tcp_ok": true,
+      "https_code": 0,
+      "curl_exit": 35,
+      "https_reachable": false,
+      "expected": false,
+      "seconds": 0.003343,
+      "error": "schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e) - No credentials are available in the security package",
+      "passed": true
+    },
+    {
+      "mode": "plain-on-tls",
+      "tcp_ok": true,
+      "https_code": 0,
+      "curl_exit": 35,
+      "https_reachable": false,
+      "expected": false,
+      "seconds": 0.003121,
+      "error": "schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e) - No credentials are available in the security package",
+      "passed": true
+    },
+    {
+      "mode": "untrusted",
+      "tcp_ok": true,
+      "https_code": 0,
+      "curl_exit": 35,
+      "https_reachable": false,
+      "expected": false,
+      "seconds": 0.004017,
+      "error": "schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e) - No credentials are available in the security package",
+      "passed": true
+    }
+  ],
+  "passed": false
+}

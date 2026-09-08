@@ -1,0 +1,422 @@
+[
+  {
+    "name": "yandex",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "yandex",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "yandex",
+    "phase": "balanced-2s",
+    "n": 9,
+    "ok": 9,
+    "p50": 0.125,
+    "p95": 0.14,
+    "max_s": 0.14,
+    "errors": []
+  },
+  {
+    "name": "mail",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "mail",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "mail",
+    "phase": "balanced-2s",
+    "n": 9,
+    "ok": 9,
+    "p50": 0.093,
+    "p95": 0.109,
+    "max_s": 0.109,
+    "errors": []
+  },
+  {
+    "name": "rt",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "rt",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "rt",
+    "phase": "balanced-2s",
+    "n": 9,
+    "ok": 9,
+    "p50": 0.281,
+    "p95": 0.281,
+    "max_s": 0.281,
+    "errors": []
+  },
+  {
+    "name": "selectel",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "selectel",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "selectel",
+    "phase": "balanced-2s",
+    "n": 9,
+    "ok": 9,
+    "p50": 0.14,
+    "p95": 0.14,
+    "max_s": 0.14,
+    "errors": []
+  },
+  {
+    "name": "beeline",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "beeline",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "beeline",
+    "phase": "balanced-2s",
+    "n": 8,
+    "ok": 8,
+    "p50": 0.14,
+    "p95": 0.172,
+    "max_s": 0.172,
+    "errors": []
+  },
+  {
+    "name": "megafon",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "megafon",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "megafon",
+    "phase": "balanced-2s",
+    "n": 8,
+    "ok": 8,
+    "p50": 0.188,
+    "p95": 0.265,
+    "max_s": 0.265,
+    "errors": []
+  },
+  {
+    "name": "timeweb",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "timeweb",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "timeweb",
+    "phase": "balanced-2s",
+    "n": 8,
+    "ok": 8,
+    "p50": 0.109,
+    "p95": 0.359,
+    "max_s": 0.359,
+    "errors": []
+  },
+  {
+    "name": "cloudflare",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "cloudflare",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "cloudflare",
+    "phase": "balanced-2s",
+    "n": 9,
+    "ok": 9,
+    "p50": 0.312,
+    "p95": 0.343,
+    "max_s": 0.343,
+    "errors": []
+  },
+  {
+    "name": "mozilla",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "mozilla",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "mozilla",
+    "phase": "balanced-2s",
+    "n": 9,
+    "ok": 9,
+    "p50": 0.312,
+    "p95": 0.468,
+    "max_s": 0.468,
+    "errors": []
+  },
+  {
+    "name": "fedora",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "fedora",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "fedora",
+    "phase": "balanced-2s",
+    "n": 9,
+    "ok": 9,
+    "p50": 0.656,
+    "p95": 0.859,
+    "max_s": 0.859,
+    "errors": []
+  },
+  {
+    "name": "debian",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "debian",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "debian",
+    "phase": "balanced-2s",
+    "n": 9,
+    "ok": 9,
+    "p50": 0.765,
+    "p95": 1.078,
+    "max_s": 1.078,
+    "errors": []
+  },
+  {
+    "name": "arch",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "arch",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "arch",
+    "phase": "balanced-2s",
+    "n": 8,
+    "ok": 8,
+    "p50": 0.406,
+    "p95": 0.437,
+    "max_s": 0.437,
+    "errors": []
+  },
+  {
+    "name": "github",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "github",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "github",
+    "phase": "balanced-2s",
+    "n": 8,
+    "ok": 8,
+    "p50": 0.297,
+    "p95": 0.36,
+    "max_s": 0.36,
+    "errors": []
+  },
+  {
+    "name": "wikimedia",
+    "phase": "baseline-4s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "wikimedia",
+    "phase": "fast-1.5s",
+    "n": 0,
+    "ok": 0,
+    "p50": null,
+    "p95": null,
+    "max_s": null,
+    "errors": []
+  },
+  {
+    "name": "wikimedia",
+    "phase": "balanced-2s",
+    "n": 8,
+    "ok": 8,
+    "p50": 0.328,
+    "p95": 1.375,
+    "max_s": 1.375,
+    "errors": []
+  }
+]

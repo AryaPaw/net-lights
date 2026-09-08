@@ -1,0 +1,13 @@
+﻿utc,round,name,url,ip,https_code,https_exit,https_seconds,https_error,https_reachable,icmp_status,icmp_ms,tcp_status,tcp_seconds
+2026-09-06T20:03:57.262870+00:00,1,selectel,https://selectel.ru/robots.txt,85.119.149.3,200,0,0.095853,,True,Success,5,connected,0.031
+2026-09-06T20:03:58.373522+00:00,1,yandex,https://yandex.ru/robots.txt,77.88.55.88,200,0,0.086595,,True,Success,12,connected,0.016
+2026-09-06T20:03:59.368153+00:00,1,mozilla,https://firefox-portal-detection.com/generate_204,151.101.65.91,204,0,0.257595,,True,Success,23,connected,0.016
+2026-09-06T20:04:00.555387+00:00,1,cloudflare,https://cp.cloudflare.com/generate_204,104.16.132.229,204,0,0.283906,,True,Success,45,connected,0.016
+2026-09-06T20:04:01.804842+00:00,1,google,https://connectivitycheck.gstatic.com/generate_204,142.251.20.94,204,0,0.241821,,True,Success,46,connected,0.016
+2026-09-06T20:04:02.984244+00:00,1,apple,https://www.apple.com/library/test/success.html,23.209.209.61,200,0,0.241336,,True,Success,41,connected,0.016
+2026-09-06T20:04:04.167657+00:00,2,selectel,https://selectel.ru/robots.txt,85.119.149.3,200,0,0.090035,,True,Success,6,connected,0.0
+2026-09-06T20:04:05.151344+00:00,2,yandex,https://yandex.ru/robots.txt,77.88.55.88,200,0,0.079896,,True,Success,12,connected,0.016
+2026-09-06T20:04:06.116122+00:00,2,mozilla,https://firefox-portal-detection.com/generate_204,151.101.65.91,204,0,0.250883,,True,Success,23,connected,0.0
+2026-09-06T20:04:07.240123+00:00,2,cloudflare,https://cp.cloudflare.com/generate_204,104.16.132.229,204,0,0.296422,,True,Success,44,connected,0.0
+2026-09-06T20:04:08.440611+00:00,2,google,https://connectivitycheck.gstatic.com/generate_204,142.251.20.94,204,0,0.278966,,True,Success,47,connected,0.0
+2026-09-06T20:04:09.628137+00:00,2,apple,https://www.apple.com/library/test/success.html,23.209.209.61,200,0,0.256154,,True,Success,42,connected,0.0

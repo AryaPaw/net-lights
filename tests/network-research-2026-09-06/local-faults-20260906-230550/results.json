@@ -1,0 +1,90 @@
+{
+  "scope": "loopback only; TLS trust supplied per curl process, not installed in Windows",
+  "cases": [
+    {
+      "mode": "ok",
+      "tcp_ok": true,
+      "https_code": 204,
+      "curl_exit": 0,
+      "https_reachable": true,
+      "expected": true,
+      "seconds": 0.055721,
+      "error": null,
+      "expected_exit": 0,
+      "passed": true
+    },
+    {
+      "mode": "missing",
+      "tcp_ok": true,
+      "https_code": 404,
+      "curl_exit": 0,
+      "https_reachable": true,
+      "expected": true,
+      "seconds": 0.052001,
+      "error": null,
+      "expected_exit": 0,
+      "passed": true
+    },
+    {
+      "mode": "limited",
+      "tcp_ok": true,
+      "https_code": 429,
+      "curl_exit": 0,
+      "https_reachable": true,
+      "expected": true,
+      "seconds": 0.055469,
+      "error": null,
+      "expected_exit": 0,
+      "passed": true
+    },
+    {
+      "mode": "tls-stall",
+      "tcp_ok": true,
+      "https_code": 0,
+      "curl_exit": 28,
+      "https_reachable": false,
+      "expected": false,
+      "seconds": 1.007688,
+      "error": "Connection timed out after 1007 milliseconds",
+      "expected_exit": 28,
+      "passed": true
+    },
+    {
+      "mode": "http-stall",
+      "tcp_ok": true,
+      "https_code": 0,
+      "curl_exit": 28,
+      "https_reachable": false,
+      "expected": false,
+      "seconds": 1.013263,
+      "error": "Operation timed out after 1012 milliseconds with 0 bytes received",
+      "expected_exit": 28,
+      "passed": true
+    },
+    {
+      "mode": "plain-on-tls",
+      "tcp_ok": true,
+      "https_code": 0,
+      "curl_exit": 35,
+      "https_reachable": false,
+      "expected": false,
+      "seconds": 0.005654,
+      "error": "Recv failure: Connection was aborted",
+      "expected_exit": 35,
+      "passed": true
+    },
+    {
+      "mode": "untrusted",
+      "tcp_ok": true,
+      "https_code": 0,
+      "curl_exit": 60,
+      "https_reachable": false,
+      "expected": false,
+      "seconds": 0.014559,
+      "error": "schannel: SEC_E_UNTRUSTED_ROOT (0x80090325) - The certificate chain was issued by an authority that is not trusted.",
+      "expected_exit": 60,
+      "passed": true
+    }
+  ],
+  "passed": true
+}

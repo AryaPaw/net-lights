@@ -1,0 +1,20 @@
+{
+  "document_version": "1.1",
+  "generated_utc": "2026-09-07T08:35:00Z",
+  "sdk": "10.0.204",
+  "runtime": "10.0.8",
+  "windows": "10.0.26200",
+  "base_git_sha": "b2fb55d47d931f3eac58ee164c3991a0b84142d2",
+  "documents": {
+    "IMPLEMENTATION-PLAN.md": "a6d2a1f1a03936ed985df29fb21a0dd675dfc23768381fc7a25c5de7679065fa",
+    "TEST-MATRIX.md": "bfe6b25c193a2124a0b2b7bbec87dc5288c3ef34208919f702a41382a2b65a18",
+    "AGENT-PROMPT.md": "b9d08ae3cba487c089f70d86efd4f289113f0c1fbe8c3b937e557a626f951d0e"
+  },
+  "publish_zip": "artifacts/NetLights-win-x64.zip",
+  "publish_zip_sha256": "e777a2a056b29f0cadc48461ccf7cebad4a7adcea9c94bd226d99c670c41a4cb",
+  "notes": [
+    "T58 NOT RUN by owner decision",
+    "Windows Sandbox host processes started; in-sandbox UI not independently captured",
+    "Research files under tests/network-research-2026-09-06 were not deleted"
+  ]
+}

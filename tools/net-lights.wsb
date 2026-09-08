@@ -1,0 +1,13 @@
+<Configuration>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>artifacts/publish</HostFolder>
+      <SandboxFolder>C:\NetLights</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>C:\NetLights\NetLights.exe</Command>
+  </LogonCommand>
+  <vGPU>Enable</vGPU>
+</Configuration>
