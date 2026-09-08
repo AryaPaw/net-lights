@@ -61,6 +61,8 @@ public sealed class MonitorHost : IAsyncDisposable
 
     public void RequestCheckNow() => PostCritical(() => Dispatch(_kernel.RequestCheckNow()));
 
+    public void SetPaused(bool paused) => PostCritical(() => Dispatch(_kernel.SetPaused(paused)));
+
     public void NotifyNetworkChange() => PostCritical(() => Dispatch(_kernel.BeginNewEpoch("network-change")));
 
     public void NotifyUnavailable(bool unavailable) => PostCritical(() => Dispatch(_kernel.SetNetworkUnavailable(unavailable)));
@@ -237,7 +239,7 @@ public sealed class MonitorHost : IAsyncDisposable
                 MonitorConstants.ProbeDeadline,
                 runtime.Cts.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested || runtime.Epoch != _kernel.Epoch)
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested || runtime.Epoch != _kernel.Epoch || runtime.RequestedCancel)
         {
             observation = Cancelled(runtime, ProbeOutcome.Cancelled, StructuredFailureKind.Cancelled);
         }
@@ -286,6 +288,7 @@ public sealed class MonitorHost : IAsyncDisposable
         {
             if (_attempts.TryGetValue(attemptId, out AttemptRuntime? runtime))
             {
+                runtime.RequestedCancel = true;
                 runtime.Cts.Cancel();
             }
         }
@@ -423,5 +426,6 @@ public sealed class MonitorHost : IAsyncDisposable
         public long Started { get; }
         public CancellationTokenSource Cts { get; }
         public Task Task { get; set; }
+        public bool RequestedCancel { get; set; }
     }
 }

@@ -6,12 +6,13 @@ namespace NetLights.App;
 
 internal sealed class AppSettings
 {
-    public bool AutoStart { get; set; }
+    public bool AutoStart { get; set; } = true;
     public bool AutoUpdateEnabled { get; set; } = true;
+    public int SettingsVersion { get; set; }
     public int WindowX { get; set; } = 80;
     public int WindowY { get; set; } = 80;
     public int WindowWidth { get; set; } = 1040;
-    public int WindowHeight { get; set; } = 720;
+    public int WindowHeight { get; set; } = 800;
 }
 
 internal enum SettingsLoadStatus
@@ -64,9 +65,9 @@ internal static class SettingsStore
                 settings.WindowWidth = 1040;
             }
 
-            if (settings.WindowHeight < 680)
+            if (settings.WindowHeight < 720 || settings.WindowHeight > 840)
             {
-                settings.WindowHeight = 720;
+                settings.WindowHeight = 800;
             }
 
             return (settings, SettingsLoadStatus.Loaded);

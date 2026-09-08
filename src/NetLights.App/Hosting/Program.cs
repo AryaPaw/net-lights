@@ -8,15 +8,20 @@ internal static class Program
     private static void Main()
     {
         Mutex? mutex = null;
-        bool created;
+        bool created = false;
         try
         {
             mutex = new Mutex(true, MutexName, out created);
         }
-        catch (AbandonedMutexException)
+        catch (AbandonedMutexException ex)
         {
-            mutex = new Mutex(true, MutexName, out created);
+            mutex = ex.Mutex;
             created = true;
+        }
+
+        if (mutex is null)
+        {
+            return;
         }
 
         using (mutex)

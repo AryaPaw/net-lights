@@ -92,12 +92,24 @@ public sealed class UiRendererTests
         var empty = new MonitorKernel(new MonitorConfiguration { Endpoints = BuiltinEndpoints.All }, TimeProvider.System).Snapshot;
         form.Bind(empty);
         int binds = form.DataBindCount;
-        for (int i = 0; i < 40; i++)
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < 1000; i++)
         {
             form.RefreshAges();
         }
 
+        sw.Stop();
         Assert.Equal(binds, form.DataBindCount);
         Assert.Equal(14, StatusSnapshotProjector.Rows(empty).Count);
+        Assert.True(sw.ElapsedMilliseconds < 2000, $"1000 clock ticks took {sw.ElapsedMilliseconds} ms");
+    }
+
+    [Fact]
+    public void Tooltip_IncludesPauseMarker()
+    {
+        var kernel = new MonitorKernel(new MonitorConfiguration { Endpoints = BuiltinEndpoints.All }, TimeProvider.System);
+        Assert.DoesNotContain("пауза", DiagnosticExport.FormatTooltip(kernel.Snapshot), StringComparison.Ordinal);
+        kernel.SetPaused(true);
+        Assert.Contains("пауза", DiagnosticExport.FormatTooltip(kernel.Snapshot), StringComparison.Ordinal);
     }
 }
