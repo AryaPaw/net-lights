@@ -109,10 +109,6 @@ internal sealed class NetLightsContext : ApplicationContext
             {
                 CheckSnapshotAge();
             }
-            if (_settings.AutoUpdateEnabled)
-            {
-                _ = _updates.CheckInBackgroundAsync(_diagnosticsCts.Token);
-            }
         };
         _heartbeat.Start();
         NetworkChange.NetworkAvailabilityChanged += OnNetwork;
@@ -120,6 +116,10 @@ internal sealed class NetLightsContext : ApplicationContext
         Microsoft.Win32.SystemEvents.PowerModeChanged += OnPower;
         _taskbar = new TaskbarRestartWindow(RestoreIcon);
         _host.Start();
+        if (_settings.AutoUpdateEnabled)
+        {
+            _ = _updates.CheckInBackgroundAsync(_diagnosticsCts.Token);
+        }
         ShowStatus();
         if (!string.IsNullOrEmpty(warning))
         {

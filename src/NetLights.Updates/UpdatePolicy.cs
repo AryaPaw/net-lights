@@ -4,7 +4,6 @@ public sealed class UpdatePolicy
 {
     public const string Owner = "AryaPaw";
     public const string Repository = "net-lights";
-    public static readonly TimeSpan CheckInterval = TimeSpan.FromHours(24);
     public const long MaxManifestBytes = 64 * 1024;
     public const long MaxInstallerBytes = 80 * 1024 * 1024;
 
