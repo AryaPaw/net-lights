@@ -94,7 +94,7 @@ internal sealed class NetLightsContext : ApplicationContext
             Visible = true,
             ContextMenuStrip = _menu,
             Text = DiagnosticExport.FormatTooltip(_snapshot),
-            Icon = _renderer.Get(_snapshot.Ru.Availability, _snapshot.Vpn.Availability, iconSize)
+            Icon = _renderer.Get(_snapshot.Ru.Availability, _snapshot.Vpn.Availability, iconSize, _snapshot.Paused)
         };
         _icon.DoubleClick += (_, _) => ShowStatus();
         _heartbeat = new System.Windows.Forms.Timer { Interval = 1000 };
@@ -141,7 +141,7 @@ internal sealed class NetLightsContext : ApplicationContext
     {
         _snapshot = snapshot;
         int iconSize = _renderer.SystemSmallIconSize();
-        Icon icon = _renderer.Get(snapshot.Ru.Availability, snapshot.Vpn.Availability, iconSize);
+        Icon icon = _renderer.Get(snapshot.Ru.Availability, snapshot.Vpn.Availability, iconSize, snapshot.Paused);
         if (!ReferenceEquals(_icon.Icon, icon))
         {
             _icon.Icon = icon;

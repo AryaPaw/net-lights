@@ -14,8 +14,10 @@ internal sealed class TrayIconRenderer : IDisposable
         [GroupAvailability.Unknown] = Color.FromArgb(255, 188, 190, 192)
     };
 
+    private static readonly Color Paused = Color.FromArgb(255, 74, 144, 196);
+
     private static readonly int[] Sizes = [16, 20, 24, 32];
-    private readonly Dictionary<(GroupAvailability Left, GroupAvailability Right, int Size), Icon> _cache = [];
+    private readonly Dictionary<(GroupAvailability Left, GroupAvailability Right, int Size, bool Paused), Icon> _cache = [];
 
     public int SystemSmallIconSize()
     {
@@ -29,16 +31,16 @@ internal sealed class TrayIconRenderer : IDisposable
         return Sizes.MinBy(s => Math.Abs(s - px));
     }
 
-    public Icon Get(GroupAvailability left, GroupAvailability right, int size)
+    public Icon Get(GroupAvailability left, GroupAvailability right, int size, bool paused = false)
     {
         int nearest = Sizes.MinBy(s => Math.Abs(s - size));
-        var key = (left, right, nearest);
+        var key = (left, right, nearest, paused);
         if (_cache.TryGetValue(key, out Icon? icon))
         {
             return icon;
         }
 
-        icon = Render(left, right, nearest);
+        icon = Render(left, right, nearest, paused);
         _cache[key] = icon;
         return icon;
     }
@@ -53,18 +55,18 @@ internal sealed class TrayIconRenderer : IDisposable
         _cache.Clear();
     }
 
-    public static Bitmap RenderBitmap(GroupAvailability left, GroupAvailability right, int size)
+    public static Bitmap RenderBitmap(GroupAvailability left, GroupAvailability right, int size, bool paused = false)
     {
         if (size <= 16)
         {
-            using Bitmap hi = Draw(left, right, size * 2);
+            using Bitmap hi = Draw(left, right, size * 2, paused);
             return Downsample(hi, size);
         }
 
-        return Draw(left, right, size);
+        return Draw(left, right, size, paused);
     }
 
-    private static Bitmap Draw(GroupAvailability left, GroupAvailability right, int size)
+    private static Bitmap Draw(GroupAvailability left, GroupAvailability right, int size, bool paused)
     {
         var bmp = new Bitmap(size, size);
         using var g = Graphics.FromImage(bmp);
@@ -76,8 +78,10 @@ internal sealed class TrayIconRenderer : IDisposable
         var bounds = new RectangleF(pad, pad, diameter, diameter);
         int gap = size >= 24 ? 3 : 2;
         float mid = bounds.X + (bounds.Width / 2f);
-        using var leftBrush = new SolidBrush(Colors[left]);
-        using var rightBrush = new SolidBrush(Colors[right]);
+        Color leftColor = paused ? Paused : Colors[left];
+        Color rightColor = paused ? Paused : Colors[right];
+        using var leftBrush = new SolidBrush(leftColor);
+        using var rightBrush = new SolidBrush(rightColor);
         g.FillPie(leftBrush, bounds, 90, 180);
         g.FillPie(rightBrush, bounds, 270, 180);
         using var clear = new SolidBrush(Color.Transparent);
@@ -97,9 +101,9 @@ internal sealed class TrayIconRenderer : IDisposable
         return dest;
     }
 
-    private static Icon Render(GroupAvailability left, GroupAvailability right, int size)
+    private static Icon Render(GroupAvailability left, GroupAvailability right, int size, bool paused)
     {
-        using Bitmap bmp = RenderBitmap(left, right, size);
+        using Bitmap bmp = RenderBitmap(left, right, size, paused);
         IntPtr handle = bmp.GetHicon();
         using var temp = Icon.FromHandle(handle);
         var clone = (Icon)temp.Clone();

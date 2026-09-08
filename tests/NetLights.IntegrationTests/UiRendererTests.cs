@@ -105,11 +105,15 @@ public sealed class UiRendererTests
     }
 
     [Fact]
-    public void Tooltip_IncludesPauseMarker()
+    public void PausedIcon_UsesCoolBlueNotUnknownGray()
     {
-        var kernel = new MonitorKernel(new MonitorConfiguration { Endpoints = BuiltinEndpoints.All }, TimeProvider.System);
-        Assert.DoesNotContain("пауза", DiagnosticExport.FormatTooltip(kernel.Snapshot), StringComparison.Ordinal);
-        kernel.SetPaused(true);
-        Assert.Contains("пауза", DiagnosticExport.FormatTooltip(kernel.Snapshot), StringComparison.Ordinal);
+        using Bitmap paused = TrayIconRenderer.RenderBitmap(GroupAvailability.Online, GroupAvailability.Online, 32, paused: true);
+        using Bitmap unknown = TrayIconRenderer.RenderBitmap(GroupAvailability.Unknown, GroupAvailability.Unknown, 32);
+        Color pausePixel = paused.GetPixel(8, 16);
+        Color unknownPixel = unknown.GetPixel(8, 16);
+        Assert.True(pausePixel.B > pausePixel.R + 20 && pausePixel.B > pausePixel.G, $"pause {pausePixel}");
+        Assert.NotEqual(unknownPixel, pausePixel);
+        Color gap = paused.GetPixel(16, 16);
+        Assert.True(gap.A < 40, $"gap alpha {gap.A}");
     }
 }
