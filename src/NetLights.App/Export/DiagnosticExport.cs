@@ -1,6 +1,5 @@
 using System.IO.Compression;
 using System.Reflection;
-using System.Text;
 using System.Text.Json;
 using NetLights.Core;
 
@@ -12,36 +11,55 @@ internal static class DiagnosticExport
     {
         string stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss");
         string dir = Path.Combine(Path.GetTempPath(), "NetLights-export-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(dir);
-        File.WriteAllText(Path.Combine(dir, "snapshot.json"), JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true }));
-        File.WriteAllText(Path.Combine(dir, "events.json"), JsonSerializer.Serialize(log.Entries, new JsonSerializerOptions { WriteIndented = true }));
-        var versions = new
-        {
-            product = Assembly.GetExecutingAssembly().GetName().Version?.ToString(),
-            runtime = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
-            os = Environment.OSVersion.VersionString,
-            configWarning
-        };
-        File.WriteAllText(Path.Combine(dir, "versions.json"), JsonSerializer.Serialize(versions, new JsonSerializerOptions { WriteIndented = true }));
-        string history = StateHistoryStore.FilePath;
-        if (File.Exists(history))
-        {
-            File.Copy(history, Path.Combine(dir, "state-history.jsonl"), true);
-        }
         string zip = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), $"net-lights-export-{stamp}.zip");
-        if (File.Exists(zip))
+        Directory.CreateDirectory(dir);
+        try
         {
-            File.Delete(zip);
-        }
+            File.WriteAllText(Path.Combine(dir, "snapshot.json"), JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(Path.Combine(dir, "events.json"), JsonSerializer.Serialize(log.Snapshot(), new JsonSerializerOptions { WriteIndented = true }));
+            var versions = new
+            {
+                product = ProductInfo.Version,
+                runtime = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
+                os = Environment.OSVersion.VersionString,
+                configWarning
+            };
+            File.WriteAllText(Path.Combine(dir, "versions.json"), JsonSerializer.Serialize(versions, new JsonSerializerOptions { WriteIndented = true }));
+            string history = StateHistoryStore.FilePath;
+            if (File.Exists(history))
+            {
+                File.Copy(history, Path.Combine(dir, "state-history.jsonl"), true);
+            }
 
-        ZipFile.CreateFromDirectory(dir, zip);
-        if (!File.Exists(zip) || new FileInfo(zip).Length == 0)
+            string tmpZip = zip + ".partial";
+            if (File.Exists(tmpZip))
+            {
+                File.Delete(tmpZip);
+            }
+
+            ZipFile.CreateFromDirectory(dir, tmpZip);
+            if (!File.Exists(tmpZip) || new FileInfo(tmpZip).Length == 0)
+            {
+                throw new IOException("Архив не записан.");
+            }
+
+            File.Move(tmpZip, zip, true);
+            return zip;
+        }
+        finally
         {
-            throw new IOException("Архив не записан.");
+            try
+            {
+                if (Directory.Exists(dir))
+                {
+                    Directory.Delete(dir, true);
+                }
+            }
+            catch (Exception)
+            {
+                // Best-effort cleanup of the temporary export directory
+            }
         }
-
-        Directory.Delete(dir, true);
-        return zip;
     }
 
     public static string FormatTooltip(MonitorSnapshot snapshot)

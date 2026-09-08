@@ -7,10 +7,19 @@ namespace NetLights.App;
 internal sealed class AppSettings
 {
     public bool AutoStart { get; set; }
+    public bool AutoUpdateEnabled { get; set; } = true;
     public int WindowX { get; set; } = 80;
     public int WindowY { get; set; } = 80;
     public int WindowWidth { get; set; } = 1040;
     public int WindowHeight { get; set; } = 720;
+}
+
+internal enum SettingsLoadStatus
+{
+    Loaded,
+    Absent,
+    Corrupt,
+    IoError
 }
 
 internal static class SettingsStore
@@ -22,7 +31,7 @@ internal static class SettingsStore
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
-    public static string RootDirectory { get; } = Path.Combine(
+    public static string RootDirectory { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "NetLights");
 
@@ -31,14 +40,25 @@ internal static class SettingsStore
 
     public static AppSettings Load()
     {
+        (AppSettings settings, _) = LoadDetailed();
+        return settings;
+    }
+
+    public static (AppSettings Settings, SettingsLoadStatus Status) LoadDetailed()
+    {
         try
         {
             if (!File.Exists(SettingsPath))
             {
-                return new AppSettings();
+                return (new AppSettings(), SettingsLoadStatus.Absent);
             }
 
-            AppSettings settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath), Options) ?? new AppSettings();
+            AppSettings? settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath), Options);
+            if (settings is null)
+            {
+                return (new AppSettings(), SettingsLoadStatus.Corrupt);
+            }
+
             if (settings.WindowWidth < 980)
             {
                 settings.WindowWidth = 1040;
@@ -49,11 +69,15 @@ internal static class SettingsStore
                 settings.WindowHeight = 720;
             }
 
-            return settings;
+            return (settings, SettingsLoadStatus.Loaded);
         }
-        catch
+        catch (JsonException)
         {
-            return new AppSettings();
+            return (new AppSettings(), SettingsLoadStatus.Corrupt);
+        }
+        catch (IOException)
+        {
+            return (new AppSettings(), SettingsLoadStatus.IoError);
         }
     }
 
@@ -81,11 +105,17 @@ internal static class SettingsStore
                 return (WarnBuiltin("Файл адресов пуст."), "Файл адресов пуст, используется встроенный набор.");
             }
 
-            var parsed = stored.Select(s => new EndpointDefinition(
-                s.Id,
-                s.Group.Equals("vpn", StringComparison.OrdinalIgnoreCase) ? EndpointGroup.Vpn : EndpointGroup.Ru,
-                new Uri(s.Uri),
-                s.InfrastructureId)).ToList();
+            var parsed = new List<EndpointDefinition>();
+            foreach (StoredEndpoint item in stored)
+            {
+                if (!TryParseGroup(item.Group, out EndpointGroup group))
+                {
+                    return (WarnBuiltin("Неизвестная группа."), "Неизвестная группа в файле адресов, используется встроенный набор.");
+                }
+
+                parsed.Add(new EndpointDefinition(item.Id, group, new Uri(item.Uri), item.InfrastructureId));
+            }
+
             EndpointPoolValidation validation = EndpointPoolValidator.Validate(parsed);
             if (!validation.IsValid)
             {
@@ -98,6 +128,24 @@ internal static class SettingsStore
         {
             return (WarnBuiltin(ex.Message), "Некорректный файл адресов, используется встроенный набор.");
         }
+    }
+
+    private static bool TryParseGroup(string value, out EndpointGroup group)
+    {
+        if (value.Equals("ru", StringComparison.OrdinalIgnoreCase) || value.Equals("рф", StringComparison.OrdinalIgnoreCase))
+        {
+            group = EndpointGroup.Ru;
+            return true;
+        }
+
+        if (value.Equals("vpn", StringComparison.OrdinalIgnoreCase))
+        {
+            group = EndpointGroup.Vpn;
+            return true;
+        }
+
+        group = EndpointGroup.Ru;
+        return false;
     }
 
     private static MonitorConfiguration WarnBuiltin(string warning)

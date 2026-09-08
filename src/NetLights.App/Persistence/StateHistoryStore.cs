@@ -10,6 +10,8 @@ internal static class StateHistoryStore
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
+    private static readonly object Gate = new();
+    private static DateTimeOffset _lastPrune = DateTimeOffset.MinValue;
 
     public static string FilePath => Path.Combine(SettingsStore.RootDirectory, "state-history.jsonl");
 
@@ -17,12 +19,27 @@ internal static class StateHistoryStore
     {
         Directory.CreateDirectory(SettingsStore.RootDirectory);
         var record = new HistoryRecord(utc, ru.ToString(), vpn.ToString());
-        File.AppendAllText(FilePath, JsonSerializer.Serialize(record, Options) + Environment.NewLine, Encoding.UTF8);
-        Prune();
+        lock (Gate)
+        {
+            File.AppendAllText(FilePath, JsonSerializer.Serialize(record, Options) + Environment.NewLine, Encoding.UTF8);
+            if (DateTimeOffset.UtcNow - _lastPrune > TimeSpan.FromMinutes(15))
+            {
+                PruneUnlocked();
+            }
+        }
     }
 
     public static void Prune()
     {
+        lock (Gate)
+        {
+            PruneUnlocked();
+        }
+    }
+
+    private static void PruneUnlocked()
+    {
+        _lastPrune = DateTimeOffset.UtcNow;
         if (!File.Exists(FilePath))
         {
             return;
@@ -43,7 +60,7 @@ internal static class StateHistoryStore
             {
                 record = JsonSerializer.Deserialize<HistoryRecord>(line, Options);
             }
-            catch
+            catch (JsonException)
             {
                 continue;
             }
