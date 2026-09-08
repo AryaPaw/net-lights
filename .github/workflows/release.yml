@@ -37,8 +37,8 @@ jobs:
       - name: Publish
         run: |
           $v = "${{ steps.ver.outputs.version }}"
-          dotnet publish src/NetLights.App/NetLights.App.csproj -c Release -r win-x64 --self-contained true -p:Version=$v -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o artifacts/publish
-          dotnet publish src/NetLights.UpdateAgent/NetLights.UpdateAgent.csproj -c Release -r win-x64 --self-contained true -p:Version=$v -p:PublishSingleFile=true -p:DebugType=none -o artifacts/publish
+          dotnet publish src/NetLights.App/NetLights.App.csproj -c Release -r win-x64 --self-contained true -p:Version=$v -p:RestoreLockedMode=false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o artifacts/publish
+          dotnet publish src/NetLights.UpdateAgent/NetLights.UpdateAgent.csproj -c Release -r win-x64 --self-contained true -p:Version=$v -p:RestoreLockedMode=false -p:PublishSingleFile=true -p:DebugType=none -o artifacts/publish
           mkdir artifacts/symbols | Out-Null
       - name: Zip portable
         shell: pwsh
