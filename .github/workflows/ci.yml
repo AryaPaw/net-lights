@@ -23,11 +23,22 @@ jobs:
       - name: Build
         run: dotnet build NetLights.slnx -c Release --no-restore
       - name: Unit tests
-        run: dotnet test tests/NetLights.UnitTests/NetLights.UnitTests.csproj -c Release --no-build --collect:"XPlat Code Coverage" --results-directory TestResults
+        run: >
+          dotnet test tests/NetLights.UnitTests/NetLights.UnitTests.csproj -c Release --no-build
+          --collect:"XPlat Code Coverage" --results-directory TestResults
+          -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Exclude=[NetLights.TestSupport]*
       - name: Integration tests
         run: dotnet test tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj -c Release --no-build --results-directory TestResults
       - name: Soak smoke
         run: dotnet test tests/NetLights.SoakTests/NetLights.SoakTests.csproj -c Release --no-build
+      - name: Coverage gate
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem TestResults -Recurse -Filter coverage.cobertura.xml | Sort-Object LastWriteTime -Descending
+          if (-not $files) { throw "coverage.cobertura.xml not found" }
+          $xml = [xml](Get-Content $files[0].FullName)
+          $line = [double]$xml.coverage.'line-rate'
+          if ($line -lt 0.80) { throw "Line coverage $line is below 0.80" }
       - name: Publish
         run: |
           dotnet publish src/NetLights.App/NetLights.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o artifacts/publish
