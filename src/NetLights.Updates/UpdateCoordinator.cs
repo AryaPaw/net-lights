@@ -1,6 +1,6 @@
 namespace NetLights.Updates;
 
-public sealed class UpdateCoordinator
+public sealed class UpdateCoordinator : IDisposable
 {
     private readonly GitHubReleaseFeed _feed;
     private readonly PendingUpdateStore _store;
@@ -15,7 +15,11 @@ public sealed class UpdateCoordinator
         _feed = feed;
         _store = store;
         _currentVersion = currentVersion;
-        _http = downloadHandler is null ? new HttpClient() : new HttpClient(downloadHandler, disposeHandler: true);
+        _http = new HttpClient(downloadHandler ?? new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseCookies = false
+        }, disposeHandler: true);
         _http.Timeout = TimeSpan.FromMinutes(5);
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("NetLights-Updater");
     }
@@ -39,7 +43,7 @@ public sealed class UpdateCoordinator
             return Task.CompletedTask;
         }
 
-        return Task.Run(() => CheckAsync(cancellationToken), cancellationToken);
+        return Task.Run(() => CheckAsync(cancellationToken));
     }
 
     public async Task CheckAsync(CancellationToken cancellationToken)
@@ -66,8 +70,7 @@ public sealed class UpdateCoordinator
             }
 
             GitHubAsset? asset = release.Assets.FirstOrDefault(a =>
-                a.Name.StartsWith("NetLights-Setup-win-x64-", StringComparison.OrdinalIgnoreCase)
-                && a.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+                UpdatePolicy.SafeInstallerFileName(a.Name) is not null);
             if (asset?.BrowserDownloadUrl is null || !UpdatePolicy.IsAllowedAssetUrl(asset.BrowserDownloadUrl))
             {
                 return;
@@ -78,22 +81,47 @@ public sealed class UpdateCoordinator
                 return;
             }
 
+            string? fileName = UpdatePolicy.SafeInstallerFileName(asset.Name);
             string version = UpdatePolicy.Normalize(release.TagName);
+            if (fileName is null
+                || version.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
+                || version.Contains("..", StringComparison.Ordinal)
+                || !Version.TryParse(version, out _))
+            {
+                return;
+            }
+
             string dir = Path.Combine(_store.Root, version);
-            Directory.CreateDirectory(dir);
-            string dest = Path.Combine(dir, asset.Name);
+            string dest = Path.Combine(dir, fileName);
             string partial = dest + ".partial";
+            if (!UpdatePolicy.IsInsideRoot(_store.Root, dest) || !UpdatePolicy.IsInsideRoot(_store.Root, partial))
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(dir);
             await DownloadAsync(asset.BrowserDownloadUrl, partial, asset.Size, cancellationToken).ConfigureAwait(false);
-            await using FileStream verify = File.OpenRead(partial);
-            string hash = IntegrityVerifier.Sha256Hex(verify);
+            cancellationToken.ThrowIfCancellationRequested();
+            string hash;
+            await using (FileStream verify = File.OpenRead(partial))
+            {
+                hash = IntegrityVerifier.Sha256Hex(verify);
+            }
+
             string? digest = IntegrityVerifier.DigestSha256(asset.Digest);
-            if (digest is not null && !IntegrityVerifier.Matches(digest, hash))
+            if (digest is null || !IntegrityVerifier.Matches(digest, hash))
             {
                 File.Delete(partial);
                 return;
             }
 
+            if (File.Exists(dest))
+            {
+                File.Delete(dest);
+            }
+
             File.Move(partial, dest, true);
+            cancellationToken.ThrowIfCancellationRequested();
             _store.WritePending(new PendingUpdate(version, dest, hash, DateTimeOffset.UtcNow));
         }
         catch (Exception)
@@ -108,8 +136,13 @@ public sealed class UpdateCoordinator
 
     private async Task DownloadAsync(Uri url, string partialPath, long size, CancellationToken cancellationToken)
     {
+        if (File.Exists(partialPath))
+        {
+            File.Delete(partialPath);
+        }
+
         using FileStream output = new(partialPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        using HttpResponseMessage response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        using HttpResponseMessage response = await GetFollowingRedirectsAsync(url, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         await using Stream input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         byte[] buffer = new byte[81920];
@@ -126,6 +159,54 @@ public sealed class UpdateCoordinator
             await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
         }
     }
+
+    private async Task<HttpResponseMessage> GetFollowingRedirectsAsync(Uri url, CancellationToken cancellationToken)
+    {
+        Uri current = url;
+        for (int hop = 0; hop <= 5; hop++)
+        {
+            bool allowed = hop == 0
+                ? UpdatePolicy.IsAllowedAssetUrl(current)
+                : UpdatePolicy.IsAllowedRedirectUrl(current);
+            if (!allowed)
+            {
+                throw new InvalidOperationException("Download URL is not allowed.");
+            }
+
+            HttpResponseMessage response = await _http.GetAsync(current, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if ((int)response.StatusCode is not (301 or 302 or 303 or 307 or 308))
+            {
+                return response;
+            }
+
+            Uri? next = response.Headers.Location;
+            response.Dispose();
+            if (next is null)
+            {
+                throw new InvalidOperationException("Redirect without Location.");
+            }
+
+            if (!next.IsAbsoluteUri)
+            {
+                next = new Uri(current, next);
+            }
+
+            current = next;
+        }
+
+        throw new InvalidOperationException("Too many redirects.");
+    }
+
+    public void WaitIdle(TimeSpan timeout)
+    {
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;
+        while (Volatile.Read(ref _checking) != 0 && DateTimeOffset.UtcNow < deadline)
+        {
+            Thread.Sleep(50);
+        }
+    }
+
+    public void Dispose() => _http.Dispose();
 }
 
 public static class UpdateAgentLauncher

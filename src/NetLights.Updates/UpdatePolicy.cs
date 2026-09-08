@@ -10,24 +10,74 @@ public sealed class UpdatePolicy
 
     public static Uri LatestApi { get; } = new($"https://api.github.com/repos/{Owner}/{Repository}/releases/latest");
 
-    public static bool IsAllowedAssetUrl(Uri url)
+    public static bool IsAllowedAssetUrl(Uri url) => IsGitHubReleaseDownload(url);
+
+    public static bool IsAllowedRedirectUrl(Uri url)
     {
         if (url.Scheme != Uri.UriSchemeHttps)
         {
             return false;
         }
 
-        string host = url.Host;
-        if (!host.Equals("github.com", StringComparison.OrdinalIgnoreCase)
-            && !host.Equals("objects.githubusercontent.com", StringComparison.OrdinalIgnoreCase)
-            && !host.EndsWith(".githubusercontent.com", StringComparison.OrdinalIgnoreCase))
+        if (url.Host.Equals("objects.githubusercontent.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return IsGitHubReleaseDownload(url);
+    }
+
+    public static string? SafeInstallerFileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return null;
+        }
+
+        if (name.IndexOfAny(['/', '\\', ':']) >= 0)
+        {
+            return null;
+        }
+
+        string file = Path.GetFileName(name);
+        if (!string.Equals(file, name, StringComparison.Ordinal)
+            || file.Contains("..", StringComparison.Ordinal)
+            || file.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            return null;
+        }
+
+        if (!file.StartsWith("NetLights-Setup-win-x64-", StringComparison.OrdinalIgnoreCase)
+            || !file.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return file;
+    }
+
+    private static bool IsGitHubReleaseDownload(Uri url)
+    {
+        if (url.Scheme != Uri.UriSchemeHttps
+            || !url.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
 
+        string prefix = $"/{Owner}/{Repository}/releases/download/";
         string path = url.AbsolutePath;
-        return path.Contains($"/{Owner}/{Repository}/", StringComparison.OrdinalIgnoreCase)
-            || host.Equals("objects.githubusercontent.com", StringComparison.OrdinalIgnoreCase);
+        return path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            && !path.Contains("..", StringComparison.Ordinal)
+            && path.Length > prefix.Length;
+    }
+
+    public static bool IsInsideRoot(string root, string candidate)
+    {
+        string rootFull = Path.GetFullPath(root)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        string full = Path.GetFullPath(candidate);
+        return full.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool IsNewerStable(string current, string candidate, bool prerelease)
