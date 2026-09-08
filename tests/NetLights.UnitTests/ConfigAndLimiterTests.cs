@@ -27,6 +27,15 @@ public sealed class ConfigAndLimiterTests
         Assert.Equal(1, limiter.CountInOpenClosedWindow(clock, clock.Now, TimeSpan.FromSeconds(1)));
         time.Advance(TimeSpan.FromSeconds(1));
         Assert.Equal(0, limiter.CountInOpenClosedWindow(clock, clock.Now, TimeSpan.FromSeconds(1)));
+        time.Advance(TimeSpan.FromSeconds(61));
+        limiter.RemoveOlderThan(clock, TimeSpan.FromSeconds(60));
+        Assert.Empty(limiter.Starts);
+        for (int i = 0; i < 200; i++)
+        {
+            limiter.Record(clock.Now);
+        }
+
+        Assert.Equal(MonitorConstants.MaxStartsPerMinute, limiter.Starts.Count);
     }
 
     [Fact]

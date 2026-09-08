@@ -1,6 +1,7 @@
 using System.Security.Cryptography.X509Certificates;
 using NetLights.Core;
 using NetLights.Networking;
+using NetLights.TestSupport;
 using Xunit;
 
 namespace NetLights.SoakTests;

@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Cryptography.X509Certificates;
 using NetLights.Core;
 using NetLights.Networking;
+using NetLights.TestSupport;
 using Xunit;
 
 namespace NetLights.IntegrationTests;
@@ -33,9 +34,8 @@ public sealed class HttpsProbeTests
             EndpointObservation obs = await probe.ProbeAsync(ep, 1, 1, TimeSpan.FromSeconds(2), CancellationToken.None);
             Assert.Equal(ProbeOutcome.Reachable, obs.Outcome);
             Assert.Equal(302, obs.HttpStatus);
-            Assert.Equal(0, fx.RedirectHits > 0 ? 0 : 0);
-            Assert.True(fx.Hits >= 1);
-            Assert.Equal(0, fx.RedirectHits - fx.Hits);
+            Assert.Equal(1, fx.Hits);
+            Assert.Equal(1, fx.RedirectHits);
         });
     }
 
@@ -60,12 +60,24 @@ public sealed class HttpsProbeTests
     {
         await WithTrustedAsync(FixtureMode.Status, status, "15", async (probe, ep, fx) =>
         {
-            EndpointObservation obs = await probe.ProbeAsync(ep, 1, 1, TimeSpan.FromSeconds(2), CancellationToken.None);
+            EndpointDefinition ru0 = ep with { Id = "ru-0", Group = EndpointGroup.Ru, InfrastructureId = "ru-infra-0" };
+            EndpointObservation obs = await probe.ProbeAsync(ru0, 1, 1, TimeSpan.FromSeconds(2), CancellationToken.None);
             Assert.Equal(ProbeOutcome.Reachable, obs.Outcome);
             Assert.True(obs.NextAllowedAt > 0);
-            int hits = fx.Hits;
-            await probe.ProbeAsync(ep, 1, 2, TimeSpan.FromSeconds(2), CancellationToken.None);
-            Assert.True(fx.Hits >= hits);
+            var kernel = new MonitorKernel(new MonitorConfiguration { Endpoints = TestPoolsLocal(ru0) }, TimeProvider.System);
+            kernel.ApplyObservation(obs with { EndpointId = "ru-0", NetworkEpoch = kernel.Epoch });
+            Assert.True(kernel.Inspect("ru-0").NextAllowed > 0);
+            int starts = 0;
+            foreach (WorkItem item in kernel.Tick())
+            {
+                if (item.Kind == WorkKind.StartProbe && item.Endpoint?.Id == "ru-0")
+                {
+                    starts++;
+                }
+            }
+
+            Assert.Equal(0, starts);
+            Assert.True(fx.Hits >= 1);
         });
     }
 
@@ -188,7 +200,25 @@ public sealed class HttpsProbeTests
     public async Task T43_NoCookiesProxyHttp3()
     {
         using var probe = HttpsProbeFactory.CreateProduction(TimeProvider.System, "1.0.0");
-        Assert.NotNull(probe);
+        Assert.False(probe.UsesCookies);
+        Assert.False(probe.UsesProxy);
+        Assert.False(probe.AllowsAutoRedirect);
+        Assert.Equal(HttpVersion.Version11, probe.RequestVersion);
+        Assert.Equal(HttpVersionPolicy.RequestVersionExact, probe.VersionPolicy);
+    }
+
+    private static IReadOnlyList<EndpointDefinition> TestPoolsLocal(EndpointDefinition ep)
+    {
+        var list = new List<EndpointDefinition>(14);
+        for (int i = 0; i < 7; i++)
+        {
+            list.Add(i == 0
+                ? ep with { Id = "ru-0", Group = EndpointGroup.Ru, InfrastructureId = "ru-infra-0" }
+                : new EndpointDefinition($"ru-{i}", EndpointGroup.Ru, ep.Uri, $"ru-infra-{i}"));
+            list.Add(new EndpointDefinition($"vpn-{i}", EndpointGroup.Vpn, ep.Uri, $"vpn-infra-{i}"));
+        }
+
+        return list;
     }
 
     private static EndpointDefinition Endpoint(LocalHttpsFixture fx)

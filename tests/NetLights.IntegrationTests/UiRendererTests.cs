@@ -23,11 +23,14 @@ public sealed class UiRendererTests
         {
             foreach (GroupAvailability right in states)
             {
-                using Bitmap bmp = TrayIconRenderer.RenderBitmap(left, right, 32);
-                Assert.Equal(32, bmp.Width);
-                Color center = bmp.GetPixel(16, 16);
-                Assert.True(center.A < 40, $"gap alpha {center.A}");
-                bmp.Save(Path.Combine(dir, $"{left}-{right}.png"));
+                using Bitmap bmp16 = TrayIconRenderer.RenderBitmap(left, right, 16);
+                using Bitmap bmp32 = TrayIconRenderer.RenderBitmap(left, right, 32);
+                Assert.Equal(16, bmp16.Width);
+                Color center16 = bmp16.GetPixel(8, 8);
+                Color center32 = bmp32.GetPixel(16, 16);
+                Assert.True(center16.A < 40, $"16 gap alpha {center16.A}");
+                Assert.True(center32.A < 40, $"32 gap alpha {center32.A}");
+                bmp32.Save(Path.Combine(dir, $"{left}-{right}.png"));
             }
         }
     }
@@ -35,10 +38,25 @@ public sealed class UiRendererTests
     [Fact]
     public void T53_RejectsBadEndpointFileWithoutThrowing()
     {
-        (MonitorConfiguration config, string? warning) = SettingsStore.LoadPool();
-        Assert.NotNull(config.Endpoints);
-        Assert.Equal(14, config.Endpoints.Count);
-        _ = warning;
+        string previous = SettingsStore.RootDirectory;
+        string temp = Path.Combine(Path.GetTempPath(), "net-lights-settings-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            SettingsStore.RootDirectory = temp;
+            File.WriteAllText(
+                SettingsStore.EndpointsPath,
+                """[{"id":"x","group":"mars","uri":"https://example.test/","infrastructureId":"x"}]""");
+            (MonitorConfiguration config, string? warning) = SettingsStore.LoadPool();
+            Assert.NotNull(warning);
+            Assert.True(config.UsingBuiltinPool);
+            Assert.Equal(14, config.Endpoints.Count);
+        }
+        finally
+        {
+            SettingsStore.RootDirectory = previous;
+            Directory.Delete(temp, true);
+        }
     }
 
     [Fact]
@@ -64,5 +82,22 @@ public sealed class UiRendererTests
         Assert.True(vpnOkBack.R > vpnOkBack.B && vpnOkBack.G > vpnOkBack.B);
         Assert.True(vpnDownBack.GetBrightness() < vpnOkBack.GetBrightness());
         Assert.True(ruOkFore.GetBrightness() < 0.45f);
+    }
+
+    [Fact]
+    public void StatusForm_ClockTicksDoNotBeginUpdate()
+    {
+        using var form = new StatusForm();
+        form.CreateControl();
+        var empty = new MonitorKernel(new MonitorConfiguration { Endpoints = BuiltinEndpoints.All }, TimeProvider.System).Snapshot;
+        form.Bind(empty);
+        int binds = form.DataBindCount;
+        for (int i = 0; i < 40; i++)
+        {
+            form.RefreshAges();
+        }
+
+        Assert.Equal(binds, form.DataBindCount);
+        Assert.Equal(14, StatusSnapshotProjector.Rows(empty).Count);
     }
 }

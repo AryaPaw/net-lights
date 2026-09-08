@@ -97,7 +97,8 @@
         "type": "Project",
         "dependencies": {
           "NetLights.Core": "[1.0.0, )",
-          "NetLights.Networking": "[1.0.0, )"
+          "NetLights.Networking": "[1.0.0, )",
+          "NetLights.Updates": "[1.0.0, )"
         }
       },
       "netlights.core": {
@@ -108,6 +109,15 @@
         "dependencies": {
           "NetLights.Core": "[1.0.0, )"
         }
+      },
+      "netlights.testsupport": {
+        "type": "Project",
+        "dependencies": {
+          "NetLights.Core": "[1.0.0, )"
+        }
+      },
+      "netlights.updates": {
+        "type": "Project"
       }
     }
   }
