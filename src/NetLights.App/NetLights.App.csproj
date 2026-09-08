@@ -12,6 +12,7 @@
   <ItemGroup>
     <ProjectReference Include="..\NetLights.Core\NetLights.Core.csproj" />
     <ProjectReference Include="..\NetLights.Networking\NetLights.Networking.csproj" />
+    <ProjectReference Include="..\NetLights.Updates\NetLights.Updates.csproj" />
   </ItemGroup>
     <ItemGroup>
       <InternalsVisibleTo Include="NetLights.IntegrationTests" />
