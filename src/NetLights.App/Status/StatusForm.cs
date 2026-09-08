@@ -116,7 +116,7 @@ internal sealed class StatusForm : Form
         _autoStart.Checked = autoStart;
         _autoUpdate.Checked = autoUpdate;
         _updateLine.Text = string.IsNullOrWhiteSpace(updateNotice)
-            ? "Проверка GitHub не чаще раза в сутки. Установка при обычном выходе, без автоперезапуска. Портативный ZIP сам себя не обновляет."
+            ? "Проверка GitHub при запуске. Установка при обычном выходе, без автоперезапуска."
             : "Последняя ошибка обновления: " + updateNotice;
         _versionLabel.Text = "v" + ProductInfo.Version;
         _suppressSettings = false;
