@@ -6,8 +6,6 @@ public sealed class UpdateCoordinator : IDisposable
     private readonly PendingUpdateStore _store;
     private readonly string _currentVersion;
     private readonly HttpClient _http;
-    private readonly object _gate = new();
-    private DateTimeOffset _lastCheck = DateTimeOffset.MinValue;
     private int _checking;
 
     public UpdateCoordinator(GitHubReleaseFeed feed, PendingUpdateStore store, string currentVersion, HttpMessageHandler? downloadHandler = null)
@@ -30,14 +28,6 @@ public sealed class UpdateCoordinator : IDisposable
 
     public Task CheckInBackgroundAsync(CancellationToken cancellationToken)
     {
-        lock (_gate)
-        {
-            if (DateTimeOffset.UtcNow - _lastCheck < UpdatePolicy.CheckInterval)
-            {
-                return Task.CompletedTask;
-            }
-        }
-
         if (Interlocked.Exchange(ref _checking, 1) != 0)
         {
             return Task.CompletedTask;
@@ -50,20 +40,7 @@ public sealed class UpdateCoordinator : IDisposable
     {
         try
         {
-            lock (_gate)
-            {
-                if (DateTimeOffset.UtcNow - _lastCheck < UpdatePolicy.CheckInterval)
-                {
-                    return;
-                }
-            }
-
             GitHubRelease? release = await _feed.GetLatestAsync(cancellationToken).ConfigureAwait(false);
-            lock (_gate)
-            {
-                _lastCheck = DateTimeOffset.UtcNow;
-            }
-
             if (release is null || !UpdatePolicy.IsNewerStable(_currentVersion, release.TagName, release.Prerelease))
             {
                 return;

@@ -6,22 +6,24 @@
 [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL_3.0-blue.svg)](LICENSE)
 
-A Windows 11 tray app. Left half: HTTPS to sites in Russia. Right half: HTTPS through your VPN. It does not change VPN, DNS, routing, or certificates.
+Трей-приложение для Windows 11. Левая половина: HTTPS до сайтов в России. Правая: HTTPS через ваш VPN. Программа не меняет VPN, DNS, маршруты и сертификаты.
 
-## Install
+## Установка
 
-Windows 11, 64-bit. No extra .NET runtime.
+Нужен Windows 11 x64. Отдельный .NET Runtime не нужен.
 
-1. Get **NetLights-Setup-win-x64-*.exe** from [Releases](https://github.com/AryaPaw/net-lights/releases/latest).
-2. Run it (no admin). It stays in the tray and starts with Windows.
+1. Скачайте **NetLights-Setup-win-x64-*.exe** со страницы [Releases](https://github.com/AryaPaw/net-lights/releases/latest).
+2. Запустите установщик (права администратора не нужны). Программа остаётся в трее и запускается вместе с Windows.
 
-Double-click the icon for the window. Closing the window does not quit; use **Exit** in the tray menu.
+Двойной щелчок по значку открывает окно. Крестик окно прячет, не завершает программу. Выход — из меню значка.
 
-A portable ZIP is also in Releases. Auto-update only works for the installed copy: it checks GitHub once a day and applies the new Setup on Exit.
+## Обновления
 
-## Build
+Установленная копия при запуске проверяет GitHub Releases и при выходе ставит новый Setup. Это можно выключить в окне, вкладка «Параметры».
 
-[.NET SDK](https://dotnet.microsoft.com/en-us/download) 10. From the repo root, `run-local.cmd` publishes and starts it.
+## Сборка
+
+Нужен [.NET SDK](https://dotnet.microsoft.com/en-us/download) 10. Из корня репозитория `run-local.cmd` публикует и запускает программу.
 
 ```ps1
 dotnet test tests/NetLights.UnitTests/NetLights.UnitTests.csproj -c Release

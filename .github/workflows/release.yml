@@ -39,12 +39,6 @@ jobs:
           $v = "${{ steps.ver.outputs.version }}"
           dotnet publish src/NetLights.App/NetLights.App.csproj -c Release -r win-x64 --self-contained true -p:Version=$v -p:RestoreLockedMode=false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o artifacts/publish
           dotnet publish src/NetLights.UpdateAgent/NetLights.UpdateAgent.csproj -c Release -r win-x64 --self-contained true -p:Version=$v -p:RestoreLockedMode=false -p:PublishSingleFile=true -p:DebugType=none -o artifacts/publish
-          mkdir artifacts/symbols | Out-Null
-      - name: Zip portable
-        shell: pwsh
-        run: |
-          $v = "${{ steps.ver.outputs.version }}"
-          Compress-Archive -Path artifacts/publish/* -DestinationPath artifacts/NetLights-win-x64-$v.zip
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Installer
@@ -58,38 +52,19 @@ jobs:
           $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $iscc) { throw "Inno Setup compiler (ISCC.exe) was not found." }
           & $iscc "/DMyAppVersion=$v" /Oartifacts "/FNetLights-Setup-win-x64-$v" installer/net-lights.iss
-      - name: Checksums and latest.json
-        shell: pwsh
-        run: |
-          $v = "${{ steps.ver.outputs.version }}"
-          Get-FileHash artifacts/*.zip,artifacts/*.exe -Algorithm SHA256 -ErrorAction SilentlyContinue |
-            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), $_.Path.Split('\')[-1] } |
-            Set-Content artifacts/SHA256SUMS.txt
-          @{ version = $v; channel = "stable"; tag = "v$v" } | ConvertTo-Json | Set-Content artifacts/latest.json
-      - name: SBOM
-        run: |
-          dotnet tool restore
-          dotnet cyclonedx src/NetLights.App/NetLights.App.csproj --json --filename artifacts/sbom.cdx.json
-        continue-on-error: true
       - name: GitHub Release
         uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
           files: |
-            artifacts/NetLights-win-x64-*.zip
             artifacts/NetLights-Setup-win-x64-*.exe
-            artifacts/SHA256SUMS.txt
-            artifacts/latest.json
-            artifacts/sbom.cdx.json
           generate_release_notes: true
+          fail_on_unmatched_files: true
           make_latest: true
           body: |
-            Если не уверены, скачайте **NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe** и запустите его. Права администратора не нужны.
+            If you are not sure, download **NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe** and run it.
 
-            | Что нужно | Файл |
+            | What you want | Download |
             | --- | --- |
-            | **Установка** на обычный 64-bit ПК (Intel/AMD) | [NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe) |
-            | Портативная копия, без установщика | [NetLights-win-x64-${{ steps.ver.outputs.version }}.zip](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NetLights-win-x64-${{ steps.ver.outputs.version }}.zip) |
+            | **Install** on a typical 64-bit PC (Intel/AMD) | [NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe) |
 
-            Нужен Windows 11 x64. Сборка self-contained, отдельный .NET Runtime ставить не нужно. Автообновление есть только у установленной копии и применяется при обычном выходе.
-
-            Контрольные суммы: `SHA256SUMS.txt`. Доверие к обновлениям до Authenticode: [SECURITY.md](https://github.com/${{ github.repository }}/blob/main/SECURITY.md).
+            Needs Windows 11 x64. Self-contained build, no extra .NET runtime. Auto-update applies on Exit for the installed copy.
