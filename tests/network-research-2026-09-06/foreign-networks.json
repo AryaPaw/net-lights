@@ -1,0 +1,50 @@
+[
+  {
+    "IP": "130.89.148.77",
+    "ASN": "1133",
+    "Holder": "UTWENTE-AS SURF B.V.",
+    "CheckedUtc": "2026-09-06T19:39:28.9023383Z"
+  },
+  {
+    "IP": "209.126.35.79",
+    "ASN": "11019",
+    "Holder": "HAPROXY-TECHNOLOGIES - HAProxy Technologies, Inc.",
+    "CheckedUtc": "2026-09-06T19:39:29.3832535Z"
+  },
+  {
+    "IP": "152.2.23.104",
+    "ASN": "36850",
+    "Holder": "UNC-CH - University of North Carolina at Chapel Hill",
+    "CheckedUtc": "2026-09-06T19:39:29.8643149Z"
+  },
+  {
+    "IP": "151.101.65.91",
+    "ASN": "54113",
+    "Holder": "FASTLY - Fastly, Inc.",
+    "CheckedUtc": "2026-09-06T19:39:30.236929Z"
+  },
+  {
+    "IP": "104.16.133.229",
+    "ASN": "13335",
+    "Holder": "CLOUDFLARENET - Cloudflare, Inc.",
+    "CheckedUtc": "2026-09-06T19:39:30.7179321Z"
+  },
+  {
+    "IP": "142.251.14.94",
+    "ASN": "15169",
+    "Holder": "GOOGLE - Google LLC",
+    "CheckedUtc": "2026-09-06T19:39:31.1962094Z"
+  },
+  {
+    "IP": "140.82.121.4",
+    "ASN": "36459",
+    "Holder": "GITHUB - GitHub, Inc.",
+    "CheckedUtc": "2026-09-06T19:44:18.2416399Z"
+  },
+  {
+    "IP": "185.15.59.224",
+    "ASN": "14907",
+    "Holder": "WIKIMEDIA - Wikimedia Foundation Inc.",
+    "CheckedUtc": "2026-09-06T19:44:18.5742696Z"
+  }
+]
