@@ -107,6 +107,15 @@
       },
       "netlights.core": {
         "type": "Project"
+      },
+      "netlights.testsupport": {
+        "type": "Project",
+        "dependencies": {
+          "NetLights.Core": "[1.0.0, )"
+        }
+      },
+      "netlights.updates": {
+        "type": "Project"
       }
     }
   }

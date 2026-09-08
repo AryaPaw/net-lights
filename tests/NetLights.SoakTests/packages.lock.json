@@ -101,6 +101,12 @@
         "dependencies": {
           "NetLights.Core": "[1.0.0, )"
         }
+      },
+      "netlights.testsupport": {
+        "type": "Project",
+        "dependencies": {
+          "NetLights.Core": "[1.0.0, )"
+        }
       }
     }
   }

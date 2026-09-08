@@ -192,25 +192,18 @@ public sealed class SchedulerTests
     public void T17_MinIntervalAppliesToConfirmationAndClick()
     {
         var runner = new VirtualRunner();
-        runner.Run(TimeSpan.FromSeconds(2));
+        runner.Run(TimeSpan.FromSeconds(20), TimeSpan.FromMilliseconds(50));
         runner.Kernel.RequestCheckNow();
-        runner.Run(TimeSpan.FromSeconds(2));
-        foreach (IGrouping<string, int> group in runner.StartLog.Select((id, i) => (id, i)).GroupBy(x => x.id, x => x.i))
-        {
-            List<int> indexes = group.ToList();
-            for (int i = 1; i < indexes.Count; i++)
-            {
-                Assert.True(indexes[i] - indexes[i - 1] >= 1);
-            }
-        }
-
+        runner.Run(TimeSpan.FromSeconds(16), TimeSpan.FromMilliseconds(50));
         var clock = new MonotonicClock(runner.Time);
-        foreach (string id in TestPools.Independent().Select(e => e.Id))
+        foreach (IGrouping<string, long> group in runner.StartTimes.GroupBy(x => x.Id, x => x.Timestamp))
         {
-            EndpointSlotSnapshot slot = runner.Kernel.Inspect(id);
-            if (slot.LastStarted > 0)
+            List<long> stamps = group.OrderBy(x => x).ToList();
+            for (int i = 1; i < stamps.Count; i++)
             {
-                Assert.True(clock.Age(slot.LastStarted) >= TimeSpan.Zero);
+                Assert.True(
+                    clock.Elapsed(stamps[i - 1], stamps[i]) >= MonitorConstants.MinEndpointInterval,
+                    $"{group.Key} interval {clock.Elapsed(stamps[i - 1], stamps[i])}");
             }
         }
     }
@@ -242,7 +235,14 @@ public sealed class SchedulerTests
     public void T20_TwoNewSuccessesStopEpisode()
     {
         var runner = new VirtualRunner();
-        runner.Run(TimeSpan.FromSeconds(4));
+        runner.Run(TimeSpan.FromSeconds(20));
+        Assert.Equal(GroupAvailability.Online, runner.Kernel.Snapshot.Ru.Availability);
+        int episodes = runner.Kernel.ConfirmationEpisodeCount;
+        runner.Kill("ru-0", "ru-1");
+        runner.Run(TimeSpan.FromSeconds(20), TimeSpan.FromMilliseconds(50));
+        Assert.True(runner.Kernel.ConfirmationEpisodeCount > episodes);
+        runner.RestoreAll();
+        runner.Run(TimeSpan.FromSeconds(16), TimeSpan.FromMilliseconds(50));
         Assert.False(runner.Kernel.Snapshot.Ru.ConfirmationActive);
     }
 

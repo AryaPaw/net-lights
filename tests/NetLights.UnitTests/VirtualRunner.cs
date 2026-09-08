@@ -40,6 +40,7 @@ internal sealed class VirtualRunner
     public int Started { get; private set; }
     public int MaxInflight { get; private set; }
     public List<string> StartLog { get; } = [];
+    public List<(string Id, long Timestamp)> StartTimes { get; } = [];
 
     public void Run(TimeSpan duration, TimeSpan? step = null)
     {
@@ -162,6 +163,7 @@ internal sealed class VirtualRunner
         _pending.Add(pending);
         Started++;
         StartLog.Add(endpoint.Id);
+        StartTimes.Add((endpoint.Id, started));
         MaxInflight = Math.Max(MaxInflight, Kernel.PhysicalInflight);
     }
 

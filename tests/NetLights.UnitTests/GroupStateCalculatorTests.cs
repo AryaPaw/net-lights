@@ -36,6 +36,14 @@ public sealed class GroupStateCalculatorTests
     }
 
     [Fact]
+    public void ColdStart_DoesNotAllowPartialOffline()
+    {
+        List<EndpointDefinition> pool = TestPools.Independent().Where(e => e.Group == EndpointGroup.Ru).ToList();
+        var evidence = pool.Take(3).Select(e => Fresh(e, ProbeOutcome.Unreachable)).ToList();
+        Assert.Equal(GroupAvailability.Unknown, GroupStateCalculator.Evaluate(pool, evidence, out _, out _, allowPartialOffline: false));
+    }
+
+    [Fact]
     public void T07_AllFreshUnreachable_IsOffline()
     {
         List<EndpointDefinition> pool = TestPools.Independent().Where(e => e.Group == EndpointGroup.Ru).ToList();
