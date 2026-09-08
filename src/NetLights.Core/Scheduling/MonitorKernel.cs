@@ -19,6 +19,7 @@ public sealed partial class MonitorKernel
     private string? _monitorError;
     private MonitorSnapshot _snapshot;
     private bool _tracing;
+    private bool _paused;
 
     public MonitorKernel(MonitorConfiguration config, TimeProvider time)
     {
@@ -53,6 +54,11 @@ public sealed partial class MonitorKernel
     {
         var work = new List<WorkItem>();
         _limiter.RemoveOlderThan(_clock, TimeSpan.FromSeconds(60));
+        if (_paused)
+        {
+            return work;
+        }
+
         if (_networkUnavailable)
         {
             MaybePublish(work, force: false);
@@ -118,6 +124,7 @@ public sealed partial class MonitorKernel
             Elapsed = observation.Elapsed,
             CompletedUtc = _clock.UtcNow
         };
+        slot.Stats = slot.Stats.Record(observation.Outcome, observation.HttpStatus, observation.Failure);
         slot.NextAllowed = Math.Max(
             observation.NextAllowedAt,
             _clock.Add(slot.LastStarted, _config.MinEndpointInterval));
@@ -217,9 +224,37 @@ public sealed partial class MonitorKernel
 
     public IReadOnlyList<WorkItem> RequestCheckNow()
     {
+        if (_paused)
+        {
+            return [];
+        }
+
         var work = new List<WorkItem>();
         TryBeginCheckNow(_ru, work);
         TryBeginCheckNow(_vpn, work);
+        MaybePublish(work, force: true);
+        return work;
+    }
+
+    public IReadOnlyList<WorkItem> SetPaused(bool paused)
+    {
+        if (_paused == paused)
+        {
+            return [];
+        }
+
+        _paused = paused;
+        var work = new List<WorkItem>();
+        if (paused)
+        {
+            CancelInflight(work, "paused");
+            _log.Add(_clock.UtcNow, "pause", "проверки на паузе");
+        }
+        else
+        {
+            _log.Add(_clock.UtcNow, "pause", "проверки возобновлены");
+        }
+
         MaybePublish(work, force: true);
         return work;
     }
@@ -599,6 +634,7 @@ public sealed partial class MonitorKernel
            && a.Vpn.Reason == b.Vpn.Reason
            && a.CapacityExhausted == b.CapacityExhausted
            && a.MonitorError == b.MonitorError
+           && a.Paused == b.Paused
            && SameEndpoints(a.Ru, b.Ru)
            && SameEndpoints(a.Vpn, b.Vpn);
 
@@ -643,7 +679,8 @@ public sealed partial class MonitorKernel
             _config.UsingBuiltinPool,
             _config.ConfigWarning,
             _capacityExhausted,
-            _monitorError);
+            _monitorError,
+            _paused);
     }
 
     private GroupSnapshot BuildGroupSnapshot(GroupRuntime group)
@@ -690,7 +727,8 @@ public sealed partial class MonitorKernel
                 fresh,
                 paused,
                 pauseUtc,
-                slot.PhysicalInFlight));
+                slot.PhysicalInFlight,
+                slot.Stats));
             if (fresh && outcome == ProbeOutcome.Reachable)
             {
                 DateTimeOffset at = slot.Applied!.CompletedUtc;
@@ -802,6 +840,7 @@ public sealed partial class MonitorKernel
         public bool ApplicationInFlight { get; set; }
         public long InFlightAttemptId { get; set; }
         public AppliedSample? Applied { get; set; }
+        public EndpointStats Stats { get; set; } = EndpointStats.Empty;
         public bool EpisodeCovered { get; set; }
         public bool EpisodeIssuedNewProbe { get; set; }
     }
