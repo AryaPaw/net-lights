@@ -45,18 +45,19 @@ jobs:
         run: |
           $v = "${{ steps.ver.outputs.version }}"
           Compress-Archive -Path artifacts/publish/* -DestinationPath artifacts/NetLights-win-x64-$v.zip
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
       - name: Installer
         shell: pwsh
         run: |
           $v = "${{ steps.ver.outputs.version }}"
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (Test-Path $iscc) {
-            Copy-Item installer/net-lights.iss artifacts/net-lights.iss
-            Copy-Item artifacts/publish artifacts/inno-publish -Recurse
-            & $iscc /DMyAppVersion=$v /Oartifacts /FNetLights-Setup-win-x64-$v installer/net-lights.iss
-          } else {
-            Write-Host "Inno Setup not installed on runner; skipping installer build"
-          }
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\InnoSetup6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "Inno Setup compiler (ISCC.exe) was not found." }
+          & $iscc "/DMyAppVersion=$v" /Oartifacts "/FNetLights-Setup-win-x64-$v" installer/net-lights.iss
       - name: Checksums and latest.json
         shell: pwsh
         run: |
@@ -81,3 +82,14 @@ jobs:
             artifacts/sbom.cdx.json
           generate_release_notes: true
           make_latest: true
+          body: |
+            Если не уверены, скачайте **NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe** и запустите его. Права администратора не нужны.
+
+            | Что нужно | Файл |
+            | --- | --- |
+            | **Установка** на обычный 64-bit ПК (Intel/AMD) | [NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe) |
+            | Портативная копия, без установщика | [NetLights-win-x64-${{ steps.ver.outputs.version }}.zip](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NetLights-win-x64-${{ steps.ver.outputs.version }}.zip) |
+
+            Нужен Windows 11 x64. Сборка self-contained, отдельный .NET Runtime ставить не нужно. Автообновление есть только у установленной копии и применяется при обычном выходе.
+
+            Контрольные суммы: `SHA256SUMS.txt`. Доверие к обновлениям до Authenticode: [SECURITY.md](https://github.com/${{ github.repository }}/blob/main/SECURITY.md).

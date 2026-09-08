@@ -18,13 +18,18 @@ public sealed class GitHubAsset
     public string? Digest { get; init; }
 }
 
-public sealed class GitHubReleaseFeed
+public sealed class GitHubReleaseFeed : IDisposable
 {
     private readonly HttpClient _http;
 
     public GitHubReleaseFeed(HttpMessageHandler? handler = null)
     {
-        _http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: true);
+        HttpMessageHandler inner = handler ?? new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseCookies = false
+        };
+        _http = new HttpClient(inner, disposeHandler: true);
         _http.Timeout = TimeSpan.FromSeconds(20);
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("NetLights-Updater");
         _http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
@@ -32,18 +37,20 @@ public sealed class GitHubReleaseFeed
 
     public async Task<GitHubRelease?> GetLatestAsync(CancellationToken cancellationToken)
     {
-        using HttpResponseMessage response = await _http.GetAsync(UpdatePolicy.LatestApi, cancellationToken).ConfigureAwait(false);
+        using HttpResponseMessage response = await _http.GetAsync(UpdatePolicy.LatestApi, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if ((int)response.StatusCode is 404 or 429 or >= 500)
         {
             return null;
         }
 
         response.EnsureSuccessStatusCode();
-        byte[] bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
-        if (bytes.Length > UpdatePolicy.MaxManifestBytes)
+        if (response.Content.Headers.ContentLength is > UpdatePolicy.MaxManifestBytes)
         {
             throw new InvalidOperationException("Manifest too large.");
         }
+
+        await using Stream input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        byte[] bytes = await ReadCappedAsync(input, (int)UpdatePolicy.MaxManifestBytes, cancellationToken).ConfigureAwait(false);
 
         using JsonDocument doc = JsonDocument.Parse(bytes);
         JsonElement root = doc.RootElement;
@@ -72,6 +79,28 @@ public sealed class GitHubReleaseFeed
             Assets = assets
         };
     }
+
+    public void Dispose() => _http.Dispose();
+
+    internal static async Task<byte[]> ReadCappedAsync(Stream input, int maxBytes, CancellationToken cancellationToken)
+    {
+        using var output = new MemoryStream(Math.Min(maxBytes, 4096));
+        byte[] buffer = new byte[4096];
+        int total = 0;
+        int read;
+        while ((read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false)) > 0)
+        {
+            total += read;
+            if (total > maxBytes)
+            {
+                throw new InvalidOperationException("Manifest too large.");
+            }
+
+            await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+        }
+
+        return output.ToArray();
+    }
 }
 
 public static class IntegrityVerifier
@@ -99,7 +128,7 @@ public static class IntegrityVerifier
         const string prefix = "sha256:";
         return digest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
             ? digest[prefix.Length..]
-            : digest;
+            : null;
     }
 
     private static string Normalize(string value)

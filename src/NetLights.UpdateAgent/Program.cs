@@ -23,7 +23,6 @@ internal static class Program
                 "NetLights",
                 "updates");
             var store = new PendingUpdateStore(root);
-            WaitForParent(parentId);
             if (!File.Exists(installer))
             {
                 store.WriteResult("unknown", false, "Файл установщика не найден.");
@@ -32,10 +31,16 @@ internal static class Program
 
             string allowedRoot = Path.GetFullPath(root);
             string fullInstaller = Path.GetFullPath(installer);
-            if (!fullInstaller.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
+            if (!UpdatePolicy.IsInsideRoot(allowedRoot, fullInstaller))
             {
                 store.WriteResult("unknown", false, "Путь установщика вне каталога обновлений.");
                 return 4;
+            }
+
+            if (!WaitForParent(parentId))
+            {
+                store.WriteResult("unknown", false, "Родительский процесс не завершился.");
+                return 6;
             }
 
             using FileStream stream = File.OpenRead(fullInstaller);
@@ -54,7 +59,19 @@ internal static class Program
             install.StartInfo.UseShellExecute = false;
             install.StartInfo.CreateNoWindow = true;
             install.Start();
-            install.WaitForExit();
+            if (!install.WaitForExit(10 * 60_000))
+            {
+                try
+                {
+                    install.Kill(entireProcessTree: true);
+                }
+                catch (Exception)
+                {
+                }
+
+                store.WriteResult("unknown", false, "Установщик не завершился вовремя.");
+                return 7;
+            }
             bool ok = install.ExitCode == 0;
             store.WriteResult(Path.GetFileName(fullInstaller), ok, ok ? "Установлено." : "Установщик завершился с ошибкой " + install.ExitCode);
             if (ok)
@@ -78,18 +95,16 @@ internal static class Program
         }
     }
 
-    private static void WaitForParent(int parentId)
+    private static bool WaitForParent(int parentId)
     {
         try
         {
             using var parent = Process.GetProcessById(parentId);
-            if (!parent.WaitForExit(60_000))
-            {
-                return;
-            }
+            return parent.WaitForExit(60_000) && parent.HasExited;
         }
         catch (ArgumentException)
         {
+            return true;
         }
     }
 

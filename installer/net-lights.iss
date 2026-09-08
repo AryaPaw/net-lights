@@ -3,6 +3,7 @@
 #define MyAppVersion "1.0.0"
 #endif
 #define MyAppPublisher "AryaPaw"
+#define MyAppURL "https://github.com/AryaPaw/net-lights"
 #define MyAppExeName "NetLights.exe"
 
 [Setup]
@@ -11,6 +12,8 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppCopyright=Copyright (c) AryaPaw
+AppSupportURL={#MyAppURL}
+AppUpdatesURL={#MyAppURL}/releases
 DefaultDirName={localappdata}\Programs\NetLights
 DefaultGroupName=Net Lights
 PrivilegesRequired=lowest
@@ -32,7 +35,7 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "startup"; Description: "Запускать вместе с Windows"; Flags: unchecked
+Name: "startup"; Description: "Запускать вместе с Windows"
 
 #ifndef PublishDir
 #define PublishDir "..\artifacts\publish"
