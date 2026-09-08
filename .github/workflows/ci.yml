@@ -2,14 +2,20 @@ name: ci
 on:
   push:
   pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
+    timeout-minutes: 30
     env:
       CI: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-dotnet@67a3573c9c1bd98e1564e490b59e786ba165182c # v4.3.1
         with:
           global-json-file: global.json
       - name: Restore
@@ -17,10 +23,18 @@ jobs:
       - name: Build
         run: dotnet build NetLights.slnx -c Release --no-restore
       - name: Unit tests
-        run: dotnet test tests/NetLights.UnitTests/NetLights.UnitTests.csproj -c Release --no-build --collect:"XPlat Code Coverage"
+        run: dotnet test tests/NetLights.UnitTests/NetLights.UnitTests.csproj -c Release --no-build --collect:"XPlat Code Coverage" --results-directory TestResults
       - name: Integration tests
-        run: dotnet test tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj -c Release --no-build
-      - name: Soak tests
+        run: dotnet test tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj -c Release --no-build --results-directory TestResults
+      - name: Soak smoke
         run: dotnet test tests/NetLights.SoakTests/NetLights.SoakTests.csproj -c Release --no-build
       - name: Publish
-        run: dotnet publish src/NetLights.App/NetLights.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/publish
+        run: |
+          dotnet publish src/NetLights.App/NetLights.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o artifacts/publish
+          dotnet publish src/NetLights.UpdateAgent/NetLights.UpdateAgent.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:DebugType=none -o artifacts/publish
+      - name: Upload TRX
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: test-results
+          path: TestResults

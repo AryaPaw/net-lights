@@ -1,0 +1,9 @@
+Net Lights
+Copyright (c) AryaPaw
+
+This product is licensed under the GNU General Public License v3.0.
+See LICENSE.
+
+Third-party notices:
+- .NET runtime and libraries are licensed by Microsoft under their respective licenses.
+- Inno Setup is used only as a build-time installer compiler.
