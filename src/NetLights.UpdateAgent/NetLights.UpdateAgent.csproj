@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>NetLights.UpdateAgent</RootNamespace>
+    <AssemblyName>NetLights.UpdateAgent</AssemblyName>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\NetLights.Updates\NetLights.Updates.csproj" />
+  </ItemGroup>
+</Project>
