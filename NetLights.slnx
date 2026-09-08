@@ -3,10 +3,13 @@
     <Project Path="src/NetLights.App/NetLights.App.csproj" />
     <Project Path="src/NetLights.Core/NetLights.Core.csproj" />
     <Project Path="src/NetLights.Networking/NetLights.Networking.csproj" />
+    <Project Path="src/NetLights.UpdateAgent/NetLights.UpdateAgent.csproj" />
+    <Project Path="src/NetLights.Updates/NetLights.Updates.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj" />
     <Project Path="tests/NetLights.SoakTests/NetLights.SoakTests.csproj" />
+    <Project Path="tests/NetLights.TestSupport/NetLights.TestSupport.csproj" />
     <Project Path="tests/NetLights.UnitTests/NetLights.UnitTests.csproj" />
   </Folder>
 </Solution>

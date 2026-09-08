@@ -1,0 +1,83 @@
+name: release
+on:
+  push:
+    tags:
+      - "v*.*.*"
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CI: true
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-dotnet@67a3573c9c1bd98e1564e490b59e786ba165182c # v4.3.1
+        with:
+          global-json-file: global.json
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Restore
+        run: dotnet restore NetLights.slnx --locked-mode
+      - name: Test
+        run: |
+          dotnet test tests/NetLights.UnitTests/NetLights.UnitTests.csproj -c Release
+          dotnet test tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj -c Release
+      - name: Publish
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          dotnet publish src/NetLights.App/NetLights.App.csproj -c Release -r win-x64 --self-contained true -p:Version=$v -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o artifacts/publish
+          dotnet publish src/NetLights.UpdateAgent/NetLights.UpdateAgent.csproj -c Release -r win-x64 --self-contained true -p:Version=$v -p:PublishSingleFile=true -p:DebugType=none -o artifacts/publish
+          mkdir artifacts/symbols | Out-Null
+      - name: Zip portable
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          Compress-Archive -Path artifacts/publish/* -DestinationPath artifacts/NetLights-win-x64-$v.zip
+      - name: Installer
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (Test-Path $iscc) {
+            Copy-Item installer/net-lights.iss artifacts/net-lights.iss
+            Copy-Item artifacts/publish artifacts/inno-publish -Recurse
+            & $iscc /DMyAppVersion=$v /Oartifacts /FNetLights-Setup-win-x64-$v installer/net-lights.iss
+          } else {
+            Write-Host "Inno Setup not installed on runner; skipping installer build"
+          }
+      - name: Checksums and latest.json
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          Get-FileHash artifacts/*.zip,artifacts/*.exe -Algorithm SHA256 -ErrorAction SilentlyContinue |
+            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), $_.Path.Split('\')[-1] } |
+            Set-Content artifacts/SHA256SUMS.txt
+          @{ version = $v; channel = "stable"; tag = "v$v" } | ConvertTo-Json | Set-Content artifacts/latest.json
+      - name: SBOM
+        run: |
+          dotnet tool restore
+          dotnet cyclonedx src/NetLights.App/NetLights.App.csproj --json --filename artifacts/sbom.cdx.json
+        continue-on-error: true
+      - name: GitHub Release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
+        with:
+          files: |
+            artifacts/NetLights-win-x64-*.zip
+            artifacts/NetLights-Setup-win-x64-*.exe
+            artifacts/SHA256SUMS.txt
+            artifacts/latest.json
+            artifacts/sbom.cdx.json
+          generate_release_notes: true
+          make_latest: true

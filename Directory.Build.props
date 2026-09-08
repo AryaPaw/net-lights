@@ -8,8 +8,10 @@
     <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
     <NuGetAudit>true</NuGetAudit>
     <Version>1.0.0</Version>
-    <Authors>Net Lights</Authors>
-    <Company>Net Lights</Company>
+    <Authors>AryaPaw</Authors>
+    <Company>AryaPaw</Company>
     <Product>Net Lights</Product>
+    <Copyright>Copyright (c) AryaPaw</Copyright>
+    <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
   </PropertyGroup>
 </Project>
