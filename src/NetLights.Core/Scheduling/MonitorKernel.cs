@@ -1,6 +1,6 @@
 namespace NetLights.Core;
 
-public sealed class MonitorKernel
+public sealed partial class MonitorKernel
 {
     private readonly MonitorConfiguration _config;
     private readonly TimeProvider _time;
@@ -52,6 +52,7 @@ public sealed class MonitorKernel
     public IReadOnlyList<WorkItem> Tick()
     {
         var work = new List<WorkItem>();
+        _limiter.RemoveOlderThan(_clock, TimeSpan.FromSeconds(60));
         if (_networkUnavailable)
         {
             MaybePublish(work, force: false);
@@ -63,7 +64,7 @@ public sealed class MonitorKernel
         AdvanceAndMaybeRotate(_vpn, work);
         FillConfirmation(_ru, work);
         FillConfirmation(_vpn, work);
-        MaybePublish(work, force: false);
+        MaybePublish(work, force: true);
         return work;
     }
 
@@ -137,6 +138,10 @@ public sealed class MonitorKernel
         else if (observation.Outcome == ProbeOutcome.Unreachable)
         {
             group.ConsecutiveFailures.Add(new FailureMark(slot.Definition.InfrastructureId, observation.MonotonicStarted));
+            while (group.ConsecutiveFailures.Count > MonitorConstants.MaxConsecutiveFailureMarks)
+            {
+                group.ConsecutiveFailures.RemoveAt(0);
+            }
             if (group.Confirmation is not null)
             {
                 MarkEpisodeCoverage(group, slot, observation);
@@ -579,14 +584,11 @@ public sealed class MonitorKernel
     private void MaybePublish(List<WorkItem> work, bool force)
     {
         MonitorSnapshot next = BuildSnapshot();
-        if (force || !SameUi(next, _snapshot))
+        bool changed = force || !SameUi(next, _snapshot);
+        _snapshot = next;
+        if (changed)
         {
-            _snapshot = next;
             work.Add(new WorkItem(WorkKind.PublishSnapshot, null, _epoch, 0, TimeSpan.Zero, null));
-        }
-        else
-        {
-            _snapshot = next;
         }
     }
 
