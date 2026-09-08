@@ -5,4 +5,9 @@
     <AssemblyName>NetLights.Core</AssemblyName>
     <IsAotCompatible>false</IsAotCompatible>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="NetLights.UnitTests" />
+    <InternalsVisibleTo Include="NetLights.IntegrationTests" />
+    <InternalsVisibleTo Include="NetLights.SoakTests" />
+  </ItemGroup>
 </Project>
