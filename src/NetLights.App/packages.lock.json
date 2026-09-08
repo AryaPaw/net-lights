@@ -10,6 +10,9 @@
         "dependencies": {
           "NetLights.Core": "[1.0.0, )"
         }
+      },
+      "netlights.updates": {
+        "type": "Project"
       }
     }
   }

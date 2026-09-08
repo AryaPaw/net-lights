@@ -2,6 +2,7 @@ using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using NetLights.Core;
 using NetLights.Networking;
+using NetLights.Updates;
 
 namespace NetLights.App;
 
@@ -14,34 +15,44 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly AppSettings _settings;
     private readonly MonitorHost _host;
     private readonly HttpsProbe _probe;
-    private readonly Mutex _mutex;
     private readonly ToolStripMenuItem _autoStartItem;
+    private readonly ToolStripMenuItem _autoUpdateItem;
     private readonly System.Windows.Forms.Timer _heartbeat;
     private readonly TaskbarRestartWindow _taskbar;
+    private readonly SynchronizationContext _ui;
+    private readonly CancellationTokenSource _diagnosticsCts = new();
+    private readonly UpdateCoordinator _updates;
     private DateTimeOffset _lastNetworkEvent = DateTimeOffset.MinValue;
     private MonitorSnapshot _snapshot;
     private GroupAvailability _historyRu;
     private GroupAvailability _historyVpn;
     private bool _exiting;
+    private string? _updateNotice;
 
     public NetLightsContext()
     {
-        _mutex = new Mutex(true, @"Local\NetLights.Owned", out _);
-
+        _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _settings = SettingsStore.Load();
         (MonitorConfiguration config, string? warning) = SettingsStore.LoadPool();
-        _probe = HttpsProbeFactory.CreateProduction(TimeProvider.System, "1.0.0");
+        _probe = HttpsProbeFactory.CreateProduction(TimeProvider.System, ProductInfo.Version);
         var kernel = new MonitorKernel(config, TimeProvider.System);
-        _host = new MonitorHost(kernel, _probe, TimeProvider.System, () => _probe.RecycleConnections());
+        _host = new MonitorHost(kernel, _probe, TimeProvider.System, () => _probe.RecycleConnections(), _ui);
         _snapshot = kernel.Snapshot;
         _historyRu = _snapshot.Ru.Availability;
         _historyVpn = _snapshot.Vpn.Availability;
+        _updates = new UpdateCoordinator(new GitHubReleaseFeed(), new PendingUpdateStore(), ProductInfo.Version);
         try
         {
             StateHistoryStore.Prune();
         }
-        catch
+        catch (Exception ex)
         {
+            kernel.Log.Add(DateTimeOffset.UtcNow, "history", ex.Message);
+        }
+
+        if (_updates.TryReadLastFailure(out string? updateError))
+        {
+            _updateNotice = updateError;
         }
 
         _host.SnapshotChanged += OnSnapshot;
@@ -59,14 +70,24 @@ internal sealed class NetLightsContext : ApplicationContext
             SettingsStore.Save(_settings);
         };
         _menu.Items.Add(_autoStartItem);
+        _autoUpdateItem = new ToolStripMenuItem("Автообновление");
+        _autoUpdateItem.CheckOnClick = true;
+        _autoUpdateItem.Checked = _settings.AutoUpdateEnabled;
+        _autoUpdateItem.CheckedChanged += (_, _) =>
+        {
+            _settings.AutoUpdateEnabled = _autoUpdateItem.Checked;
+            SettingsStore.Save(_settings);
+        };
+        _menu.Items.Add(_autoUpdateItem);
         _menu.Items.Add("Экспорт", null, (_, _) => Export());
         _menu.Items.Add("Выход", null, (_, _) => ExitThread());
+        int iconSize = _renderer.SystemSmallIconSize();
         _icon = new NotifyIcon
         {
             Visible = true,
             ContextMenuStrip = _menu,
             Text = DiagnosticExport.FormatTooltip(_snapshot),
-            Icon = _renderer.Get(_snapshot.Ru.Availability, _snapshot.Vpn.Availability, 16)
+            Icon = _renderer.Get(_snapshot.Ru.Availability, _snapshot.Vpn.Availability, iconSize)
         };
         _icon.DoubleClick += (_, _) => ShowStatus();
         _heartbeat = new System.Windows.Forms.Timer { Interval = 1000 };
@@ -78,6 +99,10 @@ internal sealed class NetLightsContext : ApplicationContext
             }
 
             CheckSnapshotAge();
+            if (_settings.AutoUpdateEnabled)
+            {
+                _ = _updates.CheckInBackgroundAsync(CancellationToken.None);
+            }
         };
         _heartbeat.Start();
         NetworkChange.NetworkAvailabilityChanged += OnNetwork;
@@ -89,24 +114,23 @@ internal sealed class NetLightsContext : ApplicationContext
         {
             _icon.BalloonTipTitle = "Net Lights";
             _icon.BalloonTipText = warning;
+            _icon.ShowBalloonTip(4000);
         }
-    }
-
-    private void OnSnapshot(MonitorSnapshot snapshot)
-    {
-        if (_icon.ContextMenuStrip?.InvokeRequired == true)
+        else if (!string.IsNullOrEmpty(_updateNotice))
         {
-            _icon.ContextMenuStrip.BeginInvoke(() => ApplySnapshot(snapshot));
-            return;
+            _icon.BalloonTipTitle = "Net Lights";
+            _icon.BalloonTipText = _updateNotice;
+            _icon.ShowBalloonTip(4000);
         }
-
-        ApplySnapshot(snapshot);
     }
+
+    private void OnSnapshot(MonitorSnapshot snapshot) => ApplySnapshot(snapshot);
 
     private void ApplySnapshot(MonitorSnapshot snapshot)
     {
         _snapshot = snapshot;
-        Icon icon = _renderer.Get(snapshot.Ru.Availability, snapshot.Vpn.Availability, 16);
+        int iconSize = _renderer.SystemSmallIconSize();
+        Icon icon = _renderer.Get(snapshot.Ru.Availability, snapshot.Vpn.Availability, iconSize);
         if (!ReferenceEquals(_icon.Icon, icon))
         {
             _icon.Icon = icon;
@@ -126,8 +150,9 @@ internal sealed class NetLightsContext : ApplicationContext
             {
                 StateHistoryStore.Append(snapshot.GeneratedUtc, snapshot.Ru.Availability, snapshot.Vpn.Availability);
             }
-            catch
+            catch (Exception ex)
             {
+                _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "history", ex.Message);
             }
         }
 
@@ -136,10 +161,6 @@ internal sealed class NetLightsContext : ApplicationContext
             if (_status.NeedsBind(snapshot))
             {
                 _status.Bind(snapshot);
-            }
-            else
-            {
-                _status.RefreshAges();
             }
         }
     }
@@ -175,17 +196,30 @@ internal sealed class NetLightsContext : ApplicationContext
         }
 
         EndpointDefinition endpoint = new(first.Id, first.Group, first.Uri, first.InfrastructureId);
-        ManualDiagnosticResult result = await ManualDiagnostics.RunAsync(
-            _probe,
-            endpoint,
-            TimeProvider.System,
-            MonitorConstants.ManualDiagnosticsDeadline,
-            CancellationToken.None).ConfigureAwait(true);
-        MessageBox.Show(
-            $"{result.Note}\nHTTPS: {result.Https.Outcome} {result.Https.HttpStatus}\nICMP: {result.Icmp?.Status}\nTCP: {result.Tcp}\nIP: {result.Address}",
-            "Диагностика",
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Information);
+        try
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(_diagnosticsCts.Token);
+            ManualDiagnosticResult result = await ManualDiagnostics.RunAsync(
+                _probe,
+                endpoint,
+                TimeProvider.System,
+                MonitorConstants.ManualDiagnosticsDeadline,
+                linked.Token).ConfigureAwait(true);
+            MessageBox.Show(
+                $"{result.Note}\nHTTPS: {result.Https.Outcome} {result.Https.HttpStatus}\nICMP: {result.Icmp?.Status}\nTCP: {result.Tcp}\nIP: {result.Address}",
+                "Диагностика",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (OperationCanceledException)
+        {
+            MessageBox.Show("Диагностика отменена.", "Диагностика", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "diag", ex.Message);
+            MessageBox.Show("Не удалось выполнить диагностику: " + ex.Message, "Диагностика", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     private void Export()
@@ -197,6 +231,7 @@ internal sealed class NetLightsContext : ApplicationContext
         }
         catch (Exception ex)
         {
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "export", ex.Message);
             MessageBox.Show("Не удалось экспортировать: " + ex.Message, "Экспорт", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
@@ -234,7 +269,7 @@ internal sealed class NetLightsContext : ApplicationContext
         _icon.Visible = true;
     }
 
-    protected override async void ExitThreadCore()
+    protected override void ExitThreadCore()
     {
         if (_exiting)
         {
@@ -242,25 +277,52 @@ internal sealed class NetLightsContext : ApplicationContext
         }
 
         _exiting = true;
+        _heartbeat.Stop();
+        _diagnosticsCts.Cancel();
+        NetworkChange.NetworkAvailabilityChanged -= OnNetwork;
+        NetworkChange.NetworkAddressChanged -= OnNetwork;
+        Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPower;
         _settings.WindowX = _status.Location.X;
         _settings.WindowY = _status.Location.Y;
         _settings.WindowWidth = _status.Width;
         _settings.WindowHeight = _status.Height;
-        SettingsStore.Save(_settings);
-        _heartbeat.Stop();
-        NetworkChange.NetworkAvailabilityChanged -= OnNetwork;
-        NetworkChange.NetworkAddressChanged -= OnNetwork;
-        Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPower;
-        await _host.DisposeAsync().ConfigureAwait(true);
+        try
+        {
+            SettingsStore.Save(_settings);
+        }
+        catch (Exception ex)
+        {
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "settings", ex.Message);
+        }
+
+        try
+        {
+            _host.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
+        }
+        catch (Exception)
+        {
+        }
+
+        try
+        {
+            if (_settings.AutoUpdateEnabled)
+            {
+                UpdateAgentLauncher.TryStart(_updates);
+            }
+        }
+        catch (Exception ex)
+        {
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "update", ex.Message);
+        }
+
         _probe.Dispose();
+        _diagnosticsCts.Dispose();
         _icon.Visible = false;
         _icon.Dispose();
         _menu.Dispose();
         _renderer.Dispose();
         _status.Dispose();
         _taskbar.DestroyHandle();
-        _mutex.ReleaseMutex();
-        _mutex.Dispose();
         base.ExitThreadCore();
     }
 
