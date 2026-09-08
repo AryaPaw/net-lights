@@ -8,6 +8,7 @@ public sealed class StartLimiter
 
     public bool CanStart(MonotonicClock clock, int physicalInflight, int groupInflight, bool endpointPhysicalInflight)
     {
+        RemoveOlderThan(clock, TimeSpan.FromSeconds(60));
         if (physicalInflight >= MonitorConstants.MaxPhysicalInflight)
         {
             return false;
@@ -37,7 +38,14 @@ public sealed class StartLimiter
         return true;
     }
 
-    public void Record(long timestamp) => _starts.Enqueue(timestamp);
+    public void Record(long timestamp)
+    {
+        _starts.Enqueue(timestamp);
+        while (_starts.Count > MonitorConstants.MaxStartsPerMinute)
+        {
+            _starts.Dequeue();
+        }
+    }
 
     public int CountInOpenClosedWindow(MonotonicClock clock, long now, TimeSpan window)
     {

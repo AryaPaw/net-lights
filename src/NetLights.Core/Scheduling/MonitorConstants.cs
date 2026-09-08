@@ -26,6 +26,7 @@ public static class MonitorConstants
     public const int MaxGroupInflight = 2;
     public const int MaxStartsPerSecond = 4;
     public const int MaxStartsPerMinute = 120;
+    public const int MaxConsecutiveFailureMarks = 32;
     public const int MaxEpisodeNewProbes = 7;
     public const int MaxLogEntries = 2000;
     public const int MaxLogBytes = 2 * 1024 * 1024;

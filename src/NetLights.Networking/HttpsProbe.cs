@@ -39,12 +39,25 @@ public sealed class HttpsProbe : IProbe, IDisposable
 
     public void RecycleConnections()
     {
+        HttpClient oldClient;
         lock (_gate)
         {
-            HttpClient oldClient = _client;
+            oldClient = _client;
             (_handler, _client) = CreateClient();
-            oldClient.Dispose();
         }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+            }
+
+            oldClient.Dispose();
+        });
     }
 
     public void CloseIdleConnections() => RecycleConnections();
@@ -168,8 +181,19 @@ public sealed class HttpsProbe : IProbe, IDisposable
         };
         client.DefaultRequestHeaders.UserAgent.ParseAdd(_userAgent);
         client.DefaultRequestHeaders.ExpectContinue = false;
+        UsesCookies = handler.UseCookies;
+        UsesProxy = handler.UseProxy;
+        AllowsAutoRedirect = handler.AllowAutoRedirect;
+        RequestVersion = client.DefaultRequestVersion;
+        VersionPolicy = client.DefaultVersionPolicy;
         return (handler, client);
     }
+
+    public bool UsesCookies { get; private set; }
+    public bool UsesProxy { get; private set; }
+    public bool AllowsAutoRedirect { get; private set; }
+    public Version RequestVersion { get; private set; } = HttpVersion.Version11;
+    public HttpVersionPolicy VersionPolicy { get; private set; } = HttpVersionPolicy.RequestVersionExact;
 
     private async ValueTask<Stream> ConnectAsync(SocketsHttpConnectionContext context, CancellationToken cancellationToken)
     {

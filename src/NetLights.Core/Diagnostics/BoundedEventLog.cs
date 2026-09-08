@@ -5,32 +5,42 @@ namespace NetLights.Core;
 public sealed class BoundedEventLog
 {
     private readonly Queue<LogEntry> _entries = new();
+    private readonly object _gate = new();
     private int _bytes;
 
-    public IReadOnlyCollection<LogEntry> Entries => _entries;
+    public IReadOnlyList<LogEntry> Snapshot()
+    {
+        lock (_gate)
+        {
+            return _entries.ToArray();
+        }
+    }
 
     public void Add(DateTimeOffset utc, string code, string message)
     {
         string safe = Truncate(Sanitize(message), 240);
         var entry = new LogEntry(utc, code, safe);
         int size = Encoding.UTF8.GetByteCount(entry.Code) + Encoding.UTF8.GetByteCount(entry.Message) + 32;
-        _entries.Enqueue(entry);
-        _bytes += size;
-        while (_entries.Count > 0)
+        lock (_gate)
         {
-            LogEntry oldest = _entries.Peek();
-            bool tooOld = utc - oldest.Utc > MonitorConstants.HistoryRetention;
-            bool tooMany = _entries.Count > MonitorConstants.MaxLogEntries || _bytes > MonitorConstants.MaxLogBytes;
-            if (!tooOld && !tooMany)
+            _entries.Enqueue(entry);
+            _bytes += size;
+            while (_entries.Count > 0)
             {
-                break;
-            }
+                LogEntry oldest = _entries.Peek();
+                bool tooOld = utc - oldest.Utc > MonitorConstants.HistoryRetention;
+                bool tooMany = _entries.Count > MonitorConstants.MaxLogEntries || _bytes > MonitorConstants.MaxLogBytes;
+                if (!tooOld && !tooMany)
+                {
+                    break;
+                }
 
-            LogEntry old = _entries.Dequeue();
-            _bytes -= Encoding.UTF8.GetByteCount(old.Code) + Encoding.UTF8.GetByteCount(old.Message) + 32;
-            if (_bytes < 0)
-            {
-                _bytes = 0;
+                LogEntry old = _entries.Dequeue();
+                _bytes -= Encoding.UTF8.GetByteCount(old.Code) + Encoding.UTF8.GetByteCount(old.Message) + 32;
+                if (_bytes < 0)
+                {
+                    _bytes = 0;
+                }
             }
         }
     }
