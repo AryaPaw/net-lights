@@ -77,6 +77,15 @@ internal static class Program
             if (ok)
             {
                 store.ClearPending();
+                if (parsed.TryGetValue("restart", out string? restart) && UpdatePolicy.IsSafeRestartPath(restart))
+                {
+                    string fullRestart = Path.GetFullPath(restart);
+                    using var next = new Process();
+                    next.StartInfo.FileName = fullRestart;
+                    next.StartInfo.WorkingDirectory = Path.GetDirectoryName(fullRestart);
+                    next.StartInfo.UseShellExecute = false;
+                    next.Start();
+                }
             }
 
             return install.ExitCode;

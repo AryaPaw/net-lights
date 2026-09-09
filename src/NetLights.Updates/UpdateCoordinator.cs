@@ -26,36 +26,53 @@ public sealed class UpdateCoordinator : IDisposable
 
     public PendingUpdate? Pending => _store.ReadPending();
 
-    public Task CheckInBackgroundAsync(CancellationToken cancellationToken)
+    public Task CheckInBackgroundAsync(CancellationToken cancellationToken, Action? onStaged = null)
     {
         if (Interlocked.Exchange(ref _checking, 1) != 0)
         {
             return Task.CompletedTask;
         }
 
-        return Task.Run(() => CheckAsync(cancellationToken));
+        return Task.Run(async () =>
+        {
+            bool staged = await CheckAsync(cancellationToken).ConfigureAwait(false);
+            if (staged)
+            {
+                onStaged?.Invoke();
+            }
+        });
     }
 
-    public async Task CheckAsync(CancellationToken cancellationToken)
+    public async Task<bool> CheckAsync(CancellationToken cancellationToken)
     {
+        bool staged = false;
         try
         {
+            PendingUpdate? existing = _store.ReadPending();
+            if (UpdatePolicy.ShouldApplyPending(_currentVersion, existing)
+                && existing is not null
+                && File.Exists(existing.InstallerPath))
+            {
+                staged = true;
+                return staged;
+            }
+
             GitHubRelease? release = await _feed.GetLatestAsync(cancellationToken).ConfigureAwait(false);
             if (release is null || !UpdatePolicy.IsNewerStable(_currentVersion, release.TagName, release.Prerelease))
             {
-                return;
+                return false;
             }
 
             GitHubAsset? asset = release.Assets.FirstOrDefault(a =>
                 UpdatePolicy.SafeInstallerFileName(a.Name) is not null);
             if (asset?.BrowserDownloadUrl is null || !UpdatePolicy.IsAllowedAssetUrl(asset.BrowserDownloadUrl))
             {
-                return;
+                return false;
             }
 
             if (asset.Size <= 0 || asset.Size > UpdatePolicy.MaxInstallerBytes)
             {
-                return;
+                return false;
             }
 
             string? fileName = UpdatePolicy.SafeInstallerFileName(asset.Name);
@@ -65,7 +82,7 @@ public sealed class UpdateCoordinator : IDisposable
                 || version.Contains("..", StringComparison.Ordinal)
                 || !Version.TryParse(version, out _))
             {
-                return;
+                return false;
             }
 
             string dir = Path.Combine(_store.Root, version);
@@ -73,7 +90,7 @@ public sealed class UpdateCoordinator : IDisposable
             string partial = dest + ".partial";
             if (!UpdatePolicy.IsInsideRoot(_store.Root, dest) || !UpdatePolicy.IsInsideRoot(_store.Root, partial))
             {
-                return;
+                return false;
             }
 
             Directory.CreateDirectory(dir);
@@ -89,7 +106,7 @@ public sealed class UpdateCoordinator : IDisposable
             if (digest is null || !IntegrityVerifier.Matches(digest, hash))
             {
                 File.Delete(partial);
-                return;
+                return false;
             }
 
             if (File.Exists(dest))
@@ -100,6 +117,7 @@ public sealed class UpdateCoordinator : IDisposable
             File.Move(partial, dest, true);
             cancellationToken.ThrowIfCancellationRequested();
             _store.WritePending(new PendingUpdate(version, dest, hash, DateTimeOffset.UtcNow));
+            staged = true;
         }
         catch (Exception)
         {
@@ -109,6 +127,8 @@ public sealed class UpdateCoordinator : IDisposable
         {
             Interlocked.Exchange(ref _checking, 0);
         }
+
+        return staged;
     }
 
     private async Task DownloadAsync(Uri url, string partialPath, long size, CancellationToken cancellationToken)
@@ -188,7 +208,7 @@ public sealed class UpdateCoordinator : IDisposable
 
 public static class UpdateAgentLauncher
 {
-    public static bool TryStart(UpdateCoordinator coordinator)
+    public static bool TryStart(UpdateCoordinator coordinator, string? restartPath = null)
     {
         PendingUpdate? pending = coordinator.Pending;
         if (pending is null || !File.Exists(pending.InstallerPath))
@@ -210,6 +230,12 @@ public static class UpdateAgentLauncher
         process.StartInfo.ArgumentList.Add(pending.InstallerPath);
         process.StartInfo.ArgumentList.Add("--sha256");
         process.StartInfo.ArgumentList.Add(pending.Sha256);
+        if (restartPath is not null && UpdatePolicy.IsSafeRestartPath(restartPath))
+        {
+            process.StartInfo.ArgumentList.Add("--restart");
+            process.StartInfo.ArgumentList.Add(Path.GetFullPath(restartPath));
+        }
+
         process.StartInfo.UseShellExecute = false;
         process.StartInfo.CreateNoWindow = true;
         return process.Start();

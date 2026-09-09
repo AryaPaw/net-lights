@@ -19,8 +19,6 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly TaskbarRestartWindow _taskbar;
     private readonly SynchronizationContext _ui;
     private readonly CancellationTokenSource _diagnosticsCts = new();
-    private readonly GitHubReleaseFeed _feed;
-    private readonly UpdateCoordinator _updates;
     private readonly ToolStripMenuItem _pauseItem;
     private DateTimeOffset _lastNetworkEvent = DateTimeOffset.MinValue;
     private MonitorSnapshot _snapshot;
@@ -49,8 +47,6 @@ internal sealed class NetLightsContext : ApplicationContext
         _snapshot = kernel.Snapshot;
         _historyRu = _snapshot.Ru.Availability;
         _historyVpn = _snapshot.Vpn.Availability;
-        _feed = new GitHubReleaseFeed();
-        _updates = new UpdateCoordinator(_feed, new PendingUpdateStore(), ProductInfo.Version);
         try
         {
             StateHistoryStore.Prune();
@@ -60,7 +56,7 @@ internal sealed class NetLightsContext : ApplicationContext
             kernel.Log.Add(DateTimeOffset.UtcNow, "history", ex.Message);
         }
 
-        if (_updates.TryReadLastFailure(out string? updateError))
+        if (new PendingUpdateStore().TryReadLastFailure(out string? updateError))
         {
             _updateNotice = updateError;
         }
@@ -110,17 +106,18 @@ internal sealed class NetLightsContext : ApplicationContext
                 CheckSnapshotAge();
             }
         };
-        _heartbeat.Start();
         NetworkChange.NetworkAvailabilityChanged += OnNetwork;
         NetworkChange.NetworkAddressChanged += OnNetwork;
         Microsoft.Win32.SystemEvents.PowerModeChanged += OnPower;
         _taskbar = new TaskbarRestartWindow(RestoreIcon);
+        _heartbeat.Start();
         _host.Start();
-        if (_settings.AutoUpdateEnabled)
-        {
-            _ = _updates.CheckInBackgroundAsync(_diagnosticsCts.Token);
-        }
-        ShowStatus();
+        SilentUpdateRuntime.Start(
+            () => _settings.AutoUpdateEnabled,
+            ProductInfo.Version,
+            Application.ExecutablePath,
+            () => _ui.Post(_ => ExitThread(), null),
+            _diagnosticsCts.Token);
         if (!string.IsNullOrEmpty(warning))
         {
             _icon.BalloonTipTitle = "Net Lights";
@@ -202,8 +199,7 @@ internal sealed class NetLightsContext : ApplicationContext
 
         _status.Bind(_snapshot);
         _status.BindSettings(AutoStartStore.IsEnabled(), _settings.AutoUpdateEnabled, _updateNotice);
-        _status.Show();
-        _status.Activate();
+        _status.Reveal();
     }
 
     private void OnAutoStartFromWindow(bool enabled)
@@ -323,21 +319,6 @@ internal sealed class NetLightsContext : ApplicationContext
         {
         }
 
-        try
-        {
-            _updates.WaitIdle(TimeSpan.FromSeconds(3));
-            if (_settings.AutoUpdateEnabled)
-            {
-                UpdateAgentLauncher.TryStart(_updates);
-            }
-        }
-        catch (Exception ex)
-        {
-            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "update", ex.Message);
-        }
-
-        _updates.Dispose();
-        _feed.Dispose();
         _probe.Dispose();
         _diagnosticsCts.Dispose();
         _icon.Visible = false;
