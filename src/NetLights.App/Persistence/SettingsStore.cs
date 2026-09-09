@@ -39,6 +39,29 @@ internal static class SettingsStore
     public static string SettingsPath => Path.Combine(RootDirectory, "settings.json");
     public static string EndpointsPath => Path.Combine(RootDirectory, "endpoints.json");
 
+    public static void DeleteLegacyStateHistory()
+    {
+        TryDelete(Path.Combine(RootDirectory, "state-history.jsonl"));
+        TryDelete(Path.Combine(RootDirectory, "state-history.jsonl.tmp"));
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
     public static AppSettings Load()
     {
         (AppSettings settings, _) = LoadDetailed();

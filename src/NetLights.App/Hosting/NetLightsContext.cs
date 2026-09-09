@@ -22,8 +22,6 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly ToolStripMenuItem _pauseItem;
     private DateTimeOffset _lastNetworkEvent = DateTimeOffset.MinValue;
     private MonitorSnapshot _snapshot;
-    private GroupAvailability _historyRu;
-    private GroupAvailability _historyVpn;
     private bool _exiting;
     private bool _syncingToggles;
     private string? _updateNotice;
@@ -45,11 +43,9 @@ internal sealed class NetLightsContext : ApplicationContext
         var kernel = new MonitorKernel(config, TimeProvider.System);
         _host = new MonitorHost(kernel, _probe, TimeProvider.System, () => _probe.RecycleConnections(), _ui);
         _snapshot = kernel.Snapshot;
-        _historyRu = _snapshot.Ru.Availability;
-        _historyVpn = _snapshot.Vpn.Availability;
         try
         {
-            StateHistoryStore.Prune();
+            SettingsStore.DeleteLegacyStateHistory();
         }
         catch (Exception ex)
         {
@@ -155,20 +151,6 @@ internal sealed class NetLightsContext : ApplicationContext
             _syncingToggles = true;
             _pauseItem.Checked = snapshot.Paused;
             _syncingToggles = false;
-        }
-
-        if (snapshot.Ru.Availability != _historyRu || snapshot.Vpn.Availability != _historyVpn)
-        {
-            _historyRu = snapshot.Ru.Availability;
-            _historyVpn = snapshot.Vpn.Availability;
-            try
-            {
-                StateHistoryStore.Append(snapshot.GeneratedUtc, snapshot.Ru.Availability, snapshot.Vpn.Availability);
-            }
-            catch (Exception ex)
-            {
-                _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "history", ex.Message);
-            }
         }
 
         if (_status.Visible)

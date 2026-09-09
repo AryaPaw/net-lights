@@ -1,5 +1,4 @@
 using System.IO.Compression;
-using System.Reflection;
 using System.Text.Json;
 using NetLights.Core;
 
@@ -8,10 +7,14 @@ namespace NetLights.App;
 internal static class DiagnosticExport
 {
     public static string Export(MonitorSnapshot snapshot, BoundedEventLog log, string? configWarning)
+        => Export(snapshot, log, configWarning, Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
+
+    internal static string Export(MonitorSnapshot snapshot, BoundedEventLog log, string? configWarning, string destinationDirectory)
     {
         string stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss");
         string dir = Path.Combine(Path.GetTempPath(), "NetLights-export-" + Guid.NewGuid().ToString("N"));
-        string zip = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), $"net-lights-export-{stamp}.zip");
+        Directory.CreateDirectory(destinationDirectory);
+        string zip = Path.Combine(destinationDirectory, $"net-lights-export-{stamp}.zip");
         Directory.CreateDirectory(dir);
         try
         {
@@ -25,11 +28,6 @@ internal static class DiagnosticExport
                 configWarning
             };
             File.WriteAllText(Path.Combine(dir, "versions.json"), JsonSerializer.Serialize(versions, new JsonSerializerOptions { WriteIndented = true }));
-            string history = StateHistoryStore.FilePath;
-            if (File.Exists(history))
-            {
-                File.Copy(history, Path.Combine(dir, "state-history.jsonl"), true);
-            }
 
             string tmpZip = zip + ".partial";
             if (File.Exists(tmpZip))
