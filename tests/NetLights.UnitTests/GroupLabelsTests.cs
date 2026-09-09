@@ -6,7 +6,7 @@ namespace NetLights.UnitTests;
 public sealed class GroupLabelsTests
 {
     [Fact]
-    public void ProviderLabel_IsProviderNotCountry()
+    public void ProviderLabel_IsProvider()
     {
         Assert.Equal("Провайдер", GroupLabels.Provider);
         Assert.Equal("VPN", GroupLabels.Vpn);

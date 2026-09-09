@@ -172,7 +172,7 @@ public sealed class UiRendererTests
     }
 
     [Fact]
-    public void TooltipAndBadges_UseProviderNotCountry()
+    public void TooltipAndBadges_UseProviderLabel()
     {
         using var form = new StatusForm();
         _ = form.Handle;
