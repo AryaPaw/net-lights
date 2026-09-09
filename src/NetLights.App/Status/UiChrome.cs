@@ -78,6 +78,11 @@ internal sealed class ThemedButton : Button
         {
             _stretch = value;
             Dock = value ? DockStyle.Fill : DockStyle.None;
+            if (!value)
+            {
+                MinimumSize = new Size(0, UiTheme.ButtonHeight);
+                Height = UiTheme.ButtonHeight;
+            }
         }
     }
 
@@ -112,8 +117,23 @@ internal sealed class ThemedButton : Button
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
     }
 
+    protected override void OnEnabledChanged(EventArgs e)
+    {
+        base.OnEnabledChanged(e);
+        ApplyPalette();
+        Invalidate();
+    }
+
     private void ApplyPalette()
     {
+        if (!Enabled)
+        {
+            BackColor = UiTheme.Track;
+            ForeColor = UiTheme.Muted;
+            FlatAppearance.BorderColor = UiTheme.Border;
+            return;
+        }
+
         BackColor = _primary ? UiTheme.Brand800 : UiTheme.Card;
         ForeColor = _primary ? UiTheme.OnBrand : UiTheme.Ink;
         FlatAppearance.BorderColor = _primary ? UiTheme.Brand800 : UiTheme.Border;

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using NetLights.Core;
@@ -18,6 +19,7 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _heartbeat;
     private readonly TaskbarRestartWindow _taskbar;
     private readonly SynchronizationContext _ui;
+    private readonly SemaphoreSlim _updateGate = new(1, 1);
     private readonly CancellationTokenSource _diagnosticsCts = new();
     private readonly ToolStripMenuItem _pauseItem;
     private DateTimeOffset _lastNetworkEvent = DateTimeOffset.MinValue;
@@ -62,6 +64,7 @@ internal sealed class NetLightsContext : ApplicationContext
         _status.AutoUpdateChanged = OnAutoUpdateFromWindow;
         _status.DiagnoseRequested = DiagnoseAsync;
         _status.ExportRequested = Export;
+        _status.CheckUpdatesRequested = () => _ = CheckUpdatesManualAsync();
         _status.BindSettings(AutoStartStore.IsEnabled(), _settings.AutoUpdateEnabled, _updateNotice);
         _menu = new ContextMenuStrip();
         _menu.Items.Add("Открыть окно", null, (_, _) => ShowStatus());
@@ -113,6 +116,7 @@ internal sealed class NetLightsContext : ApplicationContext
             ProductInfo.Version,
             Application.ExecutablePath,
             () => _ui.Post(_ => ExitThread(), null),
+            _updateGate,
             _diagnosticsCts.Token);
         if (!string.IsNullOrEmpty(warning))
         {
@@ -234,6 +238,63 @@ internal sealed class NetLightsContext : ApplicationContext
         }
     }
 
+    private async Task CheckUpdatesManualAsync()
+    {
+        if (!await _updateGate.WaitAsync(0).ConfigureAwait(true))
+        {
+            _status.SetManualUpdateState(false, ManualUpdateCopy.AlreadyRunning);
+            return;
+        }
+
+        bool exitRequested = false;
+        SilentUpdateOutcome outcome = SilentUpdateOutcome.Failed;
+        try
+        {
+            _status.SetManualUpdateState(true, ManualUpdateCopy.Checking);
+            string? applicationDirectory = Path.GetDirectoryName(Application.ExecutablePath);
+            if (string.IsNullOrWhiteSpace(applicationDirectory))
+            {
+                outcome = SilentUpdateOutcome.Failed;
+                return;
+            }
+
+            string downloadDirectory = Path.Combine(
+                Path.GetTempPath(),
+                "NetLights",
+                "updates",
+                Guid.NewGuid().ToString("N"));
+            using GitHubReleaseFeed probe = new(timeout: NetworkWaitPolicy.ProbeTimeout, githubApi: false);
+            using GitHubReleaseFeed feed = new();
+            outcome = await SilentUpdateCoordinator.RunOnce(new SilentUpdateContext(
+                true,
+                ProductInfo.Version,
+                Process.GetCurrentProcess().ProcessName,
+                applicationDirectory,
+                downloadDirectory,
+                RuntimeInformation.ProcessArchitecture,
+                probe,
+                feed,
+                new CmdSilentSetupInstaller(),
+                () => exitRequested = true,
+                _diagnosticsCts.Token)).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "update", ex.Message);
+            outcome = SilentUpdateOutcome.Failed;
+        }
+        finally
+        {
+            _updateGate.Release();
+        }
+
+        _status.SetManualUpdateState(false, ManualUpdateCopy.For(outcome));
+        if (exitRequested)
+        {
+            _ui.Post(_ => ExitThread(), null);
+        }
+    }
+
     private void OnNetwork(object? sender, EventArgs e)
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -308,6 +369,7 @@ internal sealed class NetLightsContext : ApplicationContext
         _menu.Dispose();
         _renderer.Dispose();
         _status.Dispose();
+        _updateGate.Dispose();
         _taskbar.DestroyHandle();
         base.ExitThreadCore();
     }
