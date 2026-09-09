@@ -107,6 +107,61 @@ public sealed class UpdateCoordinatorTests
     }
 
     [Fact]
+    public async Task StagesInstallerWhenRedirectGoesToReleaseAssetsGithubusercontent()
+    {
+        string root = NewRoot();
+        try
+        {
+            string hash = Sha256Hex(InstallerBody);
+            using var feed = new GitHubReleaseFeed(new StaticHandler(ManifestJson("sha256:" + hash), "application/json"));
+            using var coordinator = new UpdateCoordinator(
+                feed,
+                new PendingUpdateStore(root),
+                "1.0.0",
+                new RedirectHandler(
+                    new Uri("https://release-assets.githubusercontent.com/github-production-release-asset/foo"),
+                    Encoding.UTF8.GetBytes(InstallerBody)));
+            Assert.True(await coordinator.CheckAsync(CancellationToken.None));
+            Assert.NotNull(coordinator.Pending);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public async Task DownloadFollowsReleaseAssetsGithubusercontentRedirect()
+    {
+        string root = NewRoot();
+        string destination = Path.Combine(root, "NetLights-Setup-win-x64-1.0.1.exe");
+        try
+        {
+            using var feed = new GitHubReleaseFeed(
+                new RedirectHandler(
+                    new Uri("https://release-assets.githubusercontent.com/github-production-release-asset/foo"),
+                    Encoding.UTF8.GetBytes(InstallerBody)));
+            bool ok = await feed.Download(
+                new Uri("https://github.com/AryaPaw/net-lights/releases/download/v1.0.1/NetLights-Setup-win-x64-1.0.1.exe"),
+                destination,
+                CancellationToken.None);
+            Assert.True(ok);
+            Assert.Equal(InstallerBody, File.ReadAllText(destination));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void DefaultFeedTimeoutIsFiveMinutes()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(5), GitHubReleaseFeed.DefaultTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(20), GitHubReleaseFeed.QueryTimeout);
+    }
+
+    [Fact]
     public async Task ReportsReadyWhenPendingNewerInstallerAlreadyOnDisk()
     {
         string root = NewRoot();
