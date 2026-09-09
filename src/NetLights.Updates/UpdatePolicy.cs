@@ -18,7 +18,7 @@ public sealed class UpdatePolicy
             return false;
         }
 
-        if (url.Host.Equals("objects.githubusercontent.com", StringComparison.OrdinalIgnoreCase))
+        if (IsAllowedReleaseCdnHost(url.Host))
         {
             return true;
         }
@@ -53,6 +53,13 @@ public sealed class UpdatePolicy
         }
 
         return file;
+    }
+
+    private static bool IsAllowedReleaseCdnHost(string host)
+    {
+        return host.Equals("objects.githubusercontent.com", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("release-assets.githubusercontent.com", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("github-releases.githubusercontent.com", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsGitHubReleaseDownload(Uri url)

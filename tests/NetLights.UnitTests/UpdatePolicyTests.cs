@@ -23,6 +23,12 @@ public sealed class UpdatePolicyTests
         Assert.False(UpdatePolicy.IsAllowedAssetUrl(new Uri("https://raw.githubusercontent.com/AryaPaw/net-lights/main/setup.exe")));
         Assert.False(UpdatePolicy.IsAllowedAssetUrl(new Uri("https://objects.githubusercontent.com/github-production-release-asset-2e65be/foo")));
         Assert.True(UpdatePolicy.IsAllowedRedirectUrl(new Uri("https://objects.githubusercontent.com/github-production-release-asset-2e65be/foo")));
+        Assert.True(UpdatePolicy.IsAllowedRedirectUrl(new Uri("https://release-assets.githubusercontent.com/github-production-release-asset/foo")));
+        Assert.True(UpdatePolicy.IsAllowedRedirectUrl(new Uri("https://github-releases.githubusercontent.com/github-production-release-asset/foo")));
+        Assert.False(UpdatePolicy.IsAllowedRedirectUrl(new Uri("https://raw.githubusercontent.com/AryaPaw/net-lights/main/setup.exe")));
+        Assert.False(UpdatePolicy.IsAllowedRedirectUrl(new Uri("https://evil.example/x")));
+        Assert.False(UpdatePolicy.IsAllowedRedirectUrl(new Uri("https://githubusercontent.com.evil.example/x")));
+        Assert.False(UpdatePolicy.IsAllowedRedirectUrl(new Uri("http://release-assets.githubusercontent.com/foo")));
     }
 
     [Fact]

@@ -22,6 +22,10 @@ public sealed class GitHubReleaseFeed : IReleaseFeed, IInternetProbe, IDisposabl
 {
     private readonly HttpClient _http;
 
+    public static TimeSpan QueryTimeout { get; } = TimeSpan.FromSeconds(20);
+
+    public static TimeSpan DefaultTimeout { get; } = TimeSpan.FromMinutes(5);
+
     public GitHubReleaseFeed(HttpMessageHandler? handler = null, TimeSpan? timeout = null, bool githubApi = true)
     {
         HttpMessageHandler inner = handler ?? new SocketsHttpHandler
@@ -30,7 +34,7 @@ public sealed class GitHubReleaseFeed : IReleaseFeed, IInternetProbe, IDisposabl
             UseCookies = false
         };
         _http = new HttpClient(inner, disposeHandler: true);
-        _http.Timeout = timeout ?? TimeSpan.FromSeconds(20);
+        _http.Timeout = timeout ?? DefaultTimeout;
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("NetLights-Updater");
         if (githubApi)
         {
@@ -48,10 +52,12 @@ public sealed class GitHubReleaseFeed : IReleaseFeed, IInternetProbe, IDisposabl
     {
         try
         {
+            using var queryTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            queryTimeout.CancelAfter(QueryTimeout);
             using HttpResponseMessage response = await _http.GetAsync(
                 UpdatePolicy.LatestApi,
                 HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken).ConfigureAwait(false);
+                queryTimeout.Token).ConfigureAwait(false);
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
                 return new ReleaseQuery(true, null);
@@ -67,8 +73,8 @@ public sealed class GitHubReleaseFeed : IReleaseFeed, IInternetProbe, IDisposabl
                 return new ReleaseQuery(false, null);
             }
 
-            await using Stream input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            byte[] bytes = await ReadCappedAsync(input, (int)UpdatePolicy.MaxManifestBytes, cancellationToken).ConfigureAwait(false);
+            await using Stream input = await response.Content.ReadAsStreamAsync(queryTimeout.Token).ConfigureAwait(false);
+            byte[] bytes = await ReadCappedAsync(input, (int)UpdatePolicy.MaxManifestBytes, queryTimeout.Token).ConfigureAwait(false);
 
             using JsonDocument doc = JsonDocument.Parse(bytes);
             JsonElement root = doc.RootElement;
