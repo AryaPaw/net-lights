@@ -56,4 +56,24 @@ public sealed class SilentUpdatePolicyTests
             Directory.Delete(root, true);
         }
     }
+
+    [Fact]
+    public void FailedRetry_IsMinutesNotHours()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(2), SilentUpdatePolicy.FailedRetry);
+        Assert.Equal(TimeSpan.FromMinutes(2), SilentUpdatePolicy.BusyRetry);
+    }
+}
+
+public sealed class ManualUpdateCopyTests
+{
+    [Theory]
+    [InlineData(SilentUpdateOutcome.NoUpdate, "Уже установлена последняя версия.")]
+    [InlineData(SilentUpdateOutcome.Applied, "Обновление скачано, сейчас установится.")]
+    [InlineData(SilentUpdateOutcome.Failed, "Не удалось проверить или скачать.")]
+    [InlineData(SilentUpdateOutcome.Offline, "Нет сети.")]
+    [InlineData(SilentUpdateOutcome.Skipped, "Обновления доступны только установленной копии.")]
+    [InlineData(SilentUpdateOutcome.Busy, "Сейчас нельзя обновить. Попробуйте через минуту.")]
+    public void For_CoversEveryOutcome(SilentUpdateOutcome outcome, string expected)
+        => Assert.Equal(expected, ManualUpdateCopy.For(outcome));
 }

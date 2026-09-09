@@ -1,7 +1,9 @@
 using System.Drawing;
+using System.Reflection;
 using System.Windows.Forms;
 using NetLights.App;
 using NetLights.Core;
+using NetLights.Updates;
 using Xunit;
 
 namespace NetLights.IntegrationTests;
@@ -129,5 +131,76 @@ public sealed class UiRendererTests
         Assert.NotEqual(unknownPixel, pausePixel);
         Color gap = paused.GetPixel(16, 16);
         Assert.True(gap.A < 40, $"gap alpha {gap.A}");
+    }
+
+    [Fact]
+    public void Settings_CheckUpdatesAndExportButtonsShareHeightAndBaseline()
+    {
+        using var form = new StatusForm();
+        ThemedButton check = FindButton(form, "checkUpdates");
+        ThemedButton export = FindButton(form, "exportLog");
+        Assert.Equal("Проверить обновления", check.Text);
+        Assert.Equal("Экспорт журнала", export.Text);
+        Assert.Equal(UiTheme.ButtonHeight, check.Height);
+        Assert.Equal(check.Height, export.Height);
+        Assert.Equal(check.Top, export.Top);
+        Assert.Equal(check.Margin.Top, export.Margin.Top);
+        Assert.Equal(check.Margin.Bottom, export.Margin.Bottom);
+        Assert.True(check.Width >= export.Width);
+        Assert.True(export.Left >= check.Right);
+    }
+
+    [Fact]
+    public void Settings_CheckUpdatesClickInvokesCallbackAndBusyDisablesButton()
+    {
+        using var form = new StatusForm();
+        _ = form.Handle;
+        FindButton(form, "settingsTab").PerformClick();
+        int clicks = 0;
+        form.CheckUpdatesRequested = () => clicks++;
+        ThemedButton check = FindButton(form, "checkUpdates");
+        Label status = FindLabel(form, "manualUpdateStatus");
+        typeof(Button).GetMethod("OnClick", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(check, [EventArgs.Empty]);
+        Assert.Equal(1, clicks);
+        form.SetManualUpdateState(true, ManualUpdateCopy.Checking);
+        Assert.False(check.Enabled);
+        Assert.Equal(ManualUpdateCopy.Checking, status.Text);
+        form.SetManualUpdateState(false, ManualUpdateCopy.For(SilentUpdateOutcome.NoUpdate));
+        Assert.True(check.Enabled);
+        Assert.Equal(ManualUpdateCopy.For(SilentUpdateOutcome.NoUpdate), status.Text);
+    }
+
+    private static ThemedButton FindButton(Control root, string accessibleName)
+    {
+        ThemedButton? found = Find<ThemedButton>(root, accessibleName);
+        Assert.NotNull(found);
+        return found;
+    }
+
+    private static Label FindLabel(Control root, string accessibleName)
+    {
+        Label? found = Find<Label>(root, accessibleName);
+        Assert.NotNull(found);
+        return found;
+    }
+
+    private static T? Find<T>(Control root, string accessibleName) where T : Control
+    {
+        if (root is T match && root.AccessibleName == accessibleName)
+        {
+            return match;
+        }
+
+        foreach (Control child in root.Controls)
+        {
+            T? nested = Find<T>(child, accessibleName);
+            if (nested is not null)
+            {
+                return nested;
+            }
+        }
+
+        return null;
     }
 }

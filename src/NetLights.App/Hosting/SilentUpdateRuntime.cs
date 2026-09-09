@@ -8,14 +8,20 @@ namespace NetLights.App;
 [ExcludeFromCodeCoverage]
 internal static class SilentUpdateRuntime
 {
-    public static void Start(Func<bool> autoUpdateEnabled, string currentVersion, string processPath, Action requestExit, CancellationToken cancellationToken)
+    public static void Start(
+        Func<bool> autoUpdateEnabled,
+        string currentVersion,
+        string processPath,
+        Action requestExit,
+        SemaphoreSlim updateGate,
+        CancellationToken cancellationToken)
     {
         if (!SilentUpdatePolicy.AllowsBackgroundProcess(Process.GetCurrentProcess().ProcessName))
         {
             return;
         }
 
-        _ = Task.Run(() => Loop(autoUpdateEnabled, currentVersion, processPath, requestExit, cancellationToken));
+        _ = Task.Run(() => Loop(autoUpdateEnabled, currentVersion, processPath, requestExit, updateGate, cancellationToken));
     }
 
     private static async Task Loop(
@@ -23,6 +29,7 @@ internal static class SilentUpdateRuntime
         string currentVersion,
         string processPath,
         Action requestExit,
+        SemaphoreSlim updateGate,
         CancellationToken cancellationToken)
     {
         string? applicationDirectory = Path.GetDirectoryName(processPath);
@@ -51,18 +58,33 @@ internal static class SilentUpdateRuntime
                     "updates",
                     Guid.NewGuid().ToString("N"));
 
-                SilentUpdateOutcome outcome = await SilentUpdateCoordinator.RunOnce(new SilentUpdateContext(
-                    autoUpdateEnabled(),
-                    currentVersion,
-                    Process.GetCurrentProcess().ProcessName,
-                    applicationDirectory,
-                    downloadDirectory,
-                    architecture,
-                    probe,
-                    feed,
-                    new CmdSilentSetupInstaller(),
-                    requestExit,
-                    cancellationToken)).ConfigureAwait(false);
+                await updateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                SilentUpdateOutcome outcome;
+                bool exitRequested = false;
+                try
+                {
+                    outcome = await SilentUpdateCoordinator.RunOnce(new SilentUpdateContext(
+                        autoUpdateEnabled(),
+                        currentVersion,
+                        Process.GetCurrentProcess().ProcessName,
+                        applicationDirectory,
+                        downloadDirectory,
+                        architecture,
+                        probe,
+                        feed,
+                        new CmdSilentSetupInstaller(),
+                        () => exitRequested = true,
+                        cancellationToken)).ConfigureAwait(false);
+                }
+                finally
+                {
+                    updateGate.Release();
+                }
+
+                if (exitRequested)
+                {
+                    requestExit();
+                }
 
                 if (outcome is SilentUpdateOutcome.Applied or SilentUpdateOutcome.NoUpdate)
                 {

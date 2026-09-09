@@ -5,7 +5,7 @@ namespace NetLights.Updates;
 public static class SilentUpdatePolicy
 {
     public static readonly TimeSpan BusyRetry = TimeSpan.FromMinutes(2);
-    public static readonly TimeSpan FailedRetry = TimeSpan.FromHours(6);
+    public static readonly TimeSpan FailedRetry = TimeSpan.FromMinutes(2);
     public const string ProbeUrl = "https://github.com/AryaPaw/net-lights";
 
     public static bool TryParseTag(string? tag, out Version? version)

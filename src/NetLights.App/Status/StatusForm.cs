@@ -17,6 +17,9 @@ internal sealed class StatusForm : Form
     private readonly CheckBox _autoStart = new();
     private readonly CheckBox _autoUpdate = new();
     private readonly Label _updateLine = new();
+    private readonly ThemedButton _checkUpdates = new("Проверить обновления", true);
+    private readonly ThemedButton _exportLog = new("Экспорт журнала", false);
+    private readonly Label _manualUpdateLine = new();
     private readonly ThemedButton _tabLive = new("Состояние", true);
     private readonly ThemedButton _tabStats = new("Узлы", false);
     private readonly ThemedButton _tabDiag = new("Диагностика", false);
@@ -45,6 +48,8 @@ internal sealed class StatusForm : Form
     public Func<string, Task<string>>? DiagnoseRequested { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action? ExportRequested { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action? CheckUpdatesRequested { get; set; }
 
     public StatusForm() : this(TimeProvider.System)
     {
@@ -141,6 +146,18 @@ internal sealed class StatusForm : Form
             : "Последняя ошибка обновления: " + updateNotice;
         _versionLabel.Text = "v" + ProductInfo.Version;
         _suppressSettings = false;
+    }
+
+    public void SetManualUpdateState(bool busy, string text)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => SetManualUpdateState(busy, text));
+            return;
+        }
+
+        _checkUpdates.Enabled = !busy;
+        _manualUpdateLine.Text = text;
     }
 
     public void Bind(MonitorSnapshot snapshot)
@@ -307,6 +324,7 @@ internal sealed class StatusForm : Form
         _tabStats.Click += (_, _) => ShowPage(1);
         _tabDiag.Click += (_, _) => ShowPage(2);
         _tabSettings.Click += (_, _) => ShowPage(3);
+        _tabSettings.AccessibleName = "settingsTab";
         var tabs = new SegmentTrack(_tabLive, _tabStats, _tabDiag, _tabSettings)
         {
             Dock = DockStyle.Top,
@@ -475,11 +493,13 @@ internal sealed class StatusForm : Form
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
-            Padding = new Padding(4)
+            Padding = new Padding(4, 4, 4, 4),
+            AutoScroll = true
         };
         _autoStart.Text = "Запускать вместе с Windows";
         _autoStart.AutoSize = true;
         _autoStart.Font = UiTheme.Body;
+        _autoStart.Margin = new Padding(0, 0, 0, 8);
         _autoStart.CheckedChanged += (_, _) =>
         {
             if (!_suppressSettings)
@@ -490,6 +510,7 @@ internal sealed class StatusForm : Form
         _autoUpdate.Text = "Ставить обновления с GitHub";
         _autoUpdate.AutoSize = true;
         _autoUpdate.Font = UiTheme.Body;
+        _autoUpdate.Margin = new Padding(0, 0, 0, 8);
         _autoUpdate.CheckedChanged += (_, _) =>
         {
             if (!_suppressSettings)
@@ -501,14 +522,41 @@ internal sealed class StatusForm : Form
         _updateLine.MaximumSize = new Size(820, 0);
         _updateLine.Font = UiTheme.Caption;
         _updateLine.ForeColor = UiTheme.Muted;
-        var export = new ThemedButton("Экспорт журнала", false);
-        export.Stretch = false;
-        export.Size = new Size(180, UiTheme.ButtonHeight);
-        export.Click += (_, _) => ExportRequested?.Invoke();
+        _updateLine.Margin = new Padding(0, 0, 0, 12);
+        var actions = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = new Padding(0, 0, 0, 8),
+            Padding = Padding.Empty
+        };
+        _checkUpdates.Stretch = false;
+        _checkUpdates.AutoSize = false;
+        _checkUpdates.Size = new Size(280, UiTheme.ButtonHeight);
+        _checkUpdates.Margin = new Padding(0, 0, 12, 0);
+        _checkUpdates.AccessibleName = "checkUpdates";
+        _checkUpdates.Click += (_, _) => CheckUpdatesRequested?.Invoke();
+        _exportLog.Stretch = false;
+        _exportLog.AutoSize = false;
+        _exportLog.Size = new Size(180, UiTheme.ButtonHeight);
+        _exportLog.Margin = new Padding(0);
+        _exportLog.AccessibleName = "exportLog";
+        _exportLog.Click += (_, _) => ExportRequested?.Invoke();
+        actions.Controls.Add(_checkUpdates);
+        actions.Controls.Add(_exportLog);
+        _manualUpdateLine.AutoSize = true;
+        _manualUpdateLine.MaximumSize = new Size(820, 0);
+        _manualUpdateLine.Font = UiTheme.Caption;
+        _manualUpdateLine.ForeColor = UiTheme.Muted;
+        _manualUpdateLine.Margin = new Padding(0);
+        _manualUpdateLine.AccessibleName = "manualUpdateStatus";
         stack.Controls.Add(_autoStart);
         stack.Controls.Add(_autoUpdate);
         stack.Controls.Add(_updateLine);
-        stack.Controls.Add(export);
+        stack.Controls.Add(actions);
+        stack.Controls.Add(_manualUpdateLine);
         _settingsPage.Controls.Add(stack);
     }
 
