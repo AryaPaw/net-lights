@@ -116,6 +116,18 @@ internal sealed class StatusForm : Form
         Activate();
     }
 
+    internal bool HideToTrayIfUserClosing(CloseReason reason)
+    {
+        if (reason != CloseReason.UserClosing)
+        {
+            return false;
+        }
+
+        _allowShow = false;
+        Hide();
+        return true;
+    }
+
     public bool NeedsBind(MonitorSnapshot snapshot)
         => StatusSnapshotProjector.Fingerprint(snapshot) != _fingerprint;
 
@@ -808,11 +820,9 @@ internal sealed class StatusForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (e.CloseReason == CloseReason.UserClosing)
+        if (HideToTrayIfUserClosing(e.CloseReason))
         {
             e.Cancel = true;
-            ShowInTaskbar = false;
-            Hide();
         }
 
         base.OnFormClosing(e);
