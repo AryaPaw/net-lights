@@ -33,6 +33,4 @@ public static class MonitorConstants
     public const int MaxResponseHeadersKiB = 32;
     public const int MaxConnectionsPerServer = 1;
     public static readonly TimeSpan HistoryRetention = TimeSpan.FromHours(48);
-    public const int MaxHistoryLines = 4000;
-    public const int MaxHistoryBytes = 512 * 1024;
 }
