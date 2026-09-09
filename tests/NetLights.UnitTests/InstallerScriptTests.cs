@@ -18,6 +18,14 @@ public sealed class InstallerScriptTests
         Assert.DoesNotContain("CloseApplications=yes", script, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void SilentSetupRelaunchesTheAppAfterInstall()
+    {
+        string script = File.ReadAllText(FindInstallerScript());
+        Assert.Contains("Flags: nowait postinstall skipifsilent", script, StringComparison.Ordinal);
+        Assert.Contains("Flags: nowait skipifnotsilent", script, StringComparison.Ordinal);
+    }
+
     private static string FindInstallerScript()
     {
         string? dir = AppContext.BaseDirectory;

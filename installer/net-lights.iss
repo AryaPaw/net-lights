@@ -51,6 +51,7 @@ Name: "{userstartup}\Net Lights"; Filename: "{app}\{#MyAppExeName}"; Tasks: star
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent
 
 [Code]
 function TaskKillImage(const ImageName: String): Integer;
