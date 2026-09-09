@@ -171,6 +171,47 @@ public sealed class UiRendererTests
         Assert.Equal(ManualUpdateCopy.For(SilentUpdateOutcome.NoUpdate), status.Text);
     }
 
+    [Fact]
+    public void TooltipAndBadges_UseProviderNotCountry()
+    {
+        using var form = new StatusForm();
+        _ = form.Handle;
+        var snapshot = new MonitorSnapshot(
+            1,
+            DateTimeOffset.UtcNow,
+            1,
+            new GroupSnapshot(EndpointGroup.Ru, GroupAvailability.Online, "", null, false, []),
+            new GroupSnapshot(EndpointGroup.Vpn, GroupAvailability.Online, "", null, false, []),
+            true,
+            null,
+            false,
+            null,
+            false);
+        form.Bind(snapshot);
+        string tooltip = DiagnosticExport.FormatTooltip(snapshot);
+        Assert.Contains(GroupLabels.Provider, tooltip, StringComparison.Ordinal);
+        Assert.NotNull(FindBadge(form, GroupLabels.Provider));
+    }
+
+    private static StatusBadge? FindBadge(Control root, string prefix)
+    {
+        if (root is StatusBadge badge && badge.Text.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return badge;
+        }
+
+        foreach (Control child in root.Controls)
+        {
+            StatusBadge? nested = FindBadge(child, prefix);
+            if (nested is not null)
+            {
+                return nested;
+            }
+        }
+
+        return null;
+    }
+
     private static ThemedButton FindButton(Control root, string accessibleName)
     {
         ThemedButton? found = Find<ThemedButton>(root, accessibleName);

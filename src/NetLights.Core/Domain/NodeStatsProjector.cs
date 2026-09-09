@@ -16,8 +16,8 @@ public static class NodeStatsProjector
     public static List<NodeStatRow> Rows(MonitorSnapshot snapshot)
     {
         var rows = new List<NodeStatRow>(14);
-        Add(rows, "Провайдер", snapshot.Ru);
-        Add(rows, "VPN", snapshot.Vpn);
+        Add(rows, GroupLabels.Provider, snapshot.Ru);
+        Add(rows, GroupLabels.Vpn, snapshot.Vpn);
         return rows
             .OrderByDescending(r => r.ProblemScore)
             .ThenBy(r => r.Group, StringComparer.Ordinal)

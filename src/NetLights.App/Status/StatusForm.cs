@@ -97,8 +97,8 @@ internal sealed class StatusForm : Form
         };
         Resize += (_, _) =>
         {
-            ScaleColumns(_list, [70, 140, 100, 60, 110, 90, 120, 220]);
-            ScaleColumns(_stats, [70, 120, 160, 80, 80, 80, 140, 260]);
+            ScaleColumns(_list, [120, 140, 100, 60, 110, 90, 120, 170]);
+            ScaleColumns(_stats, [120, 120, 160, 80, 80, 80, 140, 210]);
         };
     }
 
@@ -164,8 +164,8 @@ internal sealed class StatusForm : Form
     {
         _snapshot = snapshot;
         string fingerprint = StatusSnapshotProjector.Fingerprint(snapshot);
-        _ruBadge.SetGroup("Провайдер", DiagnosticExport.Label(snapshot.Ru.Availability), true);
-        _vpnBadge.SetGroup("VPN", DiagnosticExport.Label(snapshot.Vpn.Availability), false);
+        _ruBadge.SetGroup(GroupLabels.Provider, DiagnosticExport.Label(snapshot.Ru.Availability), true);
+        _vpnBadge.SetGroup(GroupLabels.Vpn, DiagnosticExport.Label(snapshot.Vpn.Availability), false);
         if (snapshot.Paused)
         {
             _confirmLine.Text = "проверки на паузе";
@@ -298,8 +298,8 @@ internal sealed class StatusForm : Form
         statusRow.Controls.Add(_ruBadge);
         statusRow.Controls.Add(_vpnBadge);
         statusRow.Controls.Add(_confirmLine);
-        _ruBadge.SetGroup("Провайдер", "нет данных", true);
-        _vpnBadge.SetGroup("VPN", "нет данных", false);
+        _ruBadge.SetGroup(GroupLabels.Provider, "нет данных", true);
+        _vpnBadge.SetGroup(GroupLabels.Vpn, "нет данных", false);
 
         header.Controls.Add(titleRow, 0, 0);
         header.Controls.Add(subtitle, 0, 1);
@@ -410,12 +410,12 @@ internal sealed class StatusForm : Form
         _tabSettings.Primary = index == 3;
         if (index == 0)
         {
-            ScaleColumns(_list, [70, 140, 100, 60, 110, 90, 120, 220]);
+            ScaleColumns(_list, [120, 140, 100, 60, 110, 90, 120, 170]);
         }
 
         if (index == 1)
         {
-            ScaleColumns(_stats, [70, 120, 160, 80, 80, 80, 140, 260]);
+            ScaleColumns(_stats, [120, 120, 160, 80, 80, 80, 140, 210]);
         }
     }
 
@@ -423,14 +423,14 @@ internal sealed class StatusForm : Form
     {
         var hint = Hint("Проверки идут сами по расписанию. Колонка «С запуска» — доля успешных HTTPS с этого запуска.");
         ConfigureList(_list, "Текущие проверки", DrawRow);
-        _list.Columns.Add("Группа", 70);
+        _list.Columns.Add("Группа", 120);
         _list.Columns.Add("Адрес", 140);
         _list.Columns.Add("Результат", 100);
         _list.Columns.Add("HTTP", 60);
         _list.Columns.Add("Задержка", 110);
         _list.Columns.Add("С запуска", 90);
         _list.Columns.Add("Проверено", 120);
-        _list.Columns.Add("Причина", 220);
+        _list.Columns.Add("Причина", 170);
         _list.Layout += (_, _) => LayoutCount++;
         _livePage.Controls.Add(_list);
         _livePage.Controls.Add(hint);
@@ -440,14 +440,14 @@ internal sealed class StatusForm : Form
     {
         var hint = Hint("Худшие узлы сверху. 403/429 — похоже на ограничение. Низкий успех — кандидат на замену в пуле.");
         ConfigureList(_stats, "Статистика узлов", DrawPlain);
-        _stats.Columns.Add("Группа", 70);
+        _stats.Columns.Add("Группа", 120);
         _stats.Columns.Add("Узел", 120);
         _stats.Columns.Add("Хост", 160);
         _stats.Columns.Add("Проверок", 80);
         _stats.Columns.Add("Успех", 80);
         _stats.Columns.Add("403/429", 80);
         _stats.Columns.Add("Последнее", 140);
-        _stats.Columns.Add("Вывод", 260);
+        _stats.Columns.Add("Вывод", 210);
         _statsPage.Controls.Add(_stats);
         _statsPage.Controls.Add(hint);
     }
@@ -824,15 +824,15 @@ internal sealed class StatusForm : Form
     protected override void OnDpiChanged(DpiChangedEventArgs e)
     {
         base.OnDpiChanged(e);
-        ScaleColumns(_list, [70, 140, 100, 60, 110, 90, 120, 220]);
-        ScaleColumns(_stats, [70, 120, 160, 80, 80, 80, 140, 260]);
+        ScaleColumns(_list, [120, 140, 100, 60, 110, 90, 120, 170]);
+        ScaleColumns(_stats, [120, 120, 160, 80, 80, 80, 140, 210]);
     }
 
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        ScaleColumns(_list, [70, 140, 100, 60, 110, 90, 120, 220]);
-        ScaleColumns(_stats, [70, 120, 160, 80, 80, 80, 140, 260]);
+        ScaleColumns(_list, [120, 140, 100, 60, 110, 90, 120, 170]);
+        ScaleColumns(_stats, [120, 120, 160, 80, 80, 80, 140, 210]);
     }
 
     private static void ScaleColumns(ListView list, int[] weights)
