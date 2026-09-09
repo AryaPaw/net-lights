@@ -7,7 +7,7 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
     <NuGetAudit>true</NuGetAudit>
-    <Version>1.0.5</Version>
+    <Version>1.0.6</Version>
     <Authors>AryaPaw</Authors>
     <Company>AryaPaw</Company>
     <Product>Net Lights</Product>
