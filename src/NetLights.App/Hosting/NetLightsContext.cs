@@ -171,7 +171,7 @@ internal sealed class NetLightsContext : ApplicationContext
         TimeSpan age = TimeProvider.System.GetElapsedTime(_snapshot.GeneratedTimestamp);
         if (age > MonitorConstants.Freshness)
         {
-            _icon.Text = "Провайдер: нет свежих данных | Мир: нет свежих данных";
+            _icon.Text = $"{GroupLabels.Provider}: нет свежих данных | {GroupLabels.World}: нет свежих данных";
         }
     }
 

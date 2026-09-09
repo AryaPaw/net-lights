@@ -62,7 +62,7 @@ internal static class DiagnosticExport
 
     public static string FormatTooltip(MonitorSnapshot snapshot)
     {
-        string text = $"Провайдер: {Label(snapshot.Ru.Availability)} | Мир: {Label(snapshot.World.Availability)}";
+        string text = $"{GroupLabels.Provider}: {Label(snapshot.Ru.Availability)} | {GroupLabels.World}: {Label(snapshot.World.Availability)}";
         if (snapshot.Paused)
         {
             text += " | пауза";

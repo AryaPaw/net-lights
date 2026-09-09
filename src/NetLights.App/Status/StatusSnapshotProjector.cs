@@ -12,7 +12,7 @@ internal static class StatusSnapshotProjector
 
     public static string Summary(MonitorSnapshot snapshot)
     {
-        string summary = $"Провайдер: {DiagnosticExport.Label(snapshot.Ru.Availability)}  |  Мир: {DiagnosticExport.Label(snapshot.World.Availability)}";
+        string summary = $"{GroupLabels.Provider}: {DiagnosticExport.Label(snapshot.Ru.Availability)}  |  {GroupLabels.World}: {DiagnosticExport.Label(snapshot.World.Availability)}";
         if (snapshot.Paused)
         {
             summary += "  |  пауза";
@@ -30,8 +30,8 @@ internal static class StatusSnapshotProjector
     public static List<EndpointRow> Rows(MonitorSnapshot snapshot)
     {
         var rows = new List<EndpointRow>(14);
-        AddGroup(rows, "Провайдер", snapshot.Ru);
-        AddGroup(rows, "Мир", snapshot.World);
+        AddGroup(rows, GroupLabels.Provider, snapshot.Ru);
+        AddGroup(rows, GroupLabels.World, snapshot.World);
         return rows;
     }
 
