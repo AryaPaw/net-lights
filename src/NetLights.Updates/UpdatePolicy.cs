@@ -99,6 +99,28 @@ public sealed class UpdatePolicy
         return next > currentVersion;
     }
 
+    public static bool ShouldApplyPending(string currentVersion, PendingUpdate? pending)
+        => pending is not null && IsNewerStable(currentVersion, pending.Version, prerelease: false);
+
+    public static bool IsSafeRestartPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            string full = Path.GetFullPath(path);
+            return File.Exists(full)
+                && string.Equals(Path.GetFileName(full), "NetLights.exe", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     public static string Normalize(string version)
     {
         string value = version.Trim();

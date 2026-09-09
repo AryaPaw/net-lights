@@ -34,6 +34,40 @@ public sealed class UpdatePolicyTests
     }
 
     [Fact]
+    public void AppliesPendingOnlyWhenNewerThanRunningVersion()
+    {
+        var pending = new PendingUpdate("1.0.2", @"C:\x\setup.exe", "abc", DateTimeOffset.UtcNow);
+        Assert.True(UpdatePolicy.ShouldApplyPending("1.0.1", pending));
+        Assert.True(UpdatePolicy.ShouldApplyPending("v1.0.1", pending));
+        Assert.False(UpdatePolicy.ShouldApplyPending("1.0.2", pending));
+        Assert.False(UpdatePolicy.ShouldApplyPending("1.0.3", pending));
+        Assert.False(UpdatePolicy.ShouldApplyPending("1.0.1", null));
+        Assert.False(UpdatePolicy.ShouldApplyPending(
+            "1.0.2",
+            new PendingUpdate("1.0.1", @"C:\x\setup.exe", "abc", DateTimeOffset.UtcNow)));
+    }
+
+    [Fact]
+    public void RestartPathMustBeExistingNetLightsExe()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "nl-restart-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string exe = Path.Combine(dir, "NetLights.exe");
+            File.WriteAllText(exe, "x");
+            Assert.True(UpdatePolicy.IsSafeRestartPath(exe));
+            Assert.False(UpdatePolicy.IsSafeRestartPath(Path.Combine(dir, "other.exe")));
+            Assert.False(UpdatePolicy.IsSafeRestartPath(null));
+            Assert.False(UpdatePolicy.IsSafeRestartPath(""));
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
     public void RejectsSiblingPathOutsideUpdatesRoot()
     {
         string root = Path.Combine(Path.GetTempPath(), "net-lights-updates-root");

@@ -23,7 +23,7 @@ public sealed class UpdateCoordinatorTests
                 new PendingUpdateStore(root),
                 "1.0.0",
                 new StaticHandler(InstallerBody, "application/octet-stream"));
-            await coordinator.CheckAsync(CancellationToken.None);
+            Assert.False(await coordinator.CheckAsync(CancellationToken.None));
             Assert.Null(coordinator.Pending);
         }
         finally
@@ -45,7 +45,7 @@ public sealed class UpdateCoordinatorTests
                 new PendingUpdateStore(root),
                 "1.0.0",
                 new BytesHandler(Encoding.UTF8.GetBytes(InstallerBody)));
-            await coordinator.CheckAsync(CancellationToken.None);
+            Assert.True(await coordinator.CheckAsync(CancellationToken.None));
             PendingUpdate? pending = coordinator.Pending;
             Assert.NotNull(pending);
             Assert.Equal("1.0.1", pending.Version);
@@ -73,7 +73,7 @@ public sealed class UpdateCoordinatorTests
                 new PendingUpdateStore(root),
                 "1.0.0",
                 new BytesHandler(Encoding.UTF8.GetBytes(InstallerBody)));
-            await coordinator.CheckAsync(CancellationToken.None);
+            Assert.False(await coordinator.CheckAsync(CancellationToken.None));
             Assert.Null(coordinator.Pending);
             string parent = Directory.GetParent(root)!.FullName;
             Assert.False(File.Exists(Path.Combine(parent, "escape.exe")));
@@ -97,8 +97,34 @@ public sealed class UpdateCoordinatorTests
                 new PendingUpdateStore(root),
                 "1.0.0",
                 new RedirectHandler(new Uri("https://evil.example/setup.exe"), Encoding.UTF8.GetBytes(InstallerBody)));
-            await coordinator.CheckAsync(CancellationToken.None);
+            Assert.False(await coordinator.CheckAsync(CancellationToken.None));
             Assert.Null(coordinator.Pending);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public async Task ReportsReadyWhenPendingNewerInstallerAlreadyOnDisk()
+    {
+        string root = NewRoot();
+        try
+        {
+            var store = new PendingUpdateStore(root);
+            string installer = Path.Combine(root, "NetLights-Setup-win-x64-1.0.1.exe");
+            File.WriteAllText(installer, InstallerBody);
+            store.WritePending(new PendingUpdate("1.0.1", installer, "abc", DateTimeOffset.UtcNow));
+            using var feed = new GitHubReleaseFeed(new StatusHandler(HttpStatusCode.NotFound));
+            using var coordinator = new UpdateCoordinator(
+                feed,
+                store,
+                "1.0.0",
+                new StatusHandler(HttpStatusCode.NotFound));
+            int ready = 0;
+            await coordinator.CheckInBackgroundAsync(CancellationToken.None, () => ready++);
+            Assert.Equal(1, ready);
         }
         finally
         {
@@ -110,7 +136,8 @@ public sealed class UpdateCoordinatorTests
     public async Task GetLatestRejectsOversizedManifestWithoutKeepingAllBytesAsSuccess()
     {
         using var feed = new GitHubReleaseFeed(new BytesHandler(new byte[UpdatePolicy.MaxManifestBytes + 8]));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => feed.GetLatestAsync(CancellationToken.None));
+        GitHubRelease? latest = await feed.GetLatestAsync(CancellationToken.None);
+        Assert.Null(latest);
     }
 
     [Fact]

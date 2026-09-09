@@ -32,6 +32,7 @@ internal sealed class StatusForm : Form
     private MonitorSnapshot? _snapshot;
     private string _fingerprint = "";
     private bool _suppressSettings;
+    private bool _allowShow;
     public int DataBindCount { get; private set; }
     public int ClockUpdateCount { get; private set; }
     public int LayoutCount { get; private set; }
@@ -59,7 +60,7 @@ internal sealed class StatusForm : Form
         MinimumSize = new Size(920, 700);
         Width = 1000;
         Height = 800;
-        ShowInTaskbar = true;
+        ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96F, 96F);
@@ -107,6 +108,14 @@ internal sealed class StatusForm : Form
             area.Top + Math.Max(0, (area.Height - height) / 2));
     }
 
+    public void Reveal()
+    {
+        _allowShow = true;
+        ShowInTaskbar = true;
+        Show();
+        Activate();
+    }
+
     public bool NeedsBind(MonitorSnapshot snapshot)
         => StatusSnapshotProjector.Fingerprint(snapshot) != _fingerprint;
 
@@ -116,7 +125,7 @@ internal sealed class StatusForm : Form
         _autoStart.Checked = autoStart;
         _autoUpdate.Checked = autoUpdate;
         _updateLine.Text = string.IsNullOrWhiteSpace(updateNotice)
-            ? "Проверка GitHub при запуске. Установка при обычном выходе, без автоперезапуска."
+            ? "Ждём сеть, проверяем GitHub, скачиваем Setup и ставим сами, как обычный тихий установщик."
             : "Последняя ошибка обновления: " + updateNotice;
         _versionLabel.Text = "v" + ProductInfo.Version;
         _suppressSettings = false;
@@ -466,7 +475,7 @@ internal sealed class StatusForm : Form
                 AutoStartChanged?.Invoke(_autoStart.Checked);
             }
         };
-        _autoUpdate.Text = "Ставить обновления с GitHub при выходе";
+        _autoUpdate.Text = "Ставить обновления с GitHub";
         _autoUpdate.AutoSize = true;
         _autoUpdate.Font = UiTheme.Body;
         _autoUpdate.CheckedChanged += (_, _) =>
@@ -792,11 +801,17 @@ internal sealed class StatusForm : Form
         }
     }
 
+    protected override void SetVisibleCore(bool value)
+    {
+        base.SetVisibleCore(_allowShow && value);
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
+            ShowInTaskbar = false;
             Hide();
         }
 

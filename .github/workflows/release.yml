@@ -67,4 +67,4 @@ jobs:
             | --- | --- |
             | **Установка** на обычный 64-bit ПК (Intel/AMD) | [NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe) |
 
-            Нужен Windows 11 x64. Сборка self-contained, отдельный .NET Runtime не нужен. Автообновление ставит новый Setup при обычном выходе.
+            Нужен Windows 11 x64. Сборка self-contained, отдельный .NET Runtime не нужен. Автообновление скачивает Setup и ставит его тихим установщиком.
