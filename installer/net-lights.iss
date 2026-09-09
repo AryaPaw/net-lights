@@ -49,4 +49,4 @@ Name: "{group}\Net Lights"; Filename: "{app}\{#MyAppExeName}"
 Name: "{userstartup}\Net Lights"; Filename: "{app}\{#MyAppExeName}"; Tasks: startup
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall skipifsilent

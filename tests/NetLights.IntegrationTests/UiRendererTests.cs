@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Windows.Forms;
 using NetLights.App;
 using NetLights.Core;
 using Xunit;
@@ -102,6 +103,19 @@ public sealed class UiRendererTests
         Assert.Equal(binds, form.DataBindCount);
         Assert.Equal(14, StatusSnapshotProjector.Rows(empty).Count);
         Assert.True(sw.ElapsedMilliseconds < 2000, $"1000 clock ticks took {sw.ElapsedMilliseconds} ms");
+    }
+
+    [Fact]
+    public void StatusForm_UserCloseHidesWithoutRecreatingTaskbarWindow()
+    {
+        using var form = new StatusForm();
+        form.Reveal();
+        Assert.True(form.Visible);
+        Assert.True(form.ShowInTaskbar);
+        Assert.True(form.HideToTrayIfUserClosing(CloseReason.UserClosing));
+        Assert.False(form.Visible);
+        Assert.True(form.ShowInTaskbar);
+        Assert.False(form.HideToTrayIfUserClosing(CloseReason.ApplicationExitCall));
     }
 
     [Fact]
