@@ -16,7 +16,7 @@ public static class ManualUpdateCopy
             case SilentUpdateOutcome.Failed:
                 return "Не удалось проверить или скачать.";
             case SilentUpdateOutcome.Offline:
-                return "Нет сети.";
+                return "Не удалось связаться с GitHub.";
             case SilentUpdateOutcome.Skipped:
                 return "Обновления доступны только установленной копии.";
             case SilentUpdateOutcome.Busy:

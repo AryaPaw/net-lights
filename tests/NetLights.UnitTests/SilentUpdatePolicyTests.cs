@@ -71,7 +71,7 @@ public sealed class ManualUpdateCopyTests
     [InlineData(SilentUpdateOutcome.NoUpdate, "Уже установлена последняя версия.")]
     [InlineData(SilentUpdateOutcome.Applied, "Обновление скачано, сейчас установится.")]
     [InlineData(SilentUpdateOutcome.Failed, "Не удалось проверить или скачать.")]
-    [InlineData(SilentUpdateOutcome.Offline, "Нет сети.")]
+    [InlineData(SilentUpdateOutcome.Offline, "Не удалось связаться с GitHub.")]
     [InlineData(SilentUpdateOutcome.Skipped, "Обновления доступны только установленной копии.")]
     [InlineData(SilentUpdateOutcome.Busy, "Сейчас нельзя обновить. Попробуйте через минуту.")]
     public void For_CoversEveryOutcome(SilentUpdateOutcome outcome, string expected)
