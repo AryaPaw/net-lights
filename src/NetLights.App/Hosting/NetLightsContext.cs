@@ -91,7 +91,13 @@ internal sealed class NetLightsContext : ApplicationContext
             Text = DiagnosticExport.FormatTooltip(_snapshot),
             Icon = _renderer.Get(_snapshot.Ru.Availability, _snapshot.Vpn.Availability, iconSize, _snapshot.Paused)
         };
-        _icon.DoubleClick += (_, _) => ShowStatus();
+        _icon.MouseClick += (_, e) =>
+        {
+            if (TrayIconGestures.ShouldOpenWindow(e.Button))
+            {
+                ShowStatus();
+            }
+        };
         _heartbeat = new System.Windows.Forms.Timer { Interval = 1000 };
         _heartbeat.Tick += (_, _) =>
         {
