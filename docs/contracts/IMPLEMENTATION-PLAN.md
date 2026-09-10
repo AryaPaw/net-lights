@@ -86,16 +86,18 @@ TLS-посредник, которому доверяет Windows, остает�
 | ru-megafon | Провайдер | https://moscow.megafon.ru/robots.txt | megafon |
 | ru-timeweb | Провайдер | https://timeweb.com/robots.txt | hll |
 | vpn-cloudflare | VPN | https://cp.cloudflare.com/generate_204 | cloudflare |
-| vpn-mozilla | VPN | https://firefox-portal-detection.com/generate_204 | fastly |
-| vpn-fedora | VPN | https://fedoraproject.org/static/hotspot.txt | unc |
-| vpn-debian | VPN | https://www.debian.org/ | utwente |
-| vpn-arch | VPN | https://archlinux.org/ | haproxy |
 | vpn-github | VPN | https://github.com/robots.txt | github |
 | vpn-wikimedia | VPN | https://en.wikipedia.org/robots.txt | wikimedia |
+| vpn-google | VPN | https://go.dev/robots.txt | google |
+| vpn-duckduckgo | VPN | https://duckduckgo.com/robots.txt | duckduckgo |
+| vpn-apache | VPN | https://www.apache.org/robots.txt | fastly |
+| vpn-arch | VPN | https://archlinux.org/ | haproxy |
 
 Это текущие инфраструктурные группы, не гарантия вечной независимости. Не добавлять runtime-зависимость от RIPE/GeoIP. Не закреплять IP: использовать имена, системный DNS и ограниченную жизнь пула соединений. Изменение IP само по себе не повод редактировать конфигурацию.
 
-РБК не включать и не опрашивать. Apple, Google, МТС, KDE не требуются штатной работе. Не искать новые адреса автоматически при отказе: это непредсказуемая внешняя зависимость.
+Пул VPN пересобран 10 сентября 2026 по локальным HEAD с дедлайном 2 с: mozilla/fedora/debian давали таймауты или p95 слишком близко к дедлайну. Замеры: `tests/network-research-2026-09-10/`. Не возвращать `firefox-portal-detection.com` в штатный пул без новой серии.
+
+РБК не включать и не опрашивать. Apple, МТС, KDE не требуются штатной работе. Не искать новые адреса автоматически при отказе: это непредсказуемая внешняя зависимость.
 
 ## 5. Стек и структура
 

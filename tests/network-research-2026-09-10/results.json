@@ -1,0 +1,386 @@
+{
+  "rounds": 16,
+  "deadline": 2.0,
+  "summary": [
+    {
+      "name": "mail",
+      "url": "https://www.mail.ru/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.054,
+      "p95": 0.068,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "yandex",
+      "url": "https://yandex.ru/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.07,
+      "p95": 0.079,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "apache",
+      "url": "https://www.apache.org/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.328,
+      "p95": 0.413,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "cloudflare",
+      "url": "https://cp.cloudflare.com/generate_204",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.329,
+      "p95": 0.462,
+      "codes": [
+        204
+      ],
+      "errors": []
+    },
+    {
+      "name": "oneone",
+      "url": "https://one.one.one.one/",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.393,
+      "p95": 0.557,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "iana",
+      "url": "https://www.iana.org/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.337,
+      "p95": 0.586,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "go-dev",
+      "url": "https://go.dev/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.537,
+      "p95": 0.614,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "wikimedia",
+      "url": "https://en.wikipedia.org/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.407,
+      "p95": 0.652,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "w3c",
+      "url": "https://www.w3.org/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.364,
+      "p95": 0.702,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "kernel",
+      "url": "https://www.kernel.org/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.366,
+      "p95": 0.762,
+      "codes": [
+        404
+      ],
+      "errors": []
+    },
+    {
+      "name": "mozilla-org",
+      "url": "https://www.mozilla.org/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.373,
+      "p95": 0.781,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "github",
+      "url": "https://github.com/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.379,
+      "p95": 0.823,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "duckduckgo",
+      "url": "https://duckduckgo.com/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.448,
+      "p95": 0.881,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "isc",
+      "url": "https://www.isc.org/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.389,
+      "p95": 0.905,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "ietf",
+      "url": "https://www.ietf.org/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.298,
+      "p95": 1.01,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "openssl",
+      "url": "https://www.openssl.org/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.519,
+      "p95": 1.095,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "nodejs",
+      "url": "https://nodejs.org/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.42,
+      "p95": 1.111,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "arch",
+      "url": "https://archlinux.org/",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.444,
+      "p95": 1.126,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "debian",
+      "url": "https://www.debian.org/",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.556,
+      "p95": 1.567,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "gnu",
+      "url": "https://www.gnu.org/robots.txt",
+      "ok": 16,
+      "n": 16,
+      "p50": 0.647,
+      "p95": 1.587,
+      "codes": [
+        200
+      ],
+      "errors": []
+    },
+    {
+      "name": "python",
+      "url": "https://www.python.org/robots.txt",
+      "ok": 15,
+      "n": 16,
+      "p50": 0.318,
+      "p95": 0.695,
+      "codes": [
+        0,
+        200
+      ],
+      "errors": [
+        "Operation timed out after 2010 milliseconds with 0 bytes received"
+      ]
+    },
+    {
+      "name": "fedora",
+      "url": "https://fedoraproject.org/static/hotspot.txt",
+      "ok": 15,
+      "n": 16,
+      "p50": 0.644,
+      "p95": 0.875,
+      "codes": [
+        0,
+        200
+      ],
+      "errors": [
+        "Connection timed out after 2004 milliseconds"
+      ]
+    },
+    {
+      "name": "freebsd",
+      "url": "https://www.freebsd.org/robots.txt",
+      "ok": 15,
+      "n": 16,
+      "p50": 0.423,
+      "p95": 0.9,
+      "codes": [
+        0,
+        200
+      ],
+      "errors": [
+        "Connection timed out after 2016 milliseconds"
+      ]
+    },
+    {
+      "name": "postgresql",
+      "url": "https://www.postgresql.org/robots.txt",
+      "ok": 15,
+      "n": 16,
+      "p50": 0.685,
+      "p95": 0.994,
+      "codes": [
+        0,
+        200
+      ],
+      "errors": [
+        "Operation timed out after 2012 milliseconds with 0 bytes received"
+      ]
+    },
+    {
+      "name": "ubuntu",
+      "url": "https://ubuntu.com/robots.txt",
+      "ok": 15,
+      "n": 16,
+      "p50": 0.459,
+      "p95": 1.099,
+      "codes": [
+        0,
+        200
+      ],
+      "errors": [
+        "Operation timed out after 2006 milliseconds with 0 bytes received"
+      ]
+    },
+    {
+      "name": "mozilla-portal",
+      "url": "https://firefox-portal-detection.com/generate_204",
+      "ok": 15,
+      "n": 16,
+      "p50": 0.333,
+      "p95": 1.139,
+      "codes": [
+        0,
+        204
+      ],
+      "errors": [
+        "Connection timed out after 2013 milliseconds"
+      ]
+    },
+    {
+      "name": "openbsd",
+      "url": "https://www.openbsd.org/robots.txt",
+      "ok": 15,
+      "n": 16,
+      "p50": 0.958,
+      "p95": 1.305,
+      "codes": [
+        0,
+        200
+      ],
+      "errors": [
+        "Connection timed out after 2006 milliseconds"
+      ]
+    },
+    {
+      "name": "example",
+      "url": "https://www.example.com/",
+      "ok": 14,
+      "n": 16,
+      "p50": 0.377,
+      "p95": 0.894,
+      "codes": [
+        0,
+        200
+      ],
+      "errors": [
+        "Connection timed out after 2001 milliseconds",
+        "Connection timed out after 2010 milliseconds"
+      ]
+    },
+    {
+      "name": "ripe",
+      "url": "https://www.ripe.net/robots.txt",
+      "ok": 5,
+      "n": 16,
+      "p50": 1.442,
+      "p95": 1.452,
+      "codes": [
+        0,
+        200
+      ],
+      "errors": [
+        "Operation timed out after 2001 milliseconds with 0 bytes received",
+        "Operation timed out after 2002 milliseconds with 0 bytes received",
+        "Operation timed out after 2006 milliseconds with 0 bytes received",
+        "Operation timed out after 2007 milliseconds with 0 bytes received",
+        "Operation timed out after 2008 milliseconds with 0 bytes received"
+      ]
+    }
+  ]
+}

@@ -12,12 +12,12 @@ public static class BuiltinEndpoints
         Ru("ru-megafon", "https://moscow.megafon.ru/robots.txt", "megafon"),
         Ru("ru-timeweb", "https://timeweb.com/robots.txt", "hll"),
         Vpn("vpn-cloudflare", "https://cp.cloudflare.com/generate_204", "cloudflare"),
-        Vpn("vpn-mozilla", "https://firefox-portal-detection.com/generate_204", "fastly"),
-        Vpn("vpn-fedora", "https://fedoraproject.org/static/hotspot.txt", "unc"),
-        Vpn("vpn-debian", "https://www.debian.org/", "utwente"),
-        Vpn("vpn-arch", "https://archlinux.org/", "haproxy"),
         Vpn("vpn-github", "https://github.com/robots.txt", "github"),
-        Vpn("vpn-wikimedia", "https://en.wikipedia.org/robots.txt", "wikimedia")
+        Vpn("vpn-wikimedia", "https://en.wikipedia.org/robots.txt", "wikimedia"),
+        Vpn("vpn-google", "https://go.dev/robots.txt", "google"),
+        Vpn("vpn-duckduckgo", "https://duckduckgo.com/robots.txt", "duckduckgo"),
+        Vpn("vpn-apache", "https://www.apache.org/robots.txt", "fastly"),
+        Vpn("vpn-arch", "https://archlinux.org/", "haproxy")
     ];
 
     public static MonitorConfiguration CreateDefault()
