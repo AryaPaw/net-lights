@@ -6,7 +6,7 @@ public static class SilentUpdatePolicy
 {
     public static readonly TimeSpan BusyRetry = TimeSpan.FromMinutes(2);
     public static readonly TimeSpan FailedRetry = TimeSpan.FromMinutes(2);
-    public const string ProbeUrl = "https://github.com/AryaPaw/net-lights";
+    public const string ProbeUrl = "https://github.com/";
 
     public static bool TryParseTag(string? tag, out Version? version)
     {

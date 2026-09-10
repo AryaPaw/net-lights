@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -35,6 +37,8 @@ public sealed class GitHubReleaseFeed : IReleaseFeed, IInternetProbe, IDisposabl
         };
         _http = new HttpClient(inner, disposeHandler: true);
         _http.Timeout = timeout ?? DefaultTimeout;
+        _http.DefaultRequestVersion = HttpVersion.Version11;
+        _http.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("NetLights-Updater");
         if (githubApi)
         {
@@ -192,18 +196,25 @@ public sealed class GitHubReleaseFeed : IReleaseFeed, IInternetProbe, IDisposabl
     {
         try
         {
-            using HttpResponseMessage response = await _http.GetAsync(
-                new Uri(SilentUpdatePolicy.ProbeUrl),
+            using var request = new HttpRequestMessage(HttpMethod.Head, new Uri(SilentUpdatePolicy.ProbeUrl));
+            request.Version = HttpVersion.Version11;
+            request.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+            using HttpResponseMessage response = await _http.SendAsync(
+                request,
                 HttpCompletionOption.ResponseHeadersRead,
                 cancellationToken).ConfigureAwait(false);
             _ = response.StatusCode;
             return true;
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
         catch (HttpRequestException)
         {
             return false;
         }
-        catch (TaskCanceledException)
+        catch (HttpProtocolException)
         {
             return false;
         }
