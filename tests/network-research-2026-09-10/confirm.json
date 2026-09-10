@@ -1,0 +1,61 @@
+{
+  "rounds": 20,
+  "summary": [
+    {
+      "name": "cloudflare",
+      "url": "https://cp.cloudflare.com/generate_204",
+      "ok": 18,
+      "n": 20,
+      "p50": 0.344,
+      "p95": 0.535
+    },
+    {
+      "name": "github",
+      "url": "https://github.com/robots.txt",
+      "ok": 19,
+      "n": 20,
+      "p50": 0.324,
+      "p95": 0.8
+    },
+    {
+      "name": "wikimedia",
+      "url": "https://en.wikipedia.org/robots.txt",
+      "ok": 19,
+      "n": 20,
+      "p50": 0.327,
+      "p95": 0.557
+    },
+    {
+      "name": "google",
+      "url": "https://go.dev/robots.txt",
+      "ok": 20,
+      "n": 20,
+      "p50": 0.506,
+      "p95": 0.949
+    },
+    {
+      "name": "duckduckgo",
+      "url": "https://duckduckgo.com/robots.txt",
+      "ok": 20,
+      "n": 20,
+      "p50": 0.366,
+      "p95": 0.604
+    },
+    {
+      "name": "apache",
+      "url": "https://www.apache.org/robots.txt",
+      "ok": 20,
+      "n": 20,
+      "p50": 0.355,
+      "p95": 1.305
+    },
+    {
+      "name": "arch",
+      "url": "https://archlinux.org/",
+      "ok": 20,
+      "n": 20,
+      "p50": 0.387,
+      "p95": 0.753
+    }
+  ]
+}

@@ -86,16 +86,18 @@ TLS-посредник, которому доверяет Windows, остает�
 | ru-megafon | Провайдер | https://moscow.megafon.ru/robots.txt | megafon |
 | ru-timeweb | Провайдер | https://timeweb.com/robots.txt | hll |
 | world-cloudflare | Мир | https://cp.cloudflare.com/generate_204 | cloudflare |
-| world-mozilla | Мир | https://firefox-portal-detection.com/generate_204 | fastly |
-| world-fedora | Мир | https://fedoraproject.org/static/hotspot.txt | unc |
-| world-debian | Мир | https://www.debian.org/ | utwente |
-| world-arch | Мир | https://archlinux.org/ | haproxy |
 | world-github | Мир | https://github.com/robots.txt | github |
 | world-wikimedia | Мир | https://en.wikipedia.org/robots.txt | wikimedia |
+| world-google | Мир | https://go.dev/robots.txt | google |
+| world-duckduckgo | Мир | https://duckduckgo.com/robots.txt | duckduckgo |
+| world-apache | Мир | https://www.apache.org/robots.txt | fastly |
+| world-arch | Мир | https://archlinux.org/ | haproxy |
 
 Это текущие инфраструктурные группы, не гарантия вечной независимости. Не добавлять runtime-зависимость от RIPE/GeoIP. Не закреплять IP: использовать имена, системный DNS и ограниченную жизнь пула соединений. Изменение IP само по себе не повод редактировать конфигурацию.
 
-РБК не включать и не опрашивать. Apple, Google, МТС, KDE не требуются штатной работе. Не искать новые адреса автоматически при отказе: это непредсказуемая внешняя зависимость.
+Пул Мир пересобран 10 сентября 2026 по локальным HEAD с дедлайном 2 с: mozilla/fedora/debian давали таймауты или p95 слишком близко к дедлайну. Замеры: `tests/network-research-2026-09-10/`. Не возвращать `firefox-portal-detection.com` в штатный пул без новой серии.
+
+РБК не включать и не опрашивать. Apple, МТС, KDE не требуются штатной работе. Не искать новые адреса автоматически при отказе: это непредсказуемая внешняя зависимость.
 
 ## 5. Стек и структура
 

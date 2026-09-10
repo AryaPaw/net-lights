@@ -41,8 +41,14 @@ public sealed class ConfigAndLimiterTests
     [Fact]
     public void BuiltinPoolHasSevenIndependentInfraPerGroup()
     {
-        Assert.Equal(7, BuiltinEndpoints.All.Count(e => e.Group == EndpointGroup.Ru));
-        Assert.Equal(7, BuiltinEndpoints.All.Count(e => e.Group == EndpointGroup.World));
-        Assert.Equal(7, BuiltinEndpoints.All.Where(e => e.Group == EndpointGroup.Ru).Select(e => e.InfrastructureId).Distinct().Count());
+        var ru = BuiltinEndpoints.All.Where(e => e.Group == EndpointGroup.Ru).ToList();
+        var world = BuiltinEndpoints.All.Where(e => e.Group == EndpointGroup.World).ToList();
+        Assert.Equal(7, ru.Count);
+        Assert.Equal(7, world.Count);
+        Assert.Equal(7, ru.Select(e => e.InfrastructureId).Distinct().Count());
+        Assert.Equal(7, world.Select(e => e.InfrastructureId).Distinct().Count());
+        Assert.DoesNotContain(world, e => e.Uri.Host.Contains("firefox-portal-detection", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(world, e => e.Uri.Host.Contains("fedoraproject.org", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(world, e => e.Uri.Host.Contains("debian.org", StringComparison.OrdinalIgnoreCase));
     }
 }

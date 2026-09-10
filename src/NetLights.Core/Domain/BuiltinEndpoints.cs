@@ -12,12 +12,12 @@ public static class BuiltinEndpoints
         Ru("ru-megafon", "https://moscow.megafon.ru/robots.txt", "megafon"),
         Ru("ru-timeweb", "https://timeweb.com/robots.txt", "hll"),
         World("world-cloudflare", "https://cp.cloudflare.com/generate_204", "cloudflare"),
-        World("world-mozilla", "https://firefox-portal-detection.com/generate_204", "fastly"),
-        World("world-fedora", "https://fedoraproject.org/static/hotspot.txt", "unc"),
-        World("world-debian", "https://www.debian.org/", "utwente"),
-        World("world-arch", "https://archlinux.org/", "haproxy"),
         World("world-github", "https://github.com/robots.txt", "github"),
-        World("world-wikimedia", "https://en.wikipedia.org/robots.txt", "wikimedia")
+        World("world-wikimedia", "https://en.wikipedia.org/robots.txt", "wikimedia"),
+        World("world-google", "https://go.dev/robots.txt", "google"),
+        World("world-duckduckgo", "https://duckduckgo.com/robots.txt", "duckduckgo"),
+        World("world-apache", "https://www.apache.org/robots.txt", "fastly"),
+        World("world-arch", "https://archlinux.org/", "haproxy")
     ];
 
     public static MonitorConfiguration CreateDefault()
