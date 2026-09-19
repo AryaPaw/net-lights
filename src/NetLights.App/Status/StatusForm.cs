@@ -66,6 +66,7 @@ internal sealed class StatusForm : Form
     {
         _time = time;
         _locations = new LocationTimelinePanel(_time);
+        AutoScaleMode = AutoScaleMode.None;
         Text = ProductInfo.DisplayName();
         Font = UiTheme.Body;
         ForeColor = UiTheme.Ink;
@@ -80,7 +81,6 @@ internal sealed class StatusForm : Form
         Height = UiTheme.WindowDefaultHeight;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterScreen;
-        AutoScaleMode = AutoScaleMode.None;
         DoubleBuffered = true;
         Padding = Padding.Empty;
         AccessibleName = ProductInfo.DisplayName();

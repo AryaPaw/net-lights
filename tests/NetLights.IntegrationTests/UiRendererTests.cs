@@ -148,12 +148,25 @@ public sealed class UiRendererTests
     public void StatusForm_DefaultSizeIsTallerThanTheCompactMinimum()
     {
         using var form = new StatusForm();
-        Assert.Equal(UiTheme.WindowDefaultWidth, form.Width);
-        Assert.Equal(UiTheme.WindowDefaultHeight, form.Height);
-        Assert.True(form.MinimumSize.Height >= 640);
+        Assert.Equal(UiTheme.WindowMinWidth, form.MinimumSize.Width);
+        Assert.Equal(UiTheme.WindowMinHeight, form.MinimumSize.Height);
+        Assert.True(UiTheme.WindowDefaultHeight > UiTheme.WindowMinHeight);
         form.PlaceCentered();
-        int areaHeight = Screen.FromPoint(form.Location).WorkingArea.Height;
-        Assert.True(form.Height >= Math.Min(UiTheme.WindowDefaultHeight, areaHeight));
+        Rectangle area = Screen.FromPoint(form.Location).WorkingArea;
+        int expectedHeight = Math.Min(Math.Max(form.MinimumSize.Height, UiTheme.WindowDefaultHeight), Math.Max(240, area.Height));
+        if (expectedHeight > area.Height)
+        {
+            expectedHeight = area.Height;
+        }
+
+        int expectedWidth = Math.Min(Math.Max(form.MinimumSize.Width, UiTheme.WindowDefaultWidth), Math.Max(320, area.Width));
+        if (expectedWidth > area.Width)
+        {
+            expectedWidth = area.Width;
+        }
+
+        Assert.Equal(Math.Max(240, expectedHeight), form.Height);
+        Assert.Equal(Math.Max(320, expectedWidth), form.Width);
     }
 
     [Fact]
