@@ -24,6 +24,25 @@ internal static class AutoStartStore
         {
             key.DeleteValue(ValueName);
         }
+
+        TryRemoveStartupShortcut();
+    }
+
+    private static void TryRemoveStartupShortcut()
+    {
+        try
+        {
+            string path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.Startup),
+                "Net Lights.lnk");
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (Exception)
+        {
+        }
     }
 
     public static string Quote(string path) => "\"" + path.Replace("\"", "") + "\"";

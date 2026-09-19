@@ -41,6 +41,20 @@ public static class EndpointPoolValidator
             {
                 return Fail($"Адрес {endpoint.Id} содержит credentials.");
             }
+
+            if (HasSecretQuery(endpoint.Uri))
+            {
+                return Fail($"Адрес {endpoint.Id} содержит секрет в query.");
+            }
+        }
+
+        var hosts = new HashSet<string>(StringComparer.Ordinal);
+        foreach (EndpointDefinition endpoint in endpoints)
+        {
+            if (!hosts.Add(OriginPathKey(endpoint.Uri)))
+            {
+                return Fail($"Дублируется адрес {endpoint.Uri.GetLeftPart(UriPartial.Path)}.");
+            }
         }
 
         if (!ValidateGroup(endpoints, EndpointGroup.Ru, out string? ruError))
@@ -77,6 +91,28 @@ public static class EndpointPoolValidator
 
         error = null;
         return true;
+    }
+
+    private static bool HasSecretQuery(Uri uri)
+    {
+        string query = uri.Query;
+        return query.Contains("token=", StringComparison.OrdinalIgnoreCase)
+            || query.Contains("key=", StringComparison.OrdinalIgnoreCase)
+            || query.Contains("secret=", StringComparison.OrdinalIgnoreCase)
+            || query.Contains("password=", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string OriginPathKey(Uri uri)
+    {
+        string host = uri.IdnHost.Trim().ToLowerInvariant();
+        int port = uri.IsDefaultPort ? 443 : uri.Port;
+        string path = uri.AbsolutePath.TrimEnd('/');
+        if (string.IsNullOrEmpty(path))
+        {
+            path = "/";
+        }
+
+        return host + ":" + port + path.ToLowerInvariant();
     }
 
     private static EndpointPoolValidation Fail(string error)

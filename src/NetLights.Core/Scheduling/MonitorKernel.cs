@@ -799,6 +799,42 @@ public sealed partial class MonitorKernel
         };
     }
 
+    public string? ManualBlockReason(string endpointId)
+    {
+        if (_paused)
+        {
+            return "Монитор на паузе.";
+        }
+
+        if (_networkUnavailable)
+        {
+            return "Нет сети, диагностика отложена.";
+        }
+
+        EndpointSlot? slot = FindSlot(endpointId);
+        if (slot is null)
+        {
+            return "Узел не найден.";
+        }
+
+        if (slot.PhysicalInFlight)
+        {
+            return "Этот адрес уже проверяется.";
+        }
+
+        if (slot.NextAllowed > _clock.Now)
+        {
+            if (slot.Applied?.HttpStatus is 403 or 429 or 503)
+            {
+                return "Сервер просил паузу. Подождите.";
+            }
+
+            return "Слишком частые запросы к этому адресу. Подождите.";
+        }
+
+        return null;
+    }
+
     private EndpointSlot? FindSlot(string id)
         => _ru.Slots.Concat(_world.Slots).FirstOrDefault(s => s.Definition.Id == id);
 

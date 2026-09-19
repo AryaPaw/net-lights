@@ -8,7 +8,11 @@
     <RootNamespace>NetLights.App</RootNamespace>
     <AssemblyName>NetLights</AssemblyName>
     <Nullable>enable</Nullable>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\app.ico" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\NetLights.Core\NetLights.Core.csproj" />
     <ProjectReference Include="..\NetLights.Networking\NetLights.Networking.csproj" />

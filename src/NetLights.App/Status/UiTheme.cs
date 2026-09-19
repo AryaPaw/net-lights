@@ -8,7 +8,7 @@ internal static class UiTheme
     public static readonly Color Brand900 = Color.FromArgb(14, 78, 140);
     public static readonly Color Brand800 = Color.FromArgb(14, 124, 194);
     public static readonly Color Brand50 = Color.FromArgb(240, 248, 255);
-    public static readonly Color Surface = Color.FromArgb(244, 246, 250);
+    public static readonly Color Surface = Color.FromArgb(245, 246, 248);
     public static readonly Color Track = Color.FromArgb(226, 236, 247);
     public static readonly Color Card = Color.White;
     public static readonly Color Ink = Color.FromArgb(22, 32, 48);
@@ -19,19 +19,36 @@ internal static class UiTheme
     public static readonly Color WorldInk = Color.FromArgb(92, 48, 10);
     public static readonly Color WorldFill = Color.FromArgb(247, 226, 196);
 
-    public const int CardRadius = 12;
+    public const int CardRadius = 10;
     public const int ButtonRadius = 8;
     public const int TrackRadius = 12;
     public const int SegmentInset = 4;
     public const int ButtonHeight = 36;
     public const int TabHeight = 40;
     public const int PagePad = 20;
+    public const int WindowDefaultWidth = 1040;
+    public const int WindowDefaultHeight = 920;
+    public const int WindowMinWidth = 760;
+    public const int WindowMinHeight = 640;
 
-    public static readonly Font Title = new("Segoe UI", 18F, FontStyle.Bold, GraphicsUnit.Point);
+    public static readonly Font Title = new("Segoe UI", 16F, FontStyle.Bold, GraphicsUnit.Point);
+    public static readonly Font IsoMono = CreateIsoMono();
     public static readonly Font Body = new("Segoe UI", 10F, GraphicsUnit.Point);
     public static readonly Font BodyBold = new("Segoe UI", 10F, FontStyle.Bold, GraphicsUnit.Point);
     public static readonly Font Caption = new("Segoe UI", 9F, GraphicsUnit.Point);
     public static readonly Font Button = new("Segoe UI", 9.5F, FontStyle.Bold, GraphicsUnit.Point);
+
+    private static Font CreateIsoMono()
+    {
+        try
+        {
+            return new Font("Consolas", 11F, FontStyle.Bold, GraphicsUnit.Point);
+        }
+        catch (ArgumentException)
+        {
+            return new Font(FontFamily.GenericMonospace, 11F, FontStyle.Bold, GraphicsUnit.Point);
+        }
+    }
 }
 
 internal static class AppCredits

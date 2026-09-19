@@ -15,4 +15,16 @@ public sealed class PersistenceTests
         Assert.Single(snap);
         Assert.Equal(2, log.Snapshot().Count);
     }
+
+    [Fact]
+    public void BoundedEventLog_SnapshotDropsEntriesOlderThanRetention()
+    {
+        var log = new BoundedEventLog();
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        log.Add(now.AddHours(-49), "old", "expired");
+        log.Add(now, "new", "fresh");
+        IReadOnlyList<LogEntry> snap = log.Snapshot();
+        Assert.DoesNotContain(snap, e => e.Code == "old");
+        Assert.Contains(snap, e => e.Code == "new");
+    }
 }

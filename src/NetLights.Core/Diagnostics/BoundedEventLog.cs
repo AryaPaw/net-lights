@@ -12,6 +12,7 @@ public sealed class BoundedEventLog
     {
         lock (_gate)
         {
+            Prune(DateTimeOffset.UtcNow);
             return _entries.ToArray();
         }
     }
@@ -25,22 +26,27 @@ public sealed class BoundedEventLog
         {
             _entries.Enqueue(entry);
             _bytes += size;
-            while (_entries.Count > 0)
-            {
-                LogEntry oldest = _entries.Peek();
-                bool tooOld = utc - oldest.Utc > MonitorConstants.HistoryRetention;
-                bool tooMany = _entries.Count > MonitorConstants.MaxLogEntries || _bytes > MonitorConstants.MaxLogBytes;
-                if (!tooOld && !tooMany)
-                {
-                    break;
-                }
+            Prune(utc);
+        }
+    }
 
-                LogEntry old = _entries.Dequeue();
-                _bytes -= Encoding.UTF8.GetByteCount(old.Code) + Encoding.UTF8.GetByteCount(old.Message) + 32;
-                if (_bytes < 0)
-                {
-                    _bytes = 0;
-                }
+    private void Prune(DateTimeOffset utc)
+    {
+        while (_entries.Count > 0)
+        {
+            LogEntry oldest = _entries.Peek();
+            bool tooOld = utc - oldest.Utc > MonitorConstants.HistoryRetention;
+            bool tooMany = _entries.Count > MonitorConstants.MaxLogEntries || _bytes > MonitorConstants.MaxLogBytes;
+            if (!tooOld && !tooMany)
+            {
+                break;
+            }
+
+            LogEntry old = _entries.Dequeue();
+            _bytes -= Encoding.UTF8.GetByteCount(old.Code) + Encoding.UTF8.GetByteCount(old.Message) + 32;
+            if (_bytes < 0)
+            {
+                _bytes = 0;
             }
         }
     }

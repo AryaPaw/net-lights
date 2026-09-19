@@ -55,6 +55,54 @@ public sealed class StateHistoryAndExportTests
         }
     }
 
+    [Fact]
+    public void Export_StripsQuerySecretsFromSnapshotJson()
+    {
+        string dest = Path.Combine(Path.GetTempPath(), "nl-sec-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dest);
+        try
+        {
+            var endpoint = new EndpointView(
+                "ru-secret",
+                EndpointGroup.Ru,
+                "infra",
+                new Uri("https://example.test/path?token=REVIEW_FAKE_SECRET"),
+                ProbeOutcome.Reachable,
+                200,
+                null,
+                TimeSpan.FromMilliseconds(10),
+                DateTimeOffset.UtcNow,
+                true,
+                false,
+                null,
+                false,
+                EndpointStats.Empty);
+            var snapshot = new MonitorSnapshot(
+                1,
+                DateTimeOffset.UtcNow,
+                1,
+                new GroupSnapshot(EndpointGroup.Ru, GroupAvailability.Online, "", null, false, [endpoint]),
+                new GroupSnapshot(EndpointGroup.World, GroupAvailability.Unknown, "", null, false, []),
+                false,
+                null,
+                false,
+                null,
+                false);
+            string zip = DiagnosticExport.Export(snapshot, new BoundedEventLog(), null, dest);
+            using ZipArchive archive = ZipFile.OpenRead(zip);
+            ZipArchiveEntry json = Assert.Single(archive.Entries, e => e.Name == "snapshot.json");
+            using Stream stream = json.Open();
+            using var reader = new StreamReader(stream);
+            string text = reader.ReadToEnd();
+            Assert.DoesNotContain("REVIEW_FAKE_SECRET", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("token=", text, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Directory.Delete(dest, true);
+        }
+    }
+
     private static MonitorSnapshot EmptySnapshot()
     {
         return new MonitorSnapshot(

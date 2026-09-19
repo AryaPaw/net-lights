@@ -21,6 +21,7 @@ PrivilegesRequiredOverridesAllowed=commandline
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\src\NetLights.App\Assets\app.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -52,6 +53,9 @@ Name: "{userstartup}\Net Lights"; Filename: "{app}\{#MyAppExeName}"; Tasks: star
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "NetLights"; Flags: uninsdeletevalue dontcreatekey
 
 [Code]
 function TaskKillImage(const ImageName: String): Integer;

@@ -18,7 +18,7 @@ internal static class DiagnosticExport
         Directory.CreateDirectory(dir);
         try
         {
-            File.WriteAllText(Path.Combine(dir, "snapshot.json"), JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(Path.Combine(dir, "snapshot.json"), SanitizeSecrets(JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true })));
             File.WriteAllText(Path.Combine(dir, "events.json"), JsonSerializer.Serialize(log.Snapshot(), new JsonSerializerOptions { WriteIndented = true }));
             var versions = new
             {
@@ -106,6 +106,13 @@ internal static class DiagnosticExport
             StructuredFailureKind.None => "",
             _ => failure.SafeDetail
         };
+    }
+
+    private static string SanitizeSecrets(string json)
+    {
+        json = System.Text.RegularExpressions.Regex.Replace(json, @"\?[^""\\]*", "", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        json = System.Text.RegularExpressions.Regex.Replace(json, @"(https://)[^/\s""]+@", "$1", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        return json;
     }
 
     private static string Truncate(string text) => text.Length <= 63 ? text : text[..63];

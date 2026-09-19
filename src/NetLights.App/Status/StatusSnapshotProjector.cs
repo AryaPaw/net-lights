@@ -8,7 +8,8 @@ internal static class StatusSnapshotProjector
         => string.Join("|", Rows(snapshot).Select(r => $"{r.Group}:{r.Id}:{r.Result}:{r.Http}:{r.Delay}:{r.LastCompleted?.UtcTicks}:{r.Reason}:{r.Rate}"))
            + "|" + snapshot.Ru.Availability + snapshot.World.Availability
            + "|" + snapshot.Ru.ConfirmationActive + snapshot.World.ConfirmationActive
-           + "|" + snapshot.Paused;
+           + "|" + snapshot.Paused
+           + "|" + snapshot.MonitorError + snapshot.ConfigWarning + snapshot.UsingBuiltinPool;
 
     public static string Summary(MonitorSnapshot snapshot)
     {
@@ -25,7 +26,7 @@ internal static class StatusSnapshotProjector
         return summary;
     }
 
-    public static string Title(MonitorSnapshot snapshot) => "Net Lights";
+    public static string Title(MonitorSnapshot snapshot) => ProductInfo.Name;
 
     public static List<EndpointRow> Rows(MonitorSnapshot snapshot)
     {
@@ -106,7 +107,7 @@ internal static class StatusSnapshotProjector
             (Color back, Color fore) = RowStyle(group.Group, endpoint.Outcome, highContrast);
             rows.Add(new EndpointRow(
                 groupName,
-                endpoint.Id,
+                endpoint.Uri.IdnHost,
                 result,
                 endpoint.HttpStatus?.ToString() ?? "",
                 endpoint.Elapsed is { } elapsed ? $"{elapsed.TotalMilliseconds:0} мс" : "",

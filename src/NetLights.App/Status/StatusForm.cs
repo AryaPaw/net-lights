@@ -5,31 +5,34 @@ namespace NetLights.App;
 internal sealed class StatusForm : Form
 {
     private readonly StatusListView _list = new();
-    private readonly StatusListView _stats = new();
     private readonly StatusBadge _ruBadge = new();
     private readonly StatusBadge _worldBadge = new();
     private readonly Label _confirmLine = new();
     private readonly Label _versionLabel = new();
-    private readonly Label _footerHint = new();
     private readonly ComboBox _diagNode = new();
     private readonly ThemedButton _diagRun = new("Сравнить HTTPS, ICMP и TCP", true);
     private readonly TextBox _diagOut = new();
     private readonly CheckBox _autoStart = new();
     private readonly CheckBox _autoUpdate = new();
+    private readonly CheckBox _geoCountryIcon = new();
+    private readonly Label _letterSizeLabel = new();
+    private readonly ComboBox _letterSize = new();
     private readonly Label _updateLine = new();
     private readonly ThemedButton _checkUpdates = new("Проверить обновления", true);
     private readonly ThemedButton _exportLog = new("Экспорт журнала", false);
     private readonly Label _manualUpdateLine = new();
     private readonly ThemedButton _tabLive = new("Состояние", true);
-    private readonly ThemedButton _tabStats = new("Узлы", false);
+    private readonly ThemedButton _tabLocations = new("Локации", false);
     private readonly ThemedButton _tabDiag = new("Диагностика", false);
     private readonly ThemedButton _tabSettings = new("Параметры", false);
     private readonly Panel _livePage = new() { Dock = DockStyle.Fill, BackColor = UiTheme.Surface };
-    private readonly Panel _statsPage = new() { Dock = DockStyle.Fill, BackColor = UiTheme.Surface };
+    private readonly Panel _locationsPage = new() { Dock = DockStyle.Fill, BackColor = UiTheme.Surface };
     private readonly Panel _diagPage = new() { Dock = DockStyle.Fill, BackColor = UiTheme.Surface };
     private readonly Panel _settingsPage = new() { Dock = DockStyle.Fill, BackColor = UiTheme.Surface };
     private readonly System.Windows.Forms.Timer _ages = new();
     private readonly TimeProvider _time;
+    private readonly LocationTimelinePanel _locations;
+    private readonly Icon? _windowIcon;
     private readonly Dictionary<Color, SolidBrush> _fills = [];
     private readonly Dictionary<Color, Pen> _pens = [];
     private MonitorSnapshot? _snapshot;
@@ -45,6 +48,10 @@ internal sealed class StatusForm : Form
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action<bool>? AutoUpdateChanged { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<bool>? GeoCountryIconChanged { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<GeoCountryLetterScale>? GeoCountryLetterScaleChanged { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Func<string, Task<string>>? DiagnoseRequested { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action? ExportRequested { get; set; }
@@ -58,36 +65,39 @@ internal sealed class StatusForm : Form
     public StatusForm(TimeProvider time)
     {
         _time = time;
-        Text = "Net Lights";
+        _locations = new LocationTimelinePanel(_time);
+        Text = ProductInfo.DisplayName();
         Font = UiTheme.Body;
         ForeColor = UiTheme.Ink;
         BackColor = UiTheme.Surface;
-        MinimumSize = new Size(920, 700);
-        Width = 1000;
-        Height = 800;
+        _windowIcon = AppBranding.LoadWindowIcon();
+        if (_windowIcon is not null)
+        {
+            Icon = _windowIcon;
+        }
+        MinimumSize = new Size(UiTheme.WindowMinWidth, UiTheme.WindowMinHeight);
+        Width = UiTheme.WindowDefaultWidth;
+        Height = UiTheme.WindowDefaultHeight;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterScreen;
-        AutoScaleMode = AutoScaleMode.Dpi;
-        AutoScaleDimensions = new SizeF(96F, 96F);
+        AutoScaleMode = AutoScaleMode.None;
         DoubleBuffered = true;
         Padding = Padding.Empty;
-        AccessibleName = "Net Lights";
+        AccessibleName = ProductInfo.DisplayName();
 
         var shell = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 2,
             BackColor = UiTheme.Surface,
             Padding = Padding.Empty
         };
         shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-        shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         shell.Controls.Add(BuildHeader(), 0, 0);
         shell.Controls.Add(BuildBody(), 0, 1);
-        shell.Controls.Add(BuildFooter(), 0, 2);
         Controls.Add(shell);
 
         _ages.Tick += (_, _) =>
@@ -98,7 +108,6 @@ internal sealed class StatusForm : Form
         Resize += (_, _) =>
         {
             ScaleColumns(_list, [120, 140, 100, 60, 110, 90, 120, 170]);
-            ScaleColumns(_stats, [120, 120, 160, 80, 80, 80, 140, 210]);
         };
     }
 
@@ -106,11 +115,22 @@ internal sealed class StatusForm : Form
     {
         Screen screen = Screen.FromPoint(Cursor.Position);
         Rectangle area = screen.WorkingArea;
-        int width = Math.Min(Width, area.Width);
-        int height = Math.Min(Height, area.Height);
+        int width = Math.Min(Math.Max(MinimumSize.Width, Width), Math.Max(320, area.Width));
+        int height = Math.Min(Math.Max(MinimumSize.Height, Height), Math.Max(240, area.Height));
+        if (width > area.Width)
+        {
+            width = area.Width;
+        }
+
+        if (height > area.Height)
+        {
+            height = area.Height;
+        }
+
+        Size = new Size(Math.Max(320, width), Math.Max(240, height));
         Location = new Point(
-            area.Left + Math.Max(0, (area.Width - width) / 2),
-            area.Top + Math.Max(0, (area.Height - height) / 2));
+            area.Left + Math.Max(0, (area.Width - Width) / 2),
+            area.Top + Math.Max(0, (area.Height - Height) / 2));
     }
 
     public void Reveal()
@@ -136,13 +156,21 @@ internal sealed class StatusForm : Form
     public bool NeedsBind(MonitorSnapshot snapshot)
         => StatusSnapshotProjector.Fingerprint(snapshot) != _fingerprint;
 
-    public void BindSettings(bool autoStart, bool autoUpdate, string? updateNotice)
+    public void BindSettings(
+        bool autoStart,
+        bool autoUpdate,
+        bool geoCountryIcon,
+        GeoCountryLetterScale letterScale,
+        string? updateNotice)
     {
         _suppressSettings = true;
         _autoStart.Checked = autoStart;
         _autoUpdate.Checked = autoUpdate;
+        _geoCountryIcon.Checked = geoCountryIcon;
+        _letterSize.SelectedIndex = (int)GeoCountryLetterScales.Parse((int)letterScale);
+        SyncLetterSizeVisibility();
         _updateLine.Text = string.IsNullOrWhiteSpace(updateNotice)
-            ? "Ждём сеть, проверяем GitHub, скачиваем Setup и ставим сами, как обычный тихий установщик."
+            ? "Обновления с GitHub ставятся тихо, когда есть сеть."
             : "Последняя ошибка обновления: " + updateNotice;
         _versionLabel.Text = "v" + ProductInfo.Version;
         _suppressSettings = false;
@@ -166,9 +194,24 @@ internal sealed class StatusForm : Form
         string fingerprint = StatusSnapshotProjector.Fingerprint(snapshot);
         _ruBadge.SetGroup(GroupLabels.Provider, DiagnosticExport.Label(snapshot.Ru.Availability), true);
         _worldBadge.SetGroup(GroupLabels.World, DiagnosticExport.Label(snapshot.World.Availability), false);
-        if (snapshot.Paused)
+        if (!string.IsNullOrWhiteSpace(snapshot.MonitorError))
+        {
+            _confirmLine.Text = snapshot.MonitorError;
+            _confirmLine.Visible = true;
+        }
+        else if (snapshot.Paused)
         {
             _confirmLine.Text = "проверки на паузе";
+            _confirmLine.Visible = true;
+        }
+        else if (!string.IsNullOrWhiteSpace(snapshot.ConfigWarning))
+        {
+            _confirmLine.Text = snapshot.ConfigWarning;
+            _confirmLine.Visible = true;
+        }
+        else if (!snapshot.UsingBuiltinPool)
+        {
+            _confirmLine.Text = "свой список адресов";
             _confirmLine.Visible = true;
         }
         else
@@ -178,7 +221,6 @@ internal sealed class StatusForm : Form
             _confirmLine.Visible = confirm;
         }
         BindLive(StatusSnapshotProjector.Rows(snapshot));
-        BindStats(NodeStatsProjector.Rows(snapshot));
         BindDiagNodes(snapshot);
         DataBindCount++;
         _fingerprint = fingerprint;
@@ -220,19 +262,41 @@ internal sealed class StatusForm : Form
         {
             ClockUpdateCount++;
         }
+
+        if (_locationsPage.Visible)
+        {
+            _locations.Tick();
+        }
+    }
+
+    public void BindLocations(LocationHistory history, GeoCountryDisplay? live = null)
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => BindLocations(history, live));
+            return;
+        }
+
+        _locations.Bind(history, live);
     }
 
     private Panel BuildHeader()
     {
         var header = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             BackColor = UiTheme.Brand950,
-            Padding = new Padding(UiTheme.PagePad, 16, UiTheme.PagePad, 16),
+            Padding = new Padding(UiTheme.PagePad, 14, UiTheme.PagePad, 14),
             ColumnCount = 1,
-            RowCount = 3
+            RowCount = 3,
+            AccessibleName = "windowHeader"
         };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         for (int i = 0; i < 3; i++)
@@ -242,8 +306,9 @@ internal sealed class StatusForm : Form
 
         var titleRow = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 2,
             RowCount = 1,
             BackColor = Color.Transparent,
@@ -254,11 +319,12 @@ internal sealed class StatusForm : Form
         var title = new Label
         {
             AutoSize = true,
-            Text = "Net Lights",
+            Text = ProductInfo.Name,
             Font = UiTheme.Title,
             ForeColor = UiTheme.OnBrand,
             BackColor = Color.Transparent,
-            Margin = Padding.Empty
+            Margin = Padding.Empty,
+            AccessibleName = "productTitle"
         };
         _versionLabel.AutoSize = true;
         _versionLabel.Text = "v" + ProductInfo.Version;
@@ -274,12 +340,24 @@ internal sealed class StatusForm : Form
         var subtitle = new Label
         {
             AutoSize = true,
-            MaximumSize = new Size(860, 0),
-            Text = "HTTPS HEAD контрольных адресов: провайдер слева, мир справа. Это не весь интернет и не UDP/QUIC.",
-            Font = UiTheme.Body,
+            Text = "Провайдер слева, мир справа. HTTPS контрольных адресов, не весь интернет.",
+            Font = UiTheme.Caption,
             ForeColor = UiTheme.OnHeaderMuted,
             BackColor = Color.Transparent,
             Margin = new Padding(0, 0, 0, 10)
+        };
+        header.Resize += (_, _) =>
+        {
+            int inner = header.ClientSize.Width - header.Padding.Horizontal;
+            if (inner < 240)
+            {
+                return;
+            }
+
+            if (subtitle.MaximumSize.Width != inner)
+            {
+                subtitle.MaximumSize = new Size(inner, 0);
+            }
         };
 
         var statusRow = new FlowLayoutPanel
@@ -321,23 +399,24 @@ internal sealed class StatusForm : Form
         body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         body.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         _tabLive.Click += (_, _) => ShowPage(0);
-        _tabStats.Click += (_, _) => ShowPage(1);
+        _tabLocations.Click += (_, _) => ShowPage(1);
         _tabDiag.Click += (_, _) => ShowPage(2);
         _tabSettings.Click += (_, _) => ShowPage(3);
+        _tabLocations.AccessibleName = "locationsTab";
         _tabSettings.AccessibleName = "settingsTab";
-        var tabs = new SegmentTrack(_tabLive, _tabStats, _tabDiag, _tabSettings)
+        var tabs = new SegmentTrack(_tabLive, _tabLocations, _tabDiag, _tabSettings)
         {
             Dock = DockStyle.Top,
             Margin = new Padding(0, 0, 0, 12)
         };
         FillLivePage();
-        FillStatsPage();
+        FillLocationsPage();
         FillDiagPage();
         FillSettingsPage();
         var host = new Panel { Dock = DockStyle.Fill, BackColor = UiTheme.Surface };
         host.Controls.Add(_settingsPage);
         host.Controls.Add(_diagPage);
-        host.Controls.Add(_statsPage);
+        host.Controls.Add(_locationsPage);
         host.Controls.Add(_livePage);
         body.Controls.Add(tabs, 0, 0);
         body.Controls.Add(host, 0, 1);
@@ -345,67 +424,14 @@ internal sealed class StatusForm : Form
         return body;
     }
 
-    private Panel BuildFooter()
-    {
-        var footer = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            BackColor = UiTheme.Brand50,
-            Padding = new Padding(UiTheme.PagePad, 12, UiTheme.PagePad, 14),
-            ColumnCount = 1,
-            RowCount = 2
-        };
-        _footerHint.AutoSize = true;
-        _footerHint.MaximumSize = new Size(900, 0);
-        _footerHint.Text = "Крестик прячет окно в трей. Пауза и выход — из меню иконки. Статистика узлов считается с запуска.";
-        _footerHint.Font = UiTheme.Caption;
-        _footerHint.ForeColor = UiTheme.Muted;
-        _footerHint.BackColor = Color.Transparent;
-        var links = new FlowLayoutPanel
-        {
-            AutoSize = true,
-            FlowDirection = FlowDirection.LeftToRight,
-            BackColor = Color.Transparent
-        };
-        var github = new LinkLabel
-        {
-            AutoSize = true,
-            Text = "Исходный код",
-            Font = UiTheme.Caption,
-            LinkColor = UiTheme.Brand800,
-            ActiveLinkColor = UiTheme.Brand900,
-            LinkBehavior = LinkBehavior.HoverUnderline,
-            BackColor = Color.Transparent
-        };
-        var releases = new LinkLabel
-        {
-            AutoSize = true,
-            Text = "Releases",
-            Font = UiTheme.Caption,
-            LinkColor = UiTheme.Brand800,
-            ActiveLinkColor = UiTheme.Brand900,
-            LinkBehavior = LinkBehavior.HoverUnderline,
-            BackColor = Color.Transparent,
-            Margin = new Padding(16, 0, 0, 0)
-        };
-        github.LinkClicked += (_, _) => UiDrawing.OpenHttps(AppCredits.RepositoryUrl);
-        releases.LinkClicked += (_, _) => UiDrawing.OpenHttps(AppCredits.ReleasesUrl);
-        links.Controls.Add(github);
-        links.Controls.Add(releases);
-        footer.Controls.Add(_footerHint, 0, 0);
-        footer.Controls.Add(links, 0, 1);
-        return footer;
-    }
-
     private void ShowPage(int index)
     {
         _livePage.Visible = index == 0;
-        _statsPage.Visible = index == 1;
+        _locationsPage.Visible = index == 1;
         _diagPage.Visible = index == 2;
         _settingsPage.Visible = index == 3;
         _tabLive.Primary = index == 0;
-        _tabStats.Primary = index == 1;
+        _tabLocations.Primary = index == 1;
         _tabDiag.Primary = index == 2;
         _tabSettings.Primary = index == 3;
         if (index == 0)
@@ -415,13 +441,38 @@ internal sealed class StatusForm : Form
 
         if (index == 1)
         {
-            ScaleColumns(_stats, [120, 120, 160, 80, 80, 80, 140, 210]);
+            PerformLayout();
+            _locationsPage.PerformLayout();
+            _locations.Relayout();
         }
+
+        if (index == 3 && _settingsPage.Controls.Count > 0 && _settingsPage.Controls[0] is VerticalStack stack)
+        {
+            stack.Relayout();
+        }
+    }
+
+    private void FillLocationsPage()
+    {
+        _locations.Dock = DockStyle.Fill;
+        _locationsPage.Controls.Add(_locations);
     }
 
     private void FillLivePage()
     {
-        var hint = Hint("Проверки идут сами по расписанию. Колонка «С запуска» — доля успешных HTTPS с этого запуска.");
+        var page = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = UiTheme.Surface,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        page.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var hint = Hint("Колонка «С запуска» — доля успешных HTTPS с этого запуска.");
         ConfigureList(_list, "Текущие проверки", DrawRow);
         _list.Columns.Add("Группа", 120);
         _list.Columns.Add("Адрес", 140);
@@ -432,47 +483,37 @@ internal sealed class StatusForm : Form
         _list.Columns.Add("Проверено", 120);
         _list.Columns.Add("Причина", 170);
         _list.Layout += (_, _) => LayoutCount++;
-        _livePage.Controls.Add(_list);
-        _livePage.Controls.Add(hint);
-    }
-
-    private void FillStatsPage()
-    {
-        var hint = Hint("Худшие узлы сверху. 403/429 — похоже на ограничение. Низкий успех — кандидат на замену в пуле.");
-        ConfigureList(_stats, "Статистика узлов", DrawPlain);
-        _stats.Columns.Add("Группа", 120);
-        _stats.Columns.Add("Узел", 120);
-        _stats.Columns.Add("Хост", 160);
-        _stats.Columns.Add("Проверок", 80);
-        _stats.Columns.Add("Успех", 80);
-        _stats.Columns.Add("403/429", 80);
-        _stats.Columns.Add("Последнее", 140);
-        _stats.Columns.Add("Вывод", 210);
-        _statsPage.Controls.Add(_stats);
-        _statsPage.Controls.Add(hint);
+        page.Controls.Add(_list, 0, 0);
+        page.Controls.Add(hint, 0, 1);
+        _livePage.Controls.Add(page);
     }
 
     private void FillDiagPage()
     {
-        var intro = Hint("Сравнение HTTPS с ICMP и TCP:443. Если ping есть, а HTTPS нет — режут HTTPS, а не «весь интернет». Обычный Online/Offline ICMP не использует.");
+        var intro = Hint("HTTPS, ICMP и TCP 443 сравниваются отдельно. Разный итог не доказывает блокировку HTTPS.");
         intro.Dock = DockStyle.Top;
-        var row = new FlowLayoutPanel
+        var row = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
-            WrapContents = false,
-            Padding = new Padding(0, 0, 0, 8)
+            ColumnCount = 2,
+            RowCount = 1,
+            Padding = new Padding(0, 0, 0, 8),
+            BackColor = UiTheme.Surface
         };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         _diagNode.DropDownStyle = ComboBoxStyle.DropDownList;
-        _diagNode.Width = 280;
+        _diagNode.Dock = DockStyle.Fill;
         _diagNode.Font = UiTheme.Body;
         _diagNode.AccessibleName = "Узел для диагностики";
         _diagRun.AutoSize = false;
         _diagRun.Size = new Size(280, UiTheme.ButtonHeight);
         _diagRun.Stretch = false;
+        _diagRun.Margin = new Padding(8, 0, 0, 0);
         _diagRun.Click += async (_, _) => await RunDiagnosticsAsync();
-        row.Controls.Add(_diagNode);
-        row.Controls.Add(_diagRun);
+        row.Controls.Add(_diagNode, 0, 0);
+        row.Controls.Add(_diagRun, 1, 0);
         _diagOut.Dock = DockStyle.Fill;
         _diagOut.Multiline = true;
         _diagOut.ReadOnly = true;
@@ -488,18 +529,12 @@ internal sealed class StatusForm : Form
 
     private void FillSettingsPage()
     {
-        var stack = new FlowLayoutPanel
+        var stack = new VerticalStack
         {
             Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            Padding = new Padding(4, 4, 4, 4),
-            AutoScroll = true
+            AccessibleName = "settingsStack"
         };
-        _autoStart.Text = "Запускать вместе с Windows";
-        _autoStart.AutoSize = true;
-        _autoStart.Font = UiTheme.Body;
-        _autoStart.Margin = new Padding(0, 0, 0, 8);
+        StyleCheck(_autoStart, "Запускать вместе с Windows", Padding.Empty);
         _autoStart.CheckedChanged += (_, _) =>
         {
             if (!_suppressSettings)
@@ -507,10 +542,7 @@ internal sealed class StatusForm : Form
                 AutoStartChanged?.Invoke(_autoStart.Checked);
             }
         };
-        _autoUpdate.Text = "Ставить обновления с GitHub";
-        _autoUpdate.AutoSize = true;
-        _autoUpdate.Font = UiTheme.Body;
-        _autoUpdate.Margin = new Padding(0, 0, 0, 8);
+        StyleCheck(_autoUpdate, "Ставить обновления с GitHub", new Padding(0, 0, 0, 8));
         _autoUpdate.CheckedChanged += (_, _) =>
         {
             if (!_suppressSettings)
@@ -518,10 +550,41 @@ internal sealed class StatusForm : Form
                 AutoUpdateChanged?.Invoke(_autoUpdate.Checked);
             }
         };
+        StyleCheck(_geoCountryIcon, "Показывать страну в трее", new Padding(0, 0, 0, 8));
+        _geoCountryIcon.AccessibleName = "geoCountryIcon";
+        _geoCountryIcon.CheckedChanged += (_, _) =>
+        {
+            SyncLetterSizeVisibility();
+            if (!_suppressSettings)
+            {
+                GeoCountryIconChanged?.Invoke(_geoCountryIcon.Checked);
+            }
+        };
+        _letterSizeLabel.AutoSize = true;
+        _letterSizeLabel.Text = "Размер букв в трее";
+        _letterSizeLabel.Font = UiTheme.Caption;
+        _letterSizeLabel.ForeColor = UiTheme.Muted;
+        _letterSizeLabel.BackColor = UiTheme.Card;
+        _letterSizeLabel.Margin = new Padding(0, 0, 0, 6);
+        _letterSize.DropDownStyle = ComboBoxStyle.DropDownList;
+        _letterSize.Font = UiTheme.Body;
+        _letterSize.Width = 220;
+        _letterSize.Margin = Padding.Empty;
+        _letterSize.AccessibleName = "geoCountryLetterSize";
+        _letterSize.Items.AddRange(GeoCountryLetterScales.Captions);
+        _letterSize.SelectedIndex = (int)GeoCountryLetterScale.Regular;
+        _letterSize.SelectedIndexChanged += (_, _) =>
+        {
+            if (!_suppressSettings)
+            {
+                GeoCountryLetterScaleChanged?.Invoke(GeoCountryLetterScales.Parse(_letterSize.SelectedIndex));
+            }
+        };
+        SyncLetterSizeVisibility();
         _updateLine.AutoSize = true;
-        _updateLine.MaximumSize = new Size(820, 0);
         _updateLine.Font = UiTheme.Caption;
         _updateLine.ForeColor = UiTheme.Muted;
+        _updateLine.BackColor = UiTheme.Card;
         _updateLine.Margin = new Padding(0, 0, 0, 12);
         var actions = new FlowLayoutPanel
         {
@@ -530,43 +593,117 @@ internal sealed class StatusForm : Form
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
             Margin = new Padding(0, 0, 0, 8),
-            Padding = Padding.Empty
+            Padding = Padding.Empty,
+            BackColor = UiTheme.Card
         };
         _checkUpdates.Stretch = false;
-        _checkUpdates.AutoSize = false;
-        _checkUpdates.Size = new Size(280, UiTheme.ButtonHeight);
-        _checkUpdates.Margin = new Padding(0, 0, 12, 0);
+        _checkUpdates.FitToText();
+        _checkUpdates.Margin = new Padding(0, 0, 10, 0);
         _checkUpdates.AccessibleName = "checkUpdates";
         _checkUpdates.Click += (_, _) => CheckUpdatesRequested?.Invoke();
         _exportLog.Stretch = false;
-        _exportLog.AutoSize = false;
-        _exportLog.Size = new Size(180, UiTheme.ButtonHeight);
-        _exportLog.Margin = new Padding(0);
+        _exportLog.FitToText();
+        _exportLog.Margin = Padding.Empty;
         _exportLog.AccessibleName = "exportLog";
         _exportLog.Click += (_, _) => ExportRequested?.Invoke();
         actions.Controls.Add(_checkUpdates);
         actions.Controls.Add(_exportLog);
         _manualUpdateLine.AutoSize = true;
-        _manualUpdateLine.MaximumSize = new Size(820, 0);
         _manualUpdateLine.Font = UiTheme.Caption;
         _manualUpdateLine.ForeColor = UiTheme.Muted;
-        _manualUpdateLine.Margin = new Padding(0);
+        _manualUpdateLine.BackColor = UiTheme.Card;
+        _manualUpdateLine.Margin = Padding.Empty;
         _manualUpdateLine.AccessibleName = "manualUpdateStatus";
-        stack.Controls.Add(_autoStart);
-        stack.Controls.Add(_autoUpdate);
-        stack.Controls.Add(_updateLine);
-        stack.Controls.Add(actions);
-        stack.Controls.Add(_manualUpdateLine);
+        var links = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = new Padding(4, 4, 0, 0),
+            Padding = Padding.Empty,
+            BackColor = UiTheme.Surface
+        };
+        var github = QuietLink("Исходный код", "githubLink");
+        var releases = QuietLink("Releases", "releasesLink");
+        releases.Margin = new Padding(16, 0, 0, 0);
+        github.LinkClicked += (_, _) => UiDrawing.OpenHttps(AppCredits.RepositoryUrl);
+        releases.LinkClicked += (_, _) => UiDrawing.OpenHttps(AppCredits.ReleasesUrl);
+        links.Controls.Add(github);
+        links.Controls.Add(releases);
+        stack.Controls.Add(SettingsBlock("Общие", _autoStart, _geoCountryIcon, _letterSizeLabel, _letterSize));
+        stack.Controls.Add(SettingsBlock("Обновления", _autoUpdate, _updateLine, actions, _manualUpdateLine));
+        stack.Controls.Add(links);
         _settingsPage.Controls.Add(stack);
+        stack.Relayout();
+    }
+
+    private void SyncLetterSizeVisibility()
+    {
+        bool show = _geoCountryIcon.Checked;
+        _letterSizeLabel.Visible = show;
+        _letterSize.Visible = show;
+        if (_settingsPage.Controls.Count > 0 && _settingsPage.Controls[0] is VerticalStack stack)
+        {
+            stack.Relayout();
+        }
+    }
+
+    private static void StyleCheck(CheckBox box, string text, Padding margin)
+    {
+        box.Text = text;
+        box.AutoSize = true;
+        box.Font = UiTheme.Body;
+        box.ForeColor = UiTheme.Ink;
+        box.BackColor = UiTheme.Card;
+        box.Margin = margin;
+        box.FlatStyle = FlatStyle.System;
+        box.UseMnemonic = false;
+    }
+
+    private static LinkLabel QuietLink(string text, string accessibleName)
+        => new()
+        {
+            AutoSize = true,
+            Text = text,
+            Font = UiTheme.Caption,
+            LinkColor = UiTheme.Brand800,
+            ActiveLinkColor = UiTheme.Brand900,
+            LinkBehavior = LinkBehavior.HoverUnderline,
+            BackColor = UiTheme.Surface,
+            AccessibleName = accessibleName
+        };
+
+    private static Control SettingsBlock(string title, params Control[] children)
+    {
+        var card = new RoundedCard
+        {
+            Margin = new Padding(0, 0, 0, 12),
+            Padding = new Padding(16, 14, 16, 14)
+        };
+        card.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Text = title,
+            Font = UiTheme.BodyBold,
+            ForeColor = UiTheme.Ink,
+            BackColor = UiTheme.Card,
+            Margin = new Padding(0, 0, 0, 10),
+            UseMnemonic = false
+        });
+        foreach (Control child in children)
+        {
+            card.Controls.Add(child);
+        }
+
+        return card;
     }
 
     private static Label Hint(string text)
     {
         return new Label
         {
-            Dock = DockStyle.Bottom,
             AutoSize = true,
-            MaximumSize = new Size(900, 0),
+            Dock = DockStyle.Fill,
             Padding = new Padding(0, 8, 0, 0),
             Text = text,
             Font = UiTheme.Caption,
@@ -593,24 +730,6 @@ internal sealed class StatusForm : Form
             Set(item, 6, StatusSnapshotProjector.AgeLabel(row.LastCompleted, now));
             Set(item, 7, row.Reason);
             PaintRow(item, row.Back, row.Fore);
-        }
-    }
-
-    private void BindStats(List<NodeStatRow> rows)
-    {
-        SyncCount(_stats, rows.Count, 8);
-        for (int i = 0; i < rows.Count; i++)
-        {
-            NodeStatRow row = rows[i];
-            ListViewItem item = _stats.Items[i];
-            Set(item, 0, row.Group);
-            Set(item, 1, row.Id);
-            Set(item, 2, row.Uri);
-            Set(item, 3, row.Samples.ToString());
-            Set(item, 4, row.Success);
-            Set(item, 5, row.Restricted.ToString());
-            Set(item, 6, row.Last);
-            Set(item, 7, row.Verdict);
         }
     }
 
@@ -756,8 +875,6 @@ internal sealed class StatusForm : Form
 
     private void DrawRow(object? sender, DrawListViewSubItemEventArgs e) => DrawCell(e, true);
 
-    private void DrawPlain(object? sender, DrawListViewSubItemEventArgs e) => DrawCell(e, false);
-
     private void DrawCell(DrawListViewSubItemEventArgs e, bool useItemColors)
     {
         if (e.Item is null || e.SubItem is null)
@@ -825,14 +942,12 @@ internal sealed class StatusForm : Form
     {
         base.OnDpiChanged(e);
         ScaleColumns(_list, [120, 140, 100, 60, 110, 90, 120, 170]);
-        ScaleColumns(_stats, [120, 120, 160, 80, 80, 80, 140, 210]);
     }
 
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
         ScaleColumns(_list, [120, 140, 100, 60, 110, 90, 120, 170]);
-        ScaleColumns(_stats, [120, 120, 160, 80, 80, 80, 140, 210]);
     }
 
     private static void ScaleColumns(ListView list, int[] weights)
@@ -843,10 +958,24 @@ internal sealed class StatusForm : Form
         }
 
         int total = weights.Sum();
-        int width = Math.Max(list.ClientSize.Width, 700);
+        int width = list.ClientSize.Width - 2;
+        if (width <= 0)
+        {
+            return;
+        }
+
+        int used = 0;
         for (int i = 0; i < weights.Length; i++)
         {
-            list.Columns[i].Width = Math.Max(50, width * weights[i] / total);
+            int column = i == weights.Length - 1
+                ? Math.Max(40, width - used)
+                : Math.Max(40, width * weights[i] / total);
+            if (i < weights.Length - 1)
+            {
+                used += column;
+            }
+
+            list.Columns[i].Width = column;
         }
     }
 
@@ -893,6 +1022,7 @@ internal sealed class StatusForm : Form
 
             _fills.Clear();
             _pens.Clear();
+            _windowIcon?.Dispose();
         }
 
         base.Dispose(disposing);

@@ -408,6 +408,15 @@ public sealed class SchedulerTests
         Assert.Equal("boom", runner.Kernel.Snapshot.MonitorError);
     }
 
+    [Fact]
+    public void ManualBlockReason_ReportsPause()
+    {
+        var kernel = new MonitorKernel(new MonitorConfiguration { Endpoints = BuiltinEndpoints.All }, TimeProvider.System);
+        Assert.Null(kernel.ManualBlockReason("ru-yandex"));
+        kernel.SetPaused(true);
+        Assert.Equal("Монитор на паузе.", kernel.ManualBlockReason("ru-yandex"));
+    }
+
     public static TheoryData<int, int> TwoLivePairs()
     {
         var data = new TheoryData<int, int>();

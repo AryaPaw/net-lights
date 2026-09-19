@@ -15,6 +15,18 @@ public sealed class ConfigAndLimiterTests
         var fewInfra = BuiltinEndpoints.All.Select(e => e with { InfrastructureId = e.Group == EndpointGroup.Ru ? "one" : e.InfrastructureId }).ToList();
         Assert.False(EndpointPoolValidator.Validate(fewInfra).IsValid);
         Assert.True(EndpointPoolValidator.Validate(BuiltinEndpoints.All).IsValid);
+        var dupHost = BuiltinEndpoints.All.ToList();
+        dupHost[1] = dupHost[1] with { Uri = dupHost[0].Uri, Id = "dup-host", InfrastructureId = "other" };
+        Assert.False(EndpointPoolValidator.Validate(dupHost).IsValid);
+        var sameHostDifferentPath = BuiltinEndpoints.All.ToList();
+        Uri first = sameHostDifferentPath[0].Uri;
+        sameHostDifferentPath[1] = sameHostDifferentPath[1] with
+        {
+            Uri = new Uri($"{first.Scheme}://{first.IdnHost}:{first.Port}/other-path"),
+            Id = "same-host-other-path",
+            InfrastructureId = "other-path-infra"
+        };
+        Assert.True(EndpointPoolValidator.Validate(sameHostDifferentPath).IsValid);
     }
 
     [Fact]

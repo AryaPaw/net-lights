@@ -118,6 +118,7 @@ public static class SilentUpdateCoordinator
 
         if (!IntegrityVerifier.Matches(expected, actual))
         {
+            TryDelete(destination);
             return SilentUpdateOutcome.Failed;
         }
 
@@ -128,10 +129,25 @@ public static class SilentUpdateCoordinator
 
         if (!context.Installer.TryStartSilent(destination))
         {
+            TryDelete(destination);
             return SilentUpdateOutcome.Failed;
         }
 
         context.RequestExit();
         return SilentUpdateOutcome.Applied;
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (Exception)
+        {
+        }
     }
 }

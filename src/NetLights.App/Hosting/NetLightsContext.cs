@@ -13,6 +13,8 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly ContextMenuStrip _menu;
     private readonly TrayIconRenderer _renderer = new();
     private readonly StatusForm _status = new();
+    private readonly GeoCountryTrayHost _countryTray;
+    private readonly LocationHistory _locations;
     private readonly AppSettings _settings;
     private readonly MonitorHost _host;
     private readonly HttpsProbe _probe;
@@ -22,7 +24,7 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly SemaphoreSlim _updateGate = new(1, 1);
     private readonly CancellationTokenSource _diagnosticsCts = new();
     private readonly ToolStripMenuItem _pauseItem;
-    private DateTimeOffset _lastNetworkEvent = DateTimeOffset.MinValue;
+    private readonly NetworkAvailabilityGate _network = new(MonitorConstants.NetworkDebounce);
     private MonitorSnapshot _snapshot;
     private bool _exiting;
     private bool _syncingToggles;
@@ -31,12 +33,20 @@ internal sealed class NetLightsContext : ApplicationContext
     public NetLightsContext()
     {
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
-        _settings = SettingsStore.Load();
-        if (_settings.SettingsVersion < 1)
+        (AppSettings loadedSettings, SettingsLoadStatus loadStatus) = SettingsStore.LoadDetailed();
+        _settings = loadedSettings;
+        _locations = LocationHistoryStore.Load();
+        if (loadStatus is not SettingsLoadStatus.Corrupt and not SettingsLoadStatus.IoError
+            && _settings.SettingsVersion < 2)
         {
-            _settings.AutoStart = true;
-            _settings.SettingsVersion = 1;
-            SettingsStore.Save(_settings);
+            if (_settings.SettingsVersion < 1)
+            {
+                _settings.AutoStart = true;
+            }
+
+            _settings.GeoCountryIconEnabled = false;
+            _settings.SettingsVersion = 2;
+            TrySaveSettings();
         }
 
         AutoStartStore.Set(_settings.AutoStart, Application.ExecutablePath);
@@ -62,10 +72,17 @@ internal sealed class NetLightsContext : ApplicationContext
         _host.SnapshotChanged += OnSnapshot;
         _status.AutoStartChanged = OnAutoStartFromWindow;
         _status.AutoUpdateChanged = OnAutoUpdateFromWindow;
+        _status.GeoCountryIconChanged = OnGeoCountryIconFromWindow;
+        _status.GeoCountryLetterScaleChanged = OnGeoCountryLetterScaleFromWindow;
         _status.DiagnoseRequested = DiagnoseAsync;
         _status.ExportRequested = Export;
         _status.CheckUpdatesRequested = () => _ = CheckUpdatesManualAsync();
-        _status.BindSettings(AutoStartStore.IsEnabled(), _settings.AutoUpdateEnabled, _updateNotice);
+        _status.BindSettings(
+            AutoStartStore.IsEnabled(),
+            _settings.AutoUpdateEnabled,
+            _settings.GeoCountryIconEnabled,
+            GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize),
+            _updateNotice);
         _menu = new ContextMenuStrip();
         _menu.Items.Add("Открыть окно", null, (_, _) => ShowStatus());
         _pauseItem = new ToolStripMenuItem("Пауза")
@@ -98,14 +115,13 @@ internal sealed class NetLightsContext : ApplicationContext
                 ShowStatus();
             }
         };
+        _countryTray = new GeoCountryTrayHost(ShowStatus, ProductInfo.Version, TimeProvider.System, _ui);
+        _countryTray.DisplayChanged = OnCountryDisplay;
+        _status.BindLocations(_locations, _countryTray.Current);
         _heartbeat = new System.Windows.Forms.Timer { Interval = 1000 };
         _heartbeat.Tick += (_, _) =>
         {
-            if (!NetworkInterface.GetIsNetworkAvailable())
-            {
-                _host.NotifyUnavailable(true);
-            }
-
+            ApplyNetworkSignal(_network.OnHeartbeat(NetworkInterface.GetIsNetworkAvailable(), DateTimeOffset.UtcNow));
             if (!_snapshot.Paused)
             {
                 CheckSnapshotAge();
@@ -117,6 +133,8 @@ internal sealed class NetLightsContext : ApplicationContext
         _taskbar = new TaskbarRestartWindow(RestoreIcon);
         _heartbeat.Start();
         _host.Start();
+        _countryTray.SetLetterScale(GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize));
+        _countryTray.SetEnabled(_settings.GeoCountryIconEnabled);
         SilentUpdateRuntime.Start(
             () => _settings.AutoUpdateEnabled,
             ProductInfo.Version,
@@ -126,13 +144,13 @@ internal sealed class NetLightsContext : ApplicationContext
             _diagnosticsCts.Token);
         if (!string.IsNullOrEmpty(warning))
         {
-            _icon.BalloonTipTitle = "Net Lights";
+            _icon.BalloonTipTitle = ProductInfo.Name;
             _icon.BalloonTipText = warning;
             _icon.ShowBalloonTip(4000);
         }
         else if (!string.IsNullOrEmpty(_updateNotice))
         {
-            _icon.BalloonTipTitle = "Net Lights";
+            _icon.BalloonTipTitle = ProductInfo.Name;
             _icon.BalloonTipText = _updateNotice;
             _icon.ShowBalloonTip(4000);
         }
@@ -177,7 +195,23 @@ internal sealed class NetLightsContext : ApplicationContext
         TimeSpan age = TimeProvider.System.GetElapsedTime(_snapshot.GeneratedTimestamp);
         if (age > MonitorConstants.Freshness)
         {
+            int iconSize = _renderer.SystemSmallIconSize();
+            Icon stale = _renderer.Get(GroupAvailability.Unknown, GroupAvailability.Unknown, iconSize, false);
+            if (!ReferenceEquals(_icon.Icon, stale))
+            {
+                _icon.Icon = stale;
+            }
+
             _icon.Text = $"{GroupLabels.Provider}: нет свежих данных | {GroupLabels.World}: нет свежих данных";
+            if (_status.Visible)
+            {
+                _status.Bind(_snapshot with
+                {
+                    MonitorError = "монитор не отвечает",
+                    Ru = _snapshot.Ru with { Availability = GroupAvailability.Unknown },
+                    World = _snapshot.World with { Availability = GroupAvailability.Unknown }
+                });
+            }
         }
     }
 
@@ -190,7 +224,13 @@ internal sealed class NetLightsContext : ApplicationContext
         }
 
         _status.Bind(_snapshot);
-        _status.BindSettings(AutoStartStore.IsEnabled(), _settings.AutoUpdateEnabled, _updateNotice);
+        _status.BindSettings(
+            AutoStartStore.IsEnabled(),
+            _settings.AutoUpdateEnabled,
+            _settings.GeoCountryIconEnabled,
+            GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize),
+            _updateNotice);
+        _status.BindLocations(_locations, _countryTray.Current);
         _status.Reveal();
     }
 
@@ -198,13 +238,71 @@ internal sealed class NetLightsContext : ApplicationContext
     {
         AutoStartStore.Set(enabled, Application.ExecutablePath);
         _settings.AutoStart = enabled;
-        SettingsStore.Save(_settings);
+        TrySaveSettings();
     }
 
     private void OnAutoUpdateFromWindow(bool enabled)
     {
         _settings.AutoUpdateEnabled = enabled;
-        SettingsStore.Save(_settings);
+        TrySaveSettings();
+    }
+
+    private void TrySaveSettings()
+    {
+        try
+        {
+            SettingsStore.Save(_settings);
+        }
+        catch (Exception ex)
+        {
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "settings", ex.Message);
+        }
+    }
+
+    private void OnGeoCountryIconFromWindow(bool enabled)
+    {
+        _settings.GeoCountryIconEnabled = enabled;
+        TrySaveSettings();
+        if (!enabled)
+        {
+            _locations.CloseOpen(TimeProvider.System.GetUtcNow());
+            try
+            {
+                LocationHistoryStore.Save(_locations);
+            }
+            catch (Exception ex)
+            {
+                _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
+            }
+
+            _status.BindLocations(_locations, GeoCountryDisplay.Disabled);
+        }
+
+        _countryTray.SetEnabled(enabled);
+    }
+
+    private void OnGeoCountryLetterScaleFromWindow(GeoCountryLetterScale scale)
+    {
+        _settings.GeoCountryLetterSize = (int)scale;
+        TrySaveSettings();
+        _countryTray.SetLetterScale(scale);
+    }
+
+    private void OnCountryDisplay(GeoCountryDisplay display)
+    {
+        if (_locations.NoteIso(display.Letters, TimeProvider.System.GetUtcNow()))
+        {
+            try
+            {
+                LocationHistoryStore.Save(_locations);
+            }
+            catch (Exception ex)
+            {
+                _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
+            }
+        }
+
+        _status.BindLocations(_locations, display);
     }
 
     private async Task<string> DiagnoseAsync(string endpointId)
@@ -214,6 +312,12 @@ internal sealed class NetLightsContext : ApplicationContext
         if (view is null)
         {
             return "Узел не найден.";
+        }
+
+        string? blocked = _host.Kernel.ManualBlockReason(endpointId);
+        if (blocked is not null)
+        {
+            return blocked;
         }
 
         EndpointDefinition endpoint = new(view.Id, view.Group, view.Uri, view.InfrastructureId);
@@ -227,7 +331,7 @@ internal sealed class NetLightsContext : ApplicationContext
         string icmp = result.Icmp is null ? "нет" : result.Icmp.Status.ToString();
         string tcp = result.Tcp is null ? "нет" : result.Tcp.Value ? "есть" : "нет";
         string https = $"{result.Https.Outcome} HTTP {result.Https.HttpStatus?.ToString() ?? "—"}";
-        return $"{view.Id} ({view.Uri.Host})\r\n{result.Note}\r\nHTTPS: {https}\r\nICMP: {icmp}\r\nTCP 443: {tcp}\r\nIP: {result.Address}";
+        return $"{view.Id} ({view.Uri.Host})\r\n{result.Note}\r\nHTTPS: {https}\r\nICMP: {icmp}\r\nTCP 443: {tcp}\r\nIP: {result.Address} (последний известный адрес сессии, может быть устаревшим)";
     }
 
     private void Export()
@@ -301,23 +405,28 @@ internal sealed class NetLightsContext : ApplicationContext
         }
     }
 
+    private void ApplyNetworkSignal(NetworkAvailabilitySignal signal)
+    {
+        switch (signal)
+        {
+            case NetworkAvailabilitySignal.None:
+                return;
+            case NetworkAvailabilitySignal.Unavailable:
+                _host.NotifyUnavailable(true);
+                _countryTray.NotifyNetworkOrResume();
+                return;
+            case NetworkAvailabilitySignal.Available:
+                _host.NotifyUnavailable(false);
+                _countryTray.NotifyNetworkOrResume();
+                return;
+            default:
+                throw new InvalidOperationException($"Unhandled network signal {signal}.");
+        }
+    }
+
     private void OnNetwork(object? sender, EventArgs e)
     {
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        if (!NetworkInterface.GetIsNetworkAvailable())
-        {
-            _lastNetworkEvent = now;
-            _host.NotifyUnavailable(true);
-            return;
-        }
-
-        if (now - _lastNetworkEvent < MonitorConstants.NetworkDebounce)
-        {
-            return;
-        }
-
-        _lastNetworkEvent = now;
-        _host.NotifyNetworkChange();
+        ApplyNetworkSignal(_network.OnChange(NetworkInterface.GetIsNetworkAvailable(), DateTimeOffset.UtcNow));
     }
 
     private void OnPower(object sender, Microsoft.Win32.PowerModeChangedEventArgs e)
@@ -325,6 +434,7 @@ internal sealed class NetLightsContext : ApplicationContext
         if (e.Mode is Microsoft.Win32.PowerModes.Suspend or Microsoft.Win32.PowerModes.Resume)
         {
             _host.NotifyNetworkChange();
+            _countryTray.NotifyNetworkOrResume();
         }
     }
 
@@ -332,6 +442,7 @@ internal sealed class NetLightsContext : ApplicationContext
     {
         _icon.Visible = false;
         _icon.Visible = true;
+        _countryTray.Restore();
     }
 
     protected override void ExitThreadCore()
@@ -362,6 +473,15 @@ internal sealed class NetLightsContext : ApplicationContext
 
         try
         {
+            LocationHistoryStore.Save(_locations);
+        }
+        catch (Exception ex)
+        {
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
+        }
+
+        try
+        {
             _host.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
         }
         catch (Exception)
@@ -370,6 +490,7 @@ internal sealed class NetLightsContext : ApplicationContext
 
         _probe.Dispose();
         _diagnosticsCts.Dispose();
+        _countryTray.Dispose();
         _icon.Visible = false;
         _icon.Dispose();
         _menu.Dispose();

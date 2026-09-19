@@ -90,8 +90,12 @@ public sealed class UiRendererTests
     [Fact]
     public void StatusForm_ClockTicksDoNotBeginUpdate()
     {
-        using var form = new StatusForm();
-        form.CreateControl();
+        using var form = new StatusForm
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(-32000, -32000)
+        };
+        form.Reveal();
         var empty = new MonitorKernel(new MonitorConfiguration { Endpoints = BuiltinEndpoints.All }, TimeProvider.System).Snapshot;
         form.Bind(empty);
         int binds = form.DataBindCount;
@@ -121,6 +125,38 @@ public sealed class UiRendererTests
     }
 
     [Fact]
+    public void StatusForm_HeaderHeightStaysStableAfterHideAndReveal()
+    {
+        using var form = new StatusForm
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(-32000, -32000)
+        };
+        form.Reveal();
+        form.PerformLayout();
+        Control header = Find<Control>(form, "windowHeader")!;
+        int first = header.Height;
+        Assert.True(first >= 72, "header " + first);
+        Assert.True(form.HideToTrayIfUserClosing(CloseReason.UserClosing));
+        form.Reveal();
+        form.PerformLayout();
+        int second = header.Height;
+        Assert.InRange(second, first - 8, first + 8);
+    }
+
+    [Fact]
+    public void StatusForm_DefaultSizeIsTallerThanTheCompactMinimum()
+    {
+        using var form = new StatusForm();
+        Assert.Equal(UiTheme.WindowDefaultWidth, form.Width);
+        Assert.Equal(UiTheme.WindowDefaultHeight, form.Height);
+        Assert.True(form.MinimumSize.Height >= 640);
+        form.PlaceCentered();
+        int areaHeight = Screen.FromPoint(form.Location).WorkingArea.Height;
+        Assert.True(form.Height >= Math.Min(UiTheme.WindowDefaultHeight, areaHeight));
+    }
+
+    [Fact]
     public void PausedIcon_UsesCoolBlueNotUnknownGray()
     {
         using Bitmap paused = TrayIconRenderer.RenderBitmap(GroupAvailability.Online, GroupAvailability.Online, 32, paused: true);
@@ -137,17 +173,60 @@ public sealed class UiRendererTests
     public void Settings_CheckUpdatesAndExportButtonsShareHeightAndBaseline()
     {
         using var form = new StatusForm();
+        _ = form.Handle;
+        FindButton(form, "settingsTab").PerformClick();
         ThemedButton check = FindButton(form, "checkUpdates");
         ThemedButton export = FindButton(form, "exportLog");
+        check.FitToText();
+        export.FitToText();
         Assert.Equal("Проверить обновления", check.Text);
         Assert.Equal("Экспорт журнала", export.Text);
-        Assert.Equal(UiTheme.ButtonHeight, check.Height);
         Assert.Equal(check.Height, export.Height);
         Assert.Equal(check.Top, export.Top);
-        Assert.Equal(check.Margin.Top, export.Margin.Top);
-        Assert.Equal(check.Margin.Bottom, export.Margin.Bottom);
-        Assert.True(check.Width >= export.Width);
+        Size exportText = TextRenderer.MeasureText(
+            export.Text,
+            export.Font,
+            new Size(int.MaxValue, int.MaxValue),
+            TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+        Assert.True(export.Width >= exportText.Width + 24, "export width " + export.Width + " text " + exportText.Width);
+        Assert.Null(export.Region);
         Assert.True(export.Left >= check.Right);
+    }
+
+    [Fact]
+    public void StatusForm_HasNoNodesTab()
+    {
+        using var form = new StatusForm();
+        _ = form.Handle;
+        Assert.Null(FindButtonByText(form, "Узлы"));
+        Assert.Equal("Параметры", FindButton(form, "settingsTab").Text);
+        Assert.Equal("Локации", FindButton(form, "locationsTab").Text);
+        Assert.Equal("Диагностика", FindButtonByText(form, "Диагностика")?.Text);
+    }
+
+    [Fact]
+    public void Settings_HasSourceLinksAndNoLecture()
+    {
+        using var form = new StatusForm();
+        _ = form.Handle;
+        FindButton(form, "settingsTab").PerformClick();
+        Assert.Null(Find<Label>(form, "settingsHelp"));
+        Assert.DoesNotContain("Крестик прячет", FlattenText(form), StringComparison.Ordinal);
+        Assert.Equal("Исходный код", Find<LinkLabel>(form, "githubLink")!.Text);
+        Assert.Equal("Releases", Find<LinkLabel>(form, "releasesLink")!.Text);
+    }
+
+    [Fact]
+    public void StatusForm_LocalMarkIsOnlyOnWindowTitle()
+    {
+        using var form = new StatusForm();
+        _ = form.Handle;
+        Assert.Equal("Net Lights", FindLabel(form, "productTitle").Text);
+        Assert.Equal(ProductInfo.DisplayName(), form.Text);
+        if (form.Text.Contains("локальная", StringComparison.Ordinal))
+        {
+            Assert.DoesNotContain("локальная", FindLabel(form, "productTitle").Text, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -224,6 +303,84 @@ public sealed class UiRendererTests
         Label? found = Find<Label>(root, accessibleName);
         Assert.NotNull(found);
         return found;
+    }
+
+    private static ThemedButton? FindButtonByText(Control root, string text)
+    {
+        if (root is ThemedButton match && match.Text == text)
+        {
+            return match;
+        }
+
+        foreach (Control child in root.Controls)
+        {
+            ThemedButton? nested = FindButtonByText(child, text);
+            if (nested is not null)
+            {
+                return nested;
+            }
+        }
+
+        return null;
+    }
+
+    [Fact]
+    public void SettingsCardsStayInsideClient()
+    {
+        using var form = Offscreen(new StatusForm());
+        form.Reveal();
+        FindButton(form, "settingsTab").PerformClick();
+        form.PerformLayout();
+        VerticalStack stack = Find<VerticalStack>(form, "settingsStack")!;
+        Assert.NotNull(stack);
+        stack.Relayout();
+        Assert.False(stack.HorizontalScroll.Visible);
+        Assert.True(stack.Controls.Count >= 2);
+        foreach (Control child in stack.Controls)
+        {
+            Assert.True(child.Right <= stack.ClientSize.Width + 1, child.GetType().Name + " right " + child.Right + " client " + stack.ClientSize.Width);
+            Assert.True(child.Left >= 0, child.GetType().Name + " left " + child.Left);
+        }
+    }
+
+    [Fact]
+    public void LiveColumnsFitInsideList()
+    {
+        using var form = Offscreen(new StatusForm());
+        form.Reveal();
+        form.PerformLayout();
+        ListView list = Find<ListView>(form, "Текущие проверки")!;
+        Assert.NotNull(list);
+        int sum = list.Columns.Cast<ColumnHeader>().Sum(column => column.Width);
+        Assert.True(sum <= list.ClientSize.Width, "columns " + sum + " client " + list.ClientSize.Width);
+        Assert.DoesNotContain("Крестик прячет", FlattenText(form), StringComparison.Ordinal);
+    }
+
+    private static StatusForm Offscreen(StatusForm form)
+    {
+        form.StartPosition = FormStartPosition.Manual;
+        form.Location = new Point(-32000, -32000);
+        return form;
+    }
+
+    private static string FlattenText(Control root)
+    {
+        var parts = new List<string>();
+        CollectText(root, parts);
+        return string.Join(" ", parts);
+    }
+
+    private static void CollectText(Control root, List<string> parts)
+    {
+        if (!string.IsNullOrWhiteSpace(root.Text))
+        {
+            parts.Add(root.Text);
+        }
+
+        foreach (Control child in root.Controls)
+        {
+            CollectText(child, parts);
+        }
     }
 
     private static T? Find<T>(Control root, string accessibleName) where T : Control

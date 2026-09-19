@@ -1,9 +1,28 @@
 using System.Reflection;
+using NetLights.Updates;
 
 namespace NetLights.App;
 
 internal static class ProductInfo
 {
+    public const string Name = "Net Lights";
+
+    public static string DisplayName(string? applicationDirectory = null)
+    {
+        string? dir = applicationDirectory;
+        if (string.IsNullOrWhiteSpace(dir))
+        {
+            dir = Path.GetDirectoryName(Application.ExecutablePath);
+        }
+
+        if (string.IsNullOrWhiteSpace(dir) || !SilentUpdatePolicy.HasInnoUninstaller(dir))
+        {
+            return Name + " (локальная)";
+        }
+
+        return Name;
+    }
+
     public static string Version
     {
         get

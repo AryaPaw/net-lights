@@ -127,6 +127,7 @@ public sealed class GitHubReleaseFeed : IReleaseFeed, IInternetProbe, IDisposabl
 
     public async Task<bool> Download(Uri url, string destinationPath, CancellationToken cancellationToken)
     {
+        bool downloaded = false;
         try
         {
             if (!UpdatePolicy.IsAllowedAssetUrl(url))
@@ -146,8 +147,10 @@ public sealed class GitHubReleaseFeed : IReleaseFeed, IInternetProbe, IDisposabl
                 File.Delete(destinationPath);
             }
 
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromMinutes(2));
             using FileStream output = new(destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            using HttpResponseMessage response = await GetFollowingRedirectsAsync(url, cancellationToken).ConfigureAwait(false);
+            using HttpResponseMessage response = await GetFollowingRedirectsAsync(url, timeout.Token).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
                 return false;
@@ -158,11 +161,11 @@ public sealed class GitHubReleaseFeed : IReleaseFeed, IInternetProbe, IDisposabl
                 return false;
             }
 
-            await using Stream input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            await using Stream input = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
             byte[] buffer = new byte[81920];
             long total = 0;
             int read;
-            while ((read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false)) > 0)
+            while ((read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), timeout.Token).ConfigureAwait(false)) > 0)
             {
                 total += read;
                 if (total > UpdatePolicy.MaxInstallerBytes)
@@ -170,14 +173,19 @@ public sealed class GitHubReleaseFeed : IReleaseFeed, IInternetProbe, IDisposabl
                     return false;
                 }
 
-                await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                await output.WriteAsync(buffer.AsMemory(0, read), timeout.Token).ConfigureAwait(false);
             }
 
+            downloaded = true;
             return true;
         }
         catch (Exception)
         {
-            if (File.Exists(destinationPath))
+            return false;
+        }
+        finally
+        {
+            if (!downloaded && File.Exists(destinationPath))
             {
                 try
                 {
@@ -187,8 +195,6 @@ public sealed class GitHubReleaseFeed : IReleaseFeed, IInternetProbe, IDisposabl
                 {
                 }
             }
-
-            return false;
         }
     }
 

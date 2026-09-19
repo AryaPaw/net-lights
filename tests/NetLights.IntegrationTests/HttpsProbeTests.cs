@@ -212,10 +212,12 @@ public sealed class HttpsProbeTests
         var list = new List<EndpointDefinition>(14);
         for (int i = 0; i < 7; i++)
         {
+            Uri ruUri = new($"https://{ep.Uri.IdnHost}:{ep.Uri.Port}/ru-{i}");
+            Uri worldUri = new($"https://{ep.Uri.IdnHost}:{ep.Uri.Port}/world-{i}");
             list.Add(i == 0
-                ? ep with { Id = "ru-0", Group = EndpointGroup.Ru, InfrastructureId = "ru-infra-0" }
-                : new EndpointDefinition($"ru-{i}", EndpointGroup.Ru, ep.Uri, $"ru-infra-{i}"));
-            list.Add(new EndpointDefinition($"world-{i}", EndpointGroup.World, ep.Uri, $"world-infra-{i}"));
+                ? ep with { Id = "ru-0", Group = EndpointGroup.Ru, InfrastructureId = "ru-infra-0", Uri = ruUri }
+                : new EndpointDefinition($"ru-{i}", EndpointGroup.Ru, ruUri, $"ru-infra-{i}"));
+            list.Add(new EndpointDefinition($"world-{i}", EndpointGroup.World, worldUri, $"world-infra-{i}"));
         }
 
         return list;

@@ -8,7 +8,7 @@
       "netlights.networking": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.0.0, )"
+          "NetLights.Core": "[1.2.0, )"
         }
       },
       "netlights.updates": {

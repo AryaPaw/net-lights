@@ -8,11 +8,13 @@ internal sealed class AppSettings
 {
     public bool AutoStart { get; set; } = true;
     public bool AutoUpdateEnabled { get; set; } = true;
+    public bool GeoCountryIconEnabled { get; set; }
+    public int GeoCountryLetterSize { get; set; } = (int)GeoCountryLetterScale.Regular;
     public int SettingsVersion { get; set; }
     public int WindowX { get; set; } = 80;
     public int WindowY { get; set; } = 80;
     public int WindowWidth { get; set; } = 1040;
-    public int WindowHeight { get; set; } = 800;
+    public int WindowHeight { get; set; } = 920;
 }
 
 internal enum SettingsLoadStatus
@@ -83,16 +85,17 @@ internal static class SettingsStore
                 return (new AppSettings(), SettingsLoadStatus.Corrupt);
             }
 
-            if (settings.WindowWidth < 980)
+            if (settings.WindowWidth < UiTheme.WindowMinWidth)
             {
-                settings.WindowWidth = 1040;
+                settings.WindowWidth = UiTheme.WindowDefaultWidth;
             }
 
-            if (settings.WindowHeight < 720 || settings.WindowHeight > 840)
+            if (settings.WindowHeight < UiTheme.WindowDefaultHeight)
             {
-                settings.WindowHeight = 800;
+                settings.WindowHeight = UiTheme.WindowDefaultHeight;
             }
 
+            settings.GeoCountryLetterSize = (int)GeoCountryLetterScales.Parse(settings.GeoCountryLetterSize);
             return (settings, SettingsLoadStatus.Loaded);
         }
         catch (JsonException)
@@ -100,6 +103,10 @@ internal static class SettingsStore
             return (new AppSettings(), SettingsLoadStatus.Corrupt);
         }
         catch (IOException)
+        {
+            return (new AppSettings(), SettingsLoadStatus.IoError);
+        }
+        catch (UnauthorizedAccessException)
         {
             return (new AppSettings(), SettingsLoadStatus.IoError);
         }

@@ -84,17 +84,22 @@ internal static class SilentUpdateRuntime
                 if (exitRequested)
                 {
                     requestExit();
-                }
-
-                if (outcome is SilentUpdateOutcome.Applied or SilentUpdateOutcome.NoUpdate)
-                {
                     return;
                 }
 
-                if (outcome == SilentUpdateOutcome.Skipped
-                    && (!autoUpdateEnabled()
-                        || !SilentUpdatePolicy.HasInnoUninstaller(applicationDirectory)
-                        || SilentUpdatePolicy.RidFor(architecture) is null))
+                if (outcome == SilentUpdateOutcome.NoUpdate)
+                {
+                    await Task.Delay(TimeSpan.FromHours(12), cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (outcome == SilentUpdateOutcome.Skipped && !autoUpdateEnabled())
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(1), cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (outcome == SilentUpdateOutcome.Applied)
                 {
                     return;
                 }
