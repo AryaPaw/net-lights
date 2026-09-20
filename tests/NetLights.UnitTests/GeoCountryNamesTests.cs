@@ -23,4 +23,16 @@ public sealed class GeoCountryNamesTests
     [Fact]
     public void ConfirmedDisplay_UsesLocalizedTooltip()
         => Assert.Equal("Германия / Germany", GeoCountryDisplay.Confirmed("DE").Tooltip);
+
+    [Fact]
+    public void LastKnownDisplay_MarksStaleWithoutFreshFlag()
+    {
+        GeoCountryDisplay display = GeoCountryDisplay.LastKnown("DE");
+        Assert.Equal("DE", display.Letters);
+        Assert.False(display.Fresh);
+        Assert.Equal("Германия (устарело)", display.Tooltip);
+        Assert.True(display.Tooltip.Length <= GeoCountryNames.TrayTooltipMaxChars);
+        Assert.Equal("определение выключено", GeoCountryDisplay.Disabled.Tooltip);
+        Assert.False(GeoCountryDisplay.Disabled.Fresh);
+    }
 }

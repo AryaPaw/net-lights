@@ -83,12 +83,46 @@ public sealed class LocationHistoryTests
     }
 
     [Theory]
+    [InlineData(-12, "0 с")]
     [InlineData(0, "0 с")]
     [InlineData(9, "9 с")]
     [InlineData(90, "1 мин")]
     [InlineData(3660, "1 ч 1 мин")]
     [InlineData(7200, "2 ч")]
+    [InlineData(86400, "1 д")]
     [InlineData(90000, "1 д 1 ч")]
     public void Duration_UsesShortRussian(int seconds, string expected)
         => Assert.Equal(expected, LocationCopy.Duration(TimeSpan.FromSeconds(seconds)));
+
+    [Fact]
+    public void SealAndClose_HandleEmptyAndStaleOpenStays()
+    {
+        var empty = new LocationHistory();
+        DateTimeOffset now = DateTimeOffset.Parse("2026-09-19T18:00:00Z");
+        empty.SealStaleOpens(now);
+        empty.CloseOpen(now);
+        Assert.Empty(empty.Stays);
+        Assert.Empty(empty.Past);
+        Assert.Null(empty.Current);
+
+        var log = new LocationHistory();
+        DateTimeOffset started = now.AddHours(-8);
+        log.NoteIso("DE", started);
+        Assert.Empty(log.Past);
+        log.SealStaleOpens(now);
+        Assert.Null(log.Current);
+        Assert.Equal(started, log.Stays[0].EndedUtc);
+        Assert.Single(log.Past);
+
+        log.NoteIso("NL", now);
+        log.CloseOpen(now.AddMinutes(20));
+        Assert.Null(log.Current);
+        Assert.Equal(now.AddMinutes(20), log.Stays[^1].EndedUtc);
+        Assert.Equal(TimeSpan.Zero, LocationCopy.Elapsed(new LocationStay("DE", now, now.AddMinutes(-5)), now));
+        Assert.Contains(" - ", LocationCopy.Range(started, now), StringComparison.Ordinal);
+        Assert.Contains(
+            LocationCopy.When(now.AddHours(1)).Split(',')[1].Trim(),
+            LocationCopy.Range(now, now.AddHours(1)),
+            StringComparison.Ordinal);
+    }
 }
