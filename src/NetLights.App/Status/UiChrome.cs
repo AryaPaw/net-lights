@@ -48,19 +48,6 @@ internal static class UiDrawing
     {
         Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
     }
-
-    public static void ApplyRoundRegion(Control control, int radius)
-    {
-        if (control.Width <= 0 || control.Height <= 0)
-        {
-            return;
-        }
-
-        using GraphicsPath path = RoundedRect(new Rectangle(0, 0, control.Width, control.Height), radius);
-        Region? previous = control.Region;
-        control.Region = new Region(path);
-        previous?.Dispose();
-    }
 }
 
 internal sealed class ThemedButton : Button
@@ -234,7 +221,7 @@ internal sealed class SegmentTrack : Panel
     protected override void OnSizeChanged(EventArgs e)
     {
         base.OnSizeChanged(e);
-        UiDrawing.ApplyRoundRegion(this, UiTheme.TrackRadius);
+        Invalidate();
     }
 
     protected override void OnPaintBackground(PaintEventArgs e)
@@ -367,12 +354,6 @@ internal sealed class StatusBadge : Label
     {
         Size text = TextRenderer.MeasureText(Text, Font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
         return new Size(text.Width + Padding.Horizontal + 8, text.Height + Padding.Vertical + 4);
-    }
-
-    protected override void OnSizeChanged(EventArgs e)
-    {
-        base.OnSizeChanged(e);
-        UiDrawing.ApplyRoundRegion(this, Math.Max(8, Height / 2));
     }
 
     protected override void OnPaint(PaintEventArgs e)

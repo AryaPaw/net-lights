@@ -9,8 +9,9 @@ public sealed record LocationStay(
 
 public sealed class LocationHistory
 {
-    public const int MaxStays = 40;
+    public const int MaxStays = 256;
     public static readonly TimeSpan ResumeMergeWindow = TimeSpan.FromHours(6);
+    public static readonly TimeSpan Retention = TimeSpan.FromDays(3);
 
     private readonly List<LocationStay> _stays;
 
@@ -82,12 +83,33 @@ public sealed class LocationHistory
         }
 
         _stays.Add(new LocationStay(code, utcNow, null));
+        Prune(utcNow);
         while (_stays.Count > MaxStays)
         {
             _stays.RemoveAt(0);
         }
 
         return true;
+    }
+
+    public void Prune(DateTimeOffset now)
+    {
+        DateTimeOffset cutoff = now - Retention;
+        for (int i = _stays.Count - 1; i >= 0; i--)
+        {
+            LocationStay stay = _stays[i];
+            DateTimeOffset end = stay.EndedUtc ?? now;
+            if (end <= cutoff)
+            {
+                _stays.RemoveAt(i);
+                continue;
+            }
+
+            if (stay.StartedUtc < cutoff)
+            {
+                _stays[i] = stay with { StartedUtc = cutoff };
+            }
+        }
     }
 
     public void SealStaleOpens(DateTimeOffset now)

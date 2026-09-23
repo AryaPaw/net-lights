@@ -68,18 +68,45 @@ public sealed class LocationHistoryTests
     }
 
     [Fact]
-    public void CapsAtFortyStays()
+    public void KeepsManyStaysInsideThreeDays()
     {
         var log = new LocationHistory();
-        DateTimeOffset t0 = DateTimeOffset.Parse("2026-09-01T00:00:00Z");
+        DateTimeOffset t0 = DateTimeOffset.Parse("2026-09-20T00:00:00Z");
         for (int i = 0; i < 45; i++)
         {
             string iso = i % 2 == 0 ? "DE" : "NL";
             log.NoteIso(iso, t0.AddHours(i));
         }
 
-        Assert.Equal(LocationHistory.MaxStays, log.Stays.Count);
+        Assert.Equal(45, log.Stays.Count);
         Assert.Equal("DE", log.Current!.Iso);
+    }
+
+    [Fact]
+    public void Prune_DropsClosedStaysOlderThanThreeDays()
+    {
+        DateTimeOffset now = DateTimeOffset.Parse("2026-09-20T12:00:00Z");
+        var log = new LocationHistory([
+            new LocationStay("DE", now.AddDays(-5), now.AddDays(-4)),
+            new LocationStay("NL", now.AddHours(-2), null)
+        ]);
+        log.Prune(now);
+        Assert.Single(log.Stays);
+        Assert.Equal("NL", log.Stays[0].Iso);
+    }
+
+    [Fact]
+    public void Prune_ClipsStayThatOverlapsRetention()
+    {
+        DateTimeOffset now = DateTimeOffset.Parse("2026-09-20T12:00:00Z");
+        DateTimeOffset cutoff = now - LocationHistory.Retention;
+        var log = new LocationHistory([
+            new LocationStay("FI", now.AddDays(-5), now.AddDays(-1))
+        ]);
+        log.Prune(now);
+        Assert.Single(log.Stays);
+        Assert.Equal(cutoff, log.Stays[0].StartedUtc);
+        Assert.Equal(now.AddDays(-1), log.Stays[0].EndedUtc);
     }
 
     [Theory]

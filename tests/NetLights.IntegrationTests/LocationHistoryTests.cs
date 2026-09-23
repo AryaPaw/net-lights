@@ -88,6 +88,14 @@ public sealed class LocationHistoryTests
         Assert.Contains("Германия", CollectText(form), StringComparison.Ordinal);
         Assert.DoesNotContain("??", CollectText(form), StringComparison.Ordinal);
         Assert.DoesNotContain("8.8.8.8", CollectText(form), StringComparison.Ordinal);
+        LocationSpanChart chart = FindNamed<LocationSpanChart>(form, "locationSpanChart");
+        Assert.True(chart.Height >= 48, "chart height " + chart.Height);
+        Assert.True(chart.Width >= 100, "chart width " + chart.Width);
+        Button twelve = FindNamed<Button>(form, "locationChartWindow12");
+        Assert.Equal("12 ч", twelve.Text);
+        FindNamed<Button>(form, "locationChartWindow3").PerformClick();
+        Assert.Same(chart, FindNamed<LocationSpanChart>(form, "locationSpanChart"));
+        Assert.Equal("3 ч", FindNamed<Button>(form, "locationChartWindow3").Text);
     }
 
     [Fact]
@@ -99,6 +107,7 @@ public sealed class LocationHistoryTests
         FindNamed<Button>(form, "locationsTab").PerformClick();
         Label empty = FindNamed<Label>(form, "emptyLocations");
         Assert.Contains("только смены страны", empty.Text, StringComparison.Ordinal);
+        Assert.Null(FindNamedOrNull<LocationSpanChart>(form, "locationSpanChart"));
     }
 
     [Fact]
@@ -177,6 +186,17 @@ public sealed class LocationHistoryTests
         Assert.True(panel.DisplayRectangle.Width <= panel.ClientSize.Width);
         IsoChip first = FindNamed<IsoChip>(panel, "isoChip");
         Assert.Contains(first.Font.Name, new[] { "Consolas", FontFamily.GenericMonospace.Name }, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void LocationChartPalette_SpreadsCommonCountriesAcrossDistinctHues()
+    {
+        string[] codes = ["DE", "NL", "FI", "PL", "US", "GB", "TR", "JP", "BR", "IN", "AU", "CA"];
+        var fills = codes.Select(LocationChartPalette.Fill).Select(c => c.ToArgb()).ToHashSet();
+        Assert.True(fills.Count >= 7, "distinct fills " + fills.Count);
+        Assert.Equal(LocationChartPalette.Fill("DE"), LocationChartPalette.Fill("DE"));
+        Assert.NotEqual(LocationChartPalette.Fill("DE"), LocationChartPalette.Fill("NL"));
+        Assert.Equal(UiTheme.OnBrand, LocationChartPalette.Ink("DE"));
     }
 
     private static T FindNamed<T>(Control root, string accessibleName) where T : Control

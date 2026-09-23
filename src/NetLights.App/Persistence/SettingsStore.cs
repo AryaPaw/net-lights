@@ -10,6 +10,7 @@ internal sealed class AppSettings
     public bool AutoUpdateEnabled { get; set; } = true;
     public bool GeoCountryIconEnabled { get; set; }
     public int GeoCountryLetterSize { get; set; } = (int)GeoCountryLetterScale.Regular;
+    public int LocationChartWindowHours { get; set; } = 12;
     public int SettingsVersion { get; set; }
     public int WindowX { get; set; } = 80;
     public int WindowY { get; set; } = 80;
@@ -96,6 +97,8 @@ internal static class SettingsStore
             }
 
             settings.GeoCountryLetterSize = (int)GeoCountryLetterScales.Parse(settings.GeoCountryLetterSize);
+            settings.LocationChartWindowHours = LocationChartWindows.ToHours(
+                LocationChartWindows.ParseHours(settings.LocationChartWindowHours));
             return (settings, SettingsLoadStatus.Loaded);
         }
         catch (JsonException)

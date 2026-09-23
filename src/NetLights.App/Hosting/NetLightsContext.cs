@@ -74,6 +74,7 @@ internal sealed class NetLightsContext : ApplicationContext
         _status.AutoUpdateChanged = OnAutoUpdateFromWindow;
         _status.GeoCountryIconChanged = OnGeoCountryIconFromWindow;
         _status.GeoCountryLetterScaleChanged = OnGeoCountryLetterScaleFromWindow;
+        _status.LocationChartWindowHoursChanged = OnLocationChartWindowFromWindow;
         _status.DiagnoseRequested = DiagnoseAsync;
         _status.ExportRequested = Export;
         _status.CheckUpdatesRequested = () => _ = CheckUpdatesManualAsync();
@@ -82,7 +83,8 @@ internal sealed class NetLightsContext : ApplicationContext
             _settings.AutoUpdateEnabled,
             _settings.GeoCountryIconEnabled,
             GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize),
-            _updateNotice);
+            _updateNotice,
+            _settings.LocationChartWindowHours);
         _menu = new ContextMenuStrip();
         _menu.Items.Add("Открыть окно", null, (_, _) => ShowStatus());
         _pauseItem = new ToolStripMenuItem("Пауза")
@@ -229,7 +231,8 @@ internal sealed class NetLightsContext : ApplicationContext
             _settings.AutoUpdateEnabled,
             _settings.GeoCountryIconEnabled,
             GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize),
-            _updateNotice);
+            _updateNotice,
+            _settings.LocationChartWindowHours);
         _status.BindLocations(_locations, _countryTray.Current);
         _status.Reveal();
     }
@@ -257,6 +260,12 @@ internal sealed class NetLightsContext : ApplicationContext
         {
             _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "settings", ex.Message);
         }
+    }
+
+    private void OnLocationChartWindowFromWindow(int hours)
+    {
+        _settings.LocationChartWindowHours = LocationChartWindows.ToHours(LocationChartWindows.ParseHours(hours));
+        TrySaveSettings();
     }
 
     private void OnGeoCountryIconFromWindow(bool enabled)

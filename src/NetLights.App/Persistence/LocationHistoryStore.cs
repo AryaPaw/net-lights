@@ -55,6 +55,7 @@ internal static class LocationHistoryStore
             }
 
             var history = new LocationHistory(stays);
+            history.Prune(DateTimeOffset.UtcNow);
             history.SealStaleOpens(DateTimeOffset.UtcNow);
             return history;
         }

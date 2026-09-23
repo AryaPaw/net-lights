@@ -57,6 +57,8 @@ internal sealed class StatusForm : Form
     public Action? ExportRequested { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action? CheckUpdatesRequested { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<int>? LocationChartWindowHoursChanged { get; set; }
 
     public StatusForm() : this(TimeProvider.System)
     {
@@ -66,6 +68,7 @@ internal sealed class StatusForm : Form
     {
         _time = time;
         _locations = new LocationTimelinePanel(_time);
+        _locations.ChartWindowHoursChanged = hours => LocationChartWindowHoursChanged?.Invoke(hours);
         AutoScaleMode = AutoScaleMode.None;
         Text = ProductInfo.DisplayName();
         Font = UiTheme.Body;
@@ -161,7 +164,8 @@ internal sealed class StatusForm : Form
         bool autoUpdate,
         bool geoCountryIcon,
         GeoCountryLetterScale letterScale,
-        string? updateNotice)
+        string? updateNotice,
+        int locationChartWindowHours = 12)
     {
         _suppressSettings = true;
         _autoStart.Checked = autoStart;
@@ -169,6 +173,7 @@ internal sealed class StatusForm : Form
         _geoCountryIcon.Checked = geoCountryIcon;
         _letterSize.SelectedIndex = (int)GeoCountryLetterScales.Parse((int)letterScale);
         SyncLetterSizeVisibility();
+        _locations.ApplyChartWindowHours(locationChartWindowHours);
         _updateLine.Text = string.IsNullOrWhiteSpace(updateNotice)
             ? "Обновления с GitHub ставятся тихо, когда есть сеть."
             : "Последняя ошибка обновления: " + updateNotice;
@@ -426,10 +431,12 @@ internal sealed class StatusForm : Form
 
     private void ShowPage(int index)
     {
+        SuspendLayout();
         _livePage.Visible = index == 0;
         _locationsPage.Visible = index == 1;
         _diagPage.Visible = index == 2;
         _settingsPage.Visible = index == 3;
+        ResumeLayout(true);
         _tabLive.Primary = index == 0;
         _tabLocations.Primary = index == 1;
         _tabDiag.Primary = index == 2;
@@ -437,18 +444,6 @@ internal sealed class StatusForm : Form
         if (index == 0)
         {
             ScaleColumns(_list, [120, 140, 100, 60, 110, 90, 120, 170]);
-        }
-
-        if (index == 1)
-        {
-            PerformLayout();
-            _locationsPage.PerformLayout();
-            _locations.Relayout();
-        }
-
-        if (index == 3 && _settingsPage.Controls.Count > 0 && _settingsPage.Controls[0] is VerticalStack stack)
-        {
-            stack.Relayout();
         }
     }
 

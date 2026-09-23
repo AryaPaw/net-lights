@@ -11,7 +11,14 @@ internal sealed class LocationTimelinePanel : Panel
     private GeoCountryDisplay _live = GeoCountryDisplay.Unconfirmed;
     private string _fingerprint = "";
     private Label? _liveDuration;
+    private LocationSpanChart? _chart;
+    private SegmentTrack? _windowBar;
+    private ThemedButton[] _windowButtons = [];
+    private TimeSpan _chartWindow = LocationChartWindows.Default;
     private bool _layouting;
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<int>? ChartWindowHoursChanged { get; set; }
 
     public LocationTimelinePanel(TimeProvider time)
     {
@@ -42,6 +49,41 @@ internal sealed class LocationTimelinePanel : Panel
         Rebuild();
     }
 
+    public void SetChartWindow(TimeSpan window)
+    {
+        if (!ApplyChartWindowHours(LocationChartWindows.ToHours(window)))
+        {
+            return;
+        }
+
+        ChartWindowHoursChanged?.Invoke(LocationChartWindows.ToHours(_chartWindow));
+    }
+
+    public bool ApplyChartWindowHours(int hours)
+    {
+        TimeSpan next = LocationChartWindows.ParseHours(hours);
+        if (next == _chartWindow)
+        {
+            SyncWindowButtons();
+            return false;
+        }
+
+        _chartWindow = next;
+        SyncWindowButtons();
+        if (_chart is not null)
+        {
+            DateTimeOffset now = _time.GetUtcNow();
+            _chart.Bind(ChartStays(now), now, now - _chartWindow);
+            return true;
+        }
+
+        _fingerprint = "";
+        Rebuild();
+        return true;
+    }
+
+    public TimeSpan ChartWindow => _chartWindow;
+
     public void Relayout() => SyncScrollSize();
 
     public void Bind(LocationHistory history, GeoCountryDisplay? live = null)
@@ -61,13 +103,15 @@ internal sealed class LocationTimelinePanel : Panel
 
     public void Tick()
     {
+        DateTimeOffset now = _time.GetUtcNow();
+        _chart?.Tick(now);
         if (_liveDuration is null || !GeoCountryParsers.IsIso3166Alpha2(_live.Letters))
         {
             return;
         }
 
-        LocationStay stay = LiveStay(_time.GetUtcNow());
-        string text = DurationLine(stay, _time.GetUtcNow());
+        LocationStay stay = LiveStay(now);
+        string text = DurationLine(stay, now);
         if (_liveDuration.Text != text)
         {
             _liveDuration.Text = text;
@@ -86,11 +130,14 @@ internal sealed class LocationTimelinePanel : Panel
     {
         SuspendLayout();
         _stack.SuspendLayout();
-        while (_stack.Controls.Count > 0)
+        Control[] previous = [.. _stack.Controls.Cast<Control>()];
+        _stack.Controls.Clear();
+        foreach (Control child in previous)
         {
-            Control child = _stack.Controls[0];
-            _stack.Controls.RemoveAt(0);
-            child.Dispose();
+            if (!ReferenceEquals(child, _chart) && !ReferenceEquals(child, _windowBar))
+            {
+                child.Dispose();
+            }
         }
 
         _liveDuration = null;
@@ -98,13 +145,35 @@ internal sealed class LocationTimelinePanel : Panel
         bool hasLive = true;
         if (_live == GeoCountryDisplay.Disabled)
         {
+            HideChart();
+            HideWindowBar();
             AddRow(DisabledState());
             hasLive = false;
         }
         else if (_history.Stays.Count == 0 && !GeoCountryParsers.IsIso3166Alpha2(_live.Letters))
         {
+            HideChart();
+            HideWindowBar();
             AddRow(EmptyState());
             hasLive = false;
+        }
+
+        IReadOnlyList<LocationStay> chartStays = ChartStays(now);
+        DateTimeOffset windowStart = now - _chartWindow;
+        bool showChart = hasLive || chartStays.Count > 0;
+        if (showChart)
+        {
+            EnsureWindowBar();
+            AddRow(Kicker("Период"));
+            AddRow(_windowBar!);
+            _chart ??= new LocationSpanChart();
+            _chart.Bind(chartStays, now, windowStart);
+            AddRow(_chart);
+        }
+        else
+        {
+            HideChart();
+            HideWindowBar();
         }
 
         if (hasLive)
@@ -224,6 +293,87 @@ internal sealed class LocationTimelinePanel : Panel
         }
 
         return card;
+    }
+
+    private void HideChart()
+    {
+        if (_chart is null)
+        {
+            return;
+        }
+
+        _chart.Dispose();
+        _chart = null;
+    }
+
+    private void HideWindowBar()
+    {
+        if (_windowBar is null)
+        {
+            return;
+        }
+
+        _windowBar.Dispose();
+        _windowBar = null;
+        _windowButtons = [];
+    }
+
+    private void EnsureWindowBar()
+    {
+        if (_windowBar is not null)
+        {
+            SyncWindowButtons();
+            return;
+        }
+
+        _windowButtons = new ThemedButton[LocationChartWindows.All.Length];
+        for (int i = 0; i < LocationChartWindows.All.Length; i++)
+        {
+            TimeSpan window = LocationChartWindows.All[i];
+            string caption = LocationChartWindows.Captions[i];
+            var button = new ThemedButton(caption, window == _chartWindow)
+            {
+                AccessibleName = "locationChartWindow" + LocationChartWindows.ToHours(window)
+            };
+            TimeSpan captured = window;
+            button.Click += (_, _) => SetChartWindow(captured);
+            _windowButtons[i] = button;
+        }
+
+        _windowBar = new SegmentTrack(_windowButtons)
+        {
+            Margin = new Padding(0, 0, 0, 10),
+            AccessibleName = "locationChartWindow"
+        };
+        SyncWindowButtons();
+    }
+
+    private void SyncWindowButtons()
+    {
+        for (int i = 0; i < _windowButtons.Length; i++)
+        {
+            _windowButtons[i].Primary = LocationChartWindows.All[i] == _chartWindow;
+        }
+    }
+
+    private IReadOnlyList<LocationStay> ChartStays(DateTimeOffset now)
+    {
+        var stays = new List<LocationStay>(_history.Stays);
+        LocationStay live = LiveStay(now);
+        if (live.StartedUtc == default || !GeoCountryParsers.IsIso3166Alpha2(live.Iso))
+        {
+            return stays;
+        }
+
+        if (stays.Count > 0
+            && stays[^1].Iso == live.Iso
+            && stays[^1].EndedUtc is null)
+        {
+            return stays;
+        }
+
+        stays.Add(live);
+        return stays;
     }
 
     private LocationStay LiveStay(DateTimeOffset now)
