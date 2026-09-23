@@ -143,9 +143,9 @@ public sealed class GeoCountryTrayTests
         Assert.False(host.TrayIconCreated);
         Assert.Equal(0, source.SelfCount);
         host.SetEnabled(true);
-        await WaitUntil(() => source.SelfCount >= 1);
+        await WaitUntil(() => host.Current.Letters == "DE");
         Assert.True(host.Visible);
-        Assert.Equal("DE", host.Current.Letters);
+        Assert.True(source.SelfCount >= 1);
         host.SetEnabled(false);
         int selves = source.SelfCount;
         await Task.Delay(80);
