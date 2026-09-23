@@ -46,10 +46,11 @@ public sealed class LocationHistoryTests
     [Fact]
     public void SameCountrySoonAfterClose_Reopens()
     {
+        DateTimeOffset ended = DateTimeOffset.Parse("2026-09-19T08:00:00Z");
         var log = new LocationHistory([
-            new LocationStay("DE", DateTimeOffset.Parse("2026-09-19T07:00:00Z"), DateTimeOffset.Parse("2026-09-19T08:00:00Z"))
+            new LocationStay("DE", DateTimeOffset.Parse("2026-09-19T07:00:00Z"), ended)
         ]);
-        Assert.True(log.NoteIso("DE", DateTimeOffset.Parse("2026-09-19T08:10:00Z")));
+        Assert.True(log.NoteIso("DE", ended.AddMinutes(1)));
         Assert.Single(log.Stays);
         Assert.Null(log.Stays[0].EndedUtc);
     }
@@ -65,6 +66,49 @@ public sealed class LocationHistoryTests
         Assert.Equal(2, log.Stays.Count);
         Assert.Equal(ended, log.Stays[0].EndedUtc);
         Assert.Null(log.Current!.EndedUtc);
+    }
+
+    [Fact]
+    public void SameCountryAfterPcOff_DoesNotCountDowntime()
+    {
+        DateTimeOffset started = DateTimeOffset.Parse("2026-09-19T12:00:00Z");
+        DateTimeOffset lastSeen = DateTimeOffset.Parse("2026-09-19T13:00:00Z");
+        DateTimeOffset boot = lastSeen.AddHours(3);
+        var log = new LocationHistory(
+            [new LocationStay("FI", started, null)],
+            lastSeen);
+        log.SplitIfStale(boot);
+        Assert.Null(log.Current);
+        Assert.Equal(lastSeen, log.Stays[0].EndedUtc);
+        Assert.Equal(TimeSpan.FromHours(1), LocationCopy.Elapsed(log.Stays[0], boot));
+        Assert.True(log.NoteIso("FI", boot));
+        Assert.Equal(2, log.Stays.Count);
+        Assert.Equal(boot, log.Current!.StartedUtc);
+    }
+
+    [Fact]
+    public void SameCountryUnchanged_TouchesLastObserved()
+    {
+        var log = new LocationHistory();
+        DateTimeOffset t0 = DateTimeOffset.Parse("2026-09-19T09:00:00Z");
+        log.NoteIso("DE", t0);
+        Assert.False(log.NoteIso("DE", t0.AddMinutes(20)));
+        Assert.Equal(t0.AddMinutes(20), log.LastObservedUtc);
+        Assert.Single(log.Stays);
+        Assert.Null(log.Current!.EndedUtc);
+    }
+
+    [Fact]
+    public void SplitIfStale_KeepsOpenStayWhenObservedRecently()
+    {
+        DateTimeOffset started = DateTimeOffset.Parse("2026-09-19T09:00:00Z");
+        DateTimeOffset now = started.AddHours(8);
+        var log = new LocationHistory(
+            [new LocationStay("DE", started, null)],
+            now.AddSeconds(-30));
+        log.SplitIfStale(now);
+        Assert.Equal("DE", log.Current!.Iso);
+        Assert.Null(log.Current.EndedUtc);
     }
 
     [Fact]

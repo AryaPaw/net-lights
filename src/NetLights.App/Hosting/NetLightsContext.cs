@@ -15,6 +15,7 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly StatusForm _status = new();
     private readonly GeoCountryTrayHost _countryTray;
     private readonly LocationHistory _locations;
+    private DateTimeOffset _locationsSavedAt;
     private readonly AppSettings _settings;
     private readonly MonitorHost _host;
     private readonly HttpsProbe _probe;
@@ -123,7 +124,17 @@ internal sealed class NetLightsContext : ApplicationContext
         _heartbeat = new System.Windows.Forms.Timer { Interval = 1000 };
         _heartbeat.Tick += (_, _) =>
         {
-            ApplyNetworkSignal(_network.OnHeartbeat(NetworkInterface.GetIsNetworkAvailable(), DateTimeOffset.UtcNow));
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            ApplyNetworkSignal(_network.OnHeartbeat(NetworkInterface.GetIsNetworkAvailable(), now));
+            if (_locations.Current is not null)
+            {
+                _locations.Touch(now);
+                if (now - _locationsSavedAt >= TimeSpan.FromMinutes(1))
+                {
+                    TrySaveLocations();
+                }
+            }
+
             if (!_snapshot.Paused)
             {
                 CheckSnapshotAge();
@@ -250,6 +261,19 @@ internal sealed class NetLightsContext : ApplicationContext
         TrySaveSettings();
     }
 
+    private void TrySaveLocations()
+    {
+        try
+        {
+            LocationHistoryStore.Save(_locations);
+            _locationsSavedAt = DateTimeOffset.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
+        }
+    }
+
     private void TrySaveSettings()
     {
         try
@@ -275,14 +299,7 @@ internal sealed class NetLightsContext : ApplicationContext
         if (!enabled)
         {
             _locations.CloseOpen(TimeProvider.System.GetUtcNow());
-            try
-            {
-                LocationHistoryStore.Save(_locations);
-            }
-            catch (Exception ex)
-            {
-                _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
-            }
+            TrySaveLocations();
 
             _status.BindLocations(_locations, GeoCountryDisplay.Disabled);
         }
@@ -301,14 +318,7 @@ internal sealed class NetLightsContext : ApplicationContext
     {
         if (_locations.NoteIso(display.Letters, TimeProvider.System.GetUtcNow()))
         {
-            try
-            {
-                LocationHistoryStore.Save(_locations);
-            }
-            catch (Exception ex)
-            {
-                _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
-            }
+            TrySaveLocations();
         }
 
         _status.BindLocations(_locations, display);
@@ -440,7 +450,16 @@ internal sealed class NetLightsContext : ApplicationContext
 
     private void OnPower(object sender, Microsoft.Win32.PowerModeChangedEventArgs e)
     {
-        if (e.Mode is Microsoft.Win32.PowerModes.Suspend or Microsoft.Win32.PowerModes.Resume)
+        if (e.Mode is Microsoft.Win32.PowerModes.Suspend)
+        {
+            _locations.CloseOpen(TimeProvider.System.GetUtcNow());
+            TrySaveLocations();
+            _host.NotifyNetworkChange();
+            _countryTray.NotifyNetworkOrResume();
+            return;
+        }
+
+        if (e.Mode is Microsoft.Win32.PowerModes.Resume)
         {
             _host.NotifyNetworkChange();
             _countryTray.NotifyNetworkOrResume();
@@ -482,6 +501,7 @@ internal sealed class NetLightsContext : ApplicationContext
 
         try
         {
+            _locations.CloseOpen(TimeProvider.System.GetUtcNow());
             LocationHistoryStore.Save(_locations);
         }
         catch (Exception ex)

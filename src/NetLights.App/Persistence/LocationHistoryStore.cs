@@ -54,9 +54,14 @@ internal static class LocationHistoryStore
                 stays.RemoveRange(0, stays.Count - LocationHistory.MaxStays);
             }
 
-            var history = new LocationHistory(stays);
+            var history = new LocationHistory(stays, file.LastObservedUtc);
+            if (history.LastObservedUtc is null)
+            {
+                history.Touch(File.GetLastWriteTimeUtc(FilePath));
+            }
+
             history.Prune(DateTimeOffset.UtcNow);
-            history.SealStaleOpens(DateTimeOffset.UtcNow);
+            history.SplitIfStale(DateTimeOffset.UtcNow);
             return history;
         }
         catch (JsonException)
@@ -79,6 +84,7 @@ internal static class LocationHistoryStore
         var file = new LocationHistoryFile
         {
             Version = 1,
+            LastObservedUtc = history.LastObservedUtc,
             Stays = history.Stays.Select(stay => (StayFile?)new StayFile
             {
                 Iso = stay.Iso,
@@ -94,6 +100,7 @@ internal static class LocationHistoryStore
     private sealed class LocationHistoryFile
     {
         public int Version { get; set; }
+        public DateTimeOffset? LastObservedUtc { get; set; }
         public List<StayFile?> Stays { get; set; } = [];
     }
 

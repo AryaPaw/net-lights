@@ -10,15 +10,19 @@ public sealed record LocationStay(
 public sealed class LocationHistory
 {
     public const int MaxStays = 256;
-    public static readonly TimeSpan ResumeMergeWindow = TimeSpan.FromHours(6);
+    public static readonly TimeSpan ResumeMergeWindow = TimeSpan.FromMinutes(2);
+    public static readonly TimeSpan OfflineGap = TimeSpan.FromMinutes(2);
     public static readonly TimeSpan Retention = TimeSpan.FromDays(3);
 
     private readonly List<LocationStay> _stays;
 
-    public LocationHistory(IEnumerable<LocationStay>? stays = null)
+    public LocationHistory(IEnumerable<LocationStay>? stays = null, DateTimeOffset? lastObservedUtc = null)
     {
         _stays = stays?.ToList() ?? [];
+        LastObservedUtc = lastObservedUtc;
     }
+
+    public DateTimeOffset? LastObservedUtc { get; private set; }
 
     public IReadOnlyList<LocationStay> Stays => _stays;
 
@@ -56,6 +60,8 @@ public sealed class LocationHistory
         {
             return false;
         }
+
+        LastObservedUtc = utcNow;
 
         if (_stays.Count == 0)
         {
@@ -112,19 +118,25 @@ public sealed class LocationHistory
         }
     }
 
-    public void SealStaleOpens(DateTimeOffset now)
+    public void Touch(DateTimeOffset utcNow)
+        => LastObservedUtc = utcNow;
+
+    public void SplitIfStale(DateTimeOffset now, TimeSpan? maxGap = null)
     {
-        if (_stays.Count == 0)
+        if (Current is null)
         {
             return;
         }
 
-        LocationStay last = _stays[^1];
-        if (last.EndedUtc is null && now - last.StartedUtc > ResumeMergeWindow)
+        DateTimeOffset observed = LastObservedUtc ?? Current.StartedUtc;
+        if (now - observed > (maxGap ?? OfflineGap))
         {
-            _stays[^1] = last with { EndedUtc = last.StartedUtc };
+            CloseOpen(observed);
         }
     }
+
+    public void SealStaleOpens(DateTimeOffset now)
+        => SplitIfStale(now);
 
     public void CloseOpen(DateTimeOffset now)
     {

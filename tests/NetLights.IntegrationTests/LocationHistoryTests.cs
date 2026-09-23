@@ -17,8 +17,8 @@ public sealed class LocationHistoryTests
         try
         {
             SettingsStore.RootDirectory = temp;
-            DateTimeOffset first = DateTimeOffset.UtcNow.AddHours(-2);
-            DateTimeOffset second = DateTimeOffset.UtcNow.AddMinutes(-20);
+            DateTimeOffset first = DateTimeOffset.UtcNow.AddMinutes(-2);
+            DateTimeOffset second = DateTimeOffset.UtcNow.AddSeconds(-20);
             var log = new LocationHistory();
             log.NoteIso("DE", first);
             log.NoteIso("NL", second);
@@ -29,6 +29,38 @@ public sealed class LocationHistoryTests
             Assert.Null(loaded.Current.EndedUtc);
             Assert.Equal("DE", loaded.Past[0].Iso);
             Assert.Equal(second, loaded.Past[0].EndedUtc);
+            Assert.NotNull(loaded.LastObservedUtc);
+        }
+        finally
+        {
+            SettingsStore.RootDirectory = previous;
+            try
+            {
+                Directory.Delete(temp, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    [Fact]
+    public void Store_ClosesOpenStayAfterMachineOffGap()
+    {
+        string previous = SettingsStore.RootDirectory;
+        string temp = Path.Combine(Path.GetTempPath(), "net-lights-locations-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            SettingsStore.RootDirectory = temp;
+            DateTimeOffset started = DateTimeOffset.UtcNow.AddHours(-4);
+            DateTimeOffset lastSeen = DateTimeOffset.UtcNow.AddHours(-3);
+            var log = new LocationHistory([new LocationStay("FI", started, null)], lastSeen);
+            LocationHistoryStore.Save(log);
+            LocationHistory loaded = LocationHistoryStore.Load();
+            Assert.Null(loaded.Current);
+            Assert.Equal(lastSeen, loaded.Stays[0].EndedUtc);
+            Assert.True(LocationCopy.Elapsed(loaded.Stays[0], DateTimeOffset.UtcNow) < TimeSpan.FromHours(1.5));
         }
         finally
         {
