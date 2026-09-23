@@ -5,6 +5,7 @@ using Xunit;
 
 namespace NetLights.IntegrationTests;
 
+[Collection("SettingsFiles")]
 public sealed class StateHistoryAndExportTests
 {
     [Fact]
