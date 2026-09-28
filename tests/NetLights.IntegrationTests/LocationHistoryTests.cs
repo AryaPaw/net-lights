@@ -312,6 +312,38 @@ public sealed class LocationHistoryTests
     }
 
     [Fact]
+    public void Store_RestoresBackupWhenPrimaryFileIsMissing()
+    {
+        string previous = SettingsStore.RootDirectory;
+        string temp = Path.Combine(Path.GetTempPath(), "net-lights-locations-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            SettingsStore.RootDirectory = temp;
+            var original = new LocationHistory();
+            original.NoteIso("DE", DateTimeOffset.UtcNow.AddHours(-1));
+            LocationHistoryStore.Save(original);
+
+            var newer = new LocationHistory(original.Stays, original.LastObservedUtc);
+            newer.NoteIso("NL", DateTimeOffset.UtcNow.AddMinutes(-20));
+            LocationHistoryStore.Save(newer);
+            File.Delete(LocationHistoryStore.FilePath);
+
+            LocationHistory recovered = LocationHistoryStore.Load();
+
+            Assert.Single(recovered.Stays);
+            Assert.Equal("DE", recovered.Stays[0].Iso);
+            Assert.True(File.Exists(LocationHistoryStore.FilePath));
+            Assert.Equal("DE", LocationHistoryStore.Load().Stays.Single().Iso);
+        }
+        finally
+        {
+            SettingsStore.RootDirectory = previous;
+            try { Directory.Delete(temp, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
     public void Store_ClosesOpenStayAfterMachineOffGap()
     {
         string previous = SettingsStore.RootDirectory;

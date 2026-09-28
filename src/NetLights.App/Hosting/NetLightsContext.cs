@@ -228,7 +228,11 @@ internal sealed class NetLightsContext : ApplicationContext
     private void ApplySnapshot(MonitorSnapshot snapshot)
     {
         _snapshot = snapshot;
-        _availabilityHistory.Observe(snapshot, snapshot.GeneratedUtc);
+        if (_availabilityHistory.Observe(snapshot, snapshot.GeneratedUtc))
+        {
+            QueueSaveAvailabilityHistory();
+        }
+
         int iconSize = _renderer.SystemSmallIconSize();
         Icon icon = _renderer.Get(snapshot.Ru.Availability, snapshot.World.Availability, iconSize, snapshot.Paused);
         if (!ReferenceEquals(_icon.Icon, icon))

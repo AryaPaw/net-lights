@@ -27,8 +27,7 @@ internal static class LocationHistoryStore
         {
             if (!File.Exists(path))
             {
-                _recoveredPath = null;
-                return new LocationHistory();
+                return RecoverBackup(path);
             }
 
             LocationHistoryFile? file = ReadFile(path);
@@ -49,8 +48,7 @@ internal static class LocationHistoryStore
                 LocationHistoryFile? backup = ReadFile(backupPath);
                 if (backup?.Stays is not null)
                 {
-                    _recoveredPath = path;
-                    return BuildHistory(backup, backupPath);
+                    return RestoreBackup(path, backup, backupPath);
                 }
             }
             catch (Exception backupException) when (backupException is JsonException or IOException or UnauthorizedAccessException)
@@ -60,6 +58,42 @@ internal static class LocationHistoryStore
 
             return new LocationHistory();
         }
+    }
+
+    private static LocationHistory RecoverBackup(string path)
+    {
+        string backupPath = path + ".bak";
+        try
+        {
+            LocationHistoryFile? backup = ReadFile(backupPath);
+            if (backup?.Stays is not null)
+            {
+                return RestoreBackup(path, backup, backupPath);
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            // Keep the backup intact; the app can still start with an empty in-memory history.
+        }
+
+        _recoveredPath = null;
+        return new LocationHistory();
+    }
+
+    private static LocationHistory RestoreBackup(string path, LocationHistoryFile backup, string backupPath)
+    {
+        _recoveredPath = path;
+        LocationHistory restored = BuildHistory(backup, backupPath);
+        try
+        {
+            Save(restored);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Keep serving the recovered in-memory history; retry persistence on the next save.
+        }
+
+        return restored;
     }
 
     private static LocationHistoryFile? ReadFile(string path)

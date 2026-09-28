@@ -37,6 +37,71 @@ public sealed class StateHistoryAndExportTests
     }
 
     [Fact]
+    public void AvailabilityHistoryStore_RestoresBackupWhenPrimaryFileIsMissing()
+    {
+        string previous = SettingsStore.RootDirectory;
+        string temp = Path.Combine(Path.GetTempPath(), "nl-state-recovery-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            SettingsStore.RootDirectory = temp;
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            var original = new AvailabilityHistory();
+            original.Observe(Snapshot(GroupAvailability.Online, GroupAvailability.Offline, false), now);
+            AvailabilityHistoryStore.Save(original);
+
+            var newer = new AvailabilityHistory(original.Spans, original.LastObservedUtc);
+            newer.Observe(Snapshot(GroupAvailability.Limited, GroupAvailability.Offline, false), now.AddSeconds(5));
+            AvailabilityHistoryStore.Save(newer);
+            File.Delete(AvailabilityHistoryStore.FilePath);
+
+            AvailabilityHistory recovered = AvailabilityHistoryStore.Load();
+
+            Assert.Equal(original.Spans, recovered.Spans);
+            Assert.True(File.Exists(AvailabilityHistoryStore.FilePath));
+            Assert.Equal(original.Spans, AvailabilityHistoryStore.Load().Spans);
+        }
+        finally
+        {
+            SettingsStore.RootDirectory = previous;
+            Directory.Delete(temp, true);
+        }
+    }
+
+    [Fact]
+    public void AvailabilityHistoryStore_RestoresBackupWhenPrimaryIsCorruptAndPreservesCorruptCopy()
+    {
+        string previous = SettingsStore.RootDirectory;
+        string temp = Path.Combine(Path.GetTempPath(), "nl-state-corrupt-backup-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            SettingsStore.RootDirectory = temp;
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            var original = new AvailabilityHistory();
+            original.Observe(Snapshot(GroupAvailability.Online, GroupAvailability.Offline, false), now);
+            AvailabilityHistoryStore.Save(original);
+
+            var newer = new AvailabilityHistory(original.Spans, original.LastObservedUtc);
+            newer.Observe(Snapshot(GroupAvailability.Limited, GroupAvailability.Offline, false), now.AddSeconds(5));
+            AvailabilityHistoryStore.Save(newer);
+            const string corrupt = "{ broken json";
+            File.WriteAllText(AvailabilityHistoryStore.FilePath, corrupt);
+
+            AvailabilityHistory recovered = AvailabilityHistoryStore.Load();
+
+            Assert.Equal(original.Spans, recovered.Spans);
+            Assert.Contains(Directory.GetFiles(temp, "availability-history.json.corrupt-*.json"), path => File.ReadAllText(path) == corrupt);
+            Assert.Equal(original.Spans, AvailabilityHistoryStore.Load().Spans);
+        }
+        finally
+        {
+            SettingsStore.RootDirectory = previous;
+            Directory.Delete(temp, true);
+        }
+    }
+
+    [Fact]
     public void Load_MigratesLegacyStateHistoryAndPreservesOriginalFile()
     {
         string previous = SettingsStore.RootDirectory;

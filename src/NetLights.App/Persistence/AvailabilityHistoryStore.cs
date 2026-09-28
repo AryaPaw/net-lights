@@ -11,23 +11,73 @@ internal static class AvailabilityHistoryStore
     private static long _snapshotRevision;
     private static long _writtenRevision;
     private static string? _writtenPath;
+    private static string? _recoveredPath;
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase, Converters = { new JsonStringEnumConverter() } };
     public static string FilePath => Path.Combine(SettingsStore.RootDirectory, "availability-history.json");
     public static AvailabilityHistory Load()
     {
+        string path = FilePath;
         try
         {
-            if (!File.Exists(FilePath)) return LoadLegacyStateHistory(saveCanonical: true);
-            var file = JsonSerializer.Deserialize<HistoryFile>(File.ReadAllText(FilePath), Options);
-            if (file?.Spans is null) return LoadLegacyStateHistory(saveCanonical: false);
+            if (!File.Exists(path))
+                return Recover(path);
+
+            var file = JsonSerializer.Deserialize<HistoryFile>(File.ReadAllText(path), Options);
+            if (file?.Spans is null)
+                throw new JsonException("Availability history has no spans collection.");
             var rows = file.Spans.Where(s => s is not null && Enum.IsDefined(s.Group) && Enum.IsDefined(s.State) && s.StartedUtc != default && (s.EndedUtc is null || s.EndedUtc >= s.StartedUtc)).Select(s => new AvailabilitySpan(s!.Group, s.State, s.Paused, s.StartedUtc, s.EndedUtc)).TakeLast(AvailabilityHistory.MaxSpans).ToArray();
             var history = new AvailabilityHistory(rows, file.LastObservedUtc);
             DateTimeOffset now = DateTimeOffset.UtcNow;
             history.SealStale(now);
             history.Prune(now);
+            _recoveredPath = null;
             return history;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { return LoadLegacyStateHistory(saveCanonical: false); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            _recoveredPath = path;
+            return Recover(path);
+        }
+    }
+
+    private static AvailabilityHistory Recover(string path)
+    {
+        _recoveredPath = path;
+        string backupPath = path + ".bak";
+        try
+        {
+            if (File.Exists(backupPath))
+            {
+                var backup = JsonSerializer.Deserialize<HistoryFile>(File.ReadAllText(backupPath), Options);
+                if (backup?.Spans is not null)
+                {
+                    AvailabilityHistory restored = BuildHistory(backup, DateTimeOffset.UtcNow);
+                    _recoveredPath = path;
+                    try { Save(restored); }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                    return restored;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // Leave the backup untouched and try the legacy recovery source below.
+        }
+
+        return LoadLegacyStateHistory(saveCanonical: !File.Exists(path));
+    }
+
+    private static AvailabilityHistory BuildHistory(HistoryFile file, DateTimeOffset now)
+    {
+        AvailabilitySpan[] rows = file.Spans
+            .Where(s => s is not null && Enum.IsDefined(s.Group) && Enum.IsDefined(s.State) && s.StartedUtc != default && (s.EndedUtc is null || s.EndedUtc >= s.StartedUtc))
+            .Select(s => new AvailabilitySpan(s!.Group, s.State, s.Paused, s.StartedUtc, s.EndedUtc))
+            .TakeLast(AvailabilityHistory.MaxSpans)
+            .ToArray();
+        var history = new AvailabilityHistory(rows, file.LastObservedUtc);
+        history.SealStale(now);
+        history.Prune(now);
+        return history;
     }
 
     private static AvailabilityHistory LoadLegacyStateHistory(bool saveCanonical)
@@ -148,7 +198,25 @@ internal static class AvailabilityHistoryStore
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         string temp = path + ".tmp";
         File.WriteAllText(temp, JsonSerializer.Serialize(new HistoryFile { LastObservedUtc = snapshot.LastObservedUtc, Spans = snapshot.Spans.ToList() }, Options));
+        bool recoveredCurrent = string.Equals(path, _recoveredPath, StringComparison.OrdinalIgnoreCase);
+        if (File.Exists(path))
+        {
+            if (recoveredCurrent)
+            {
+                string preservedPath = path + ".corrupt-" + DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmssfff") + ".json";
+                File.Copy(path, preservedPath);
+            }
+            else
+            {
+                string backupTemp = path + ".bak.tmp";
+                File.Copy(path, backupTemp, true);
+                File.Move(backupTemp, path + ".bak", true);
+            }
+        }
+
         File.Move(temp, path, true);
+        if (recoveredCurrent)
+            _recoveredPath = null;
         _writtenPath = path;
         _writtenRevision = snapshot.Revision;
     }
