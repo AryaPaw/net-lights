@@ -18,8 +18,12 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly AvailabilityHistory _availabilityHistory;
     private long _locationsSavedAtTicks;
     private long _availabilitySavedAtTicks;
+    private long _locationRetryAfterTicks;
+    private long _availabilityRetryAfterTicks;
     private int _availabilitySavePending;
     private int _locationSavePending;
+    private int _locationSaveFailed;
+    private int _availabilitySaveFailed;
     private readonly AppSettings _settings;
     private readonly MonitorHost _host;
     private readonly HttpsProbe _probe;
@@ -175,18 +179,17 @@ internal sealed class NetLightsContext : ApplicationContext
             if (_locations.Current is not null)
             {
                 _locations.Touch(now);
-                if (SaveDue(_locationsSavedAtTicks, now))
-                {
-                    TrySaveLocations();
-                }
             }
+            if (now.UtcTicks >= Interlocked.Read(ref _locationRetryAfterTicks)
+                && SaveDue(_locationsSavedAtTicks, now)) TrySaveLocations();
 
             if (_snapshot.Paused)
                 _availabilityHistory.Touch(now);
             else
                 _availabilityHistory.SealStale(now);
             _availabilityHistory.Prune(now);
-            if (SaveDue(_availabilitySavedAtTicks, now)) QueueSaveAvailabilityHistory();
+            if (now.UtcTicks >= Interlocked.Read(ref _availabilityRetryAfterTicks)
+                && SaveDue(_availabilitySavedAtTicks, now)) QueueSaveAvailabilityHistory();
 
             if (!_snapshot.Paused)
             {
@@ -348,11 +351,15 @@ internal sealed class NetLightsContext : ApplicationContext
         {
             await LocationHistoryStore.SaveAsync(snapshot).ConfigureAwait(false);
             Interlocked.Exchange(ref _locationsSavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
+            Interlocked.Exchange(ref _locationRetryAfterTicks, 0);
+            Interlocked.Exchange(ref _locationSaveFailed, 0);
+            ClearSaveWarningWhenRecovered();
         }
         catch (Exception ex)
         {
-            Interlocked.Exchange(ref _locationsSavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
             _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
+            Interlocked.Exchange(ref _locationRetryAfterTicks, DateTimeOffset.UtcNow.AddSeconds(10).UtcTicks);
+            NotifySaveFailure(ref _locationSaveFailed, "Не удалось сохранить историю стран. Программа повторит попытку.");
         }
         finally
         {
@@ -374,16 +381,43 @@ internal sealed class NetLightsContext : ApplicationContext
         {
             await AvailabilityHistoryStore.SaveAsync(snapshot).ConfigureAwait(false);
             Interlocked.Exchange(ref _availabilitySavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
+            Interlocked.Exchange(ref _availabilityRetryAfterTicks, 0);
+            Interlocked.Exchange(ref _availabilitySaveFailed, 0);
+            ClearSaveWarningWhenRecovered();
         }
         catch (Exception ex)
         {
-            Interlocked.Exchange(ref _availabilitySavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
             _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "availability-history", ex.Message);
+            Interlocked.Exchange(ref _availabilityRetryAfterTicks, DateTimeOffset.UtcNow.AddSeconds(10).UtcTicks);
+            NotifySaveFailure(ref _availabilitySaveFailed, "Не удалось сохранить историю состояния. Программа повторит попытку.");
         }
         finally
         {
             Interlocked.Exchange(ref _availabilitySavePending, 0);
         }
+    }
+
+    private void NotifySaveFailure(ref int flag, string message)
+    {
+        if (Interlocked.Exchange(ref flag, 1) != 0) return;
+        _ui.Post(_ =>
+        {
+            if (_exiting) return;
+            _icon.BalloonTipTitle = ProductInfo.Name;
+            _icon.BalloonTipText = message;
+            _icon.ShowBalloonTip(5000);
+            _status.SetPersistenceWarning(message);
+        }, null);
+    }
+
+    private void ClearSaveWarningWhenRecovered()
+    {
+        _ui.Post(_ =>
+        {
+            if (!_exiting && Volatile.Read(ref _locationSaveFailed) == 0
+                && Volatile.Read(ref _availabilitySaveFailed) == 0)
+                _status.SetPersistenceWarning(null);
+        }, null);
     }
 
     private void TrySaveSettings()
@@ -554,21 +588,19 @@ internal sealed class NetLightsContext : ApplicationContext
 
         bool exitRequested = false;
         SilentUpdateOutcome outcome = SilentUpdateOutcome.Failed;
+        string? downloadDirectory = null;
         try
         {
             _status.SetManualUpdateState(true, ManualUpdateCopy.Checking);
             string? applicationDirectory = Path.GetDirectoryName(Application.ExecutablePath);
             if (string.IsNullOrWhiteSpace(applicationDirectory))
             {
-                outcome = SilentUpdateOutcome.Failed;
-                return;
+                throw new InvalidOperationException("Не найден каталог приложения.");
             }
 
-            string downloadDirectory = Path.Combine(
-                Path.GetTempPath(),
-                "NetLights",
-                "updates",
-                Guid.NewGuid().ToString("N"));
+            downloadDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "NetLights", "updates", Guid.NewGuid().ToString("N"));
             using GitHubReleaseFeed probe = new(timeout: NetworkWaitPolicy.ProbeTimeout, githubApi: false);
             using GitHubReleaseFeed feed = new();
             outcome = await SilentUpdateCoordinator.RunOnce(new SilentUpdateContext(
@@ -580,7 +612,7 @@ internal sealed class NetLightsContext : ApplicationContext
                 RuntimeInformation.ProcessArchitecture,
                 probe,
                 feed,
-                new CmdSilentSetupInstaller(),
+                new AgentSilentSetupInstaller(Application.ExecutablePath),
                 () => exitRequested = true,
                 _diagnosticsCts.Token)).ConfigureAwait(false);
         }
@@ -591,6 +623,10 @@ internal sealed class NetLightsContext : ApplicationContext
         }
         finally
         {
+            if (!exitRequested && downloadDirectory is not null)
+            {
+                SilentUpdateRuntime.TryDeleteStaging(downloadDirectory);
+            }
             _updateGate.Release();
         }
 
@@ -678,6 +714,11 @@ internal sealed class NetLightsContext : ApplicationContext
         _icon.Visible = true;
         _countryTray.Restore();
     }
+
+    internal void RequestExit() => _ui.Post(_ =>
+    {
+        if (!_exiting) ExitThread();
+    }, null);
 
     protected override void ExitThreadCore()
     {

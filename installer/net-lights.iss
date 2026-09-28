@@ -31,6 +31,7 @@ SetupLogging=yes
 CloseApplications=no
 RestartApplications=no
 RestartIfNeededByRun=no
+AppMutex=Local\NetLights.SingleInstance
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
@@ -56,54 +57,3 @@ Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "NetLights"; Flags: uninsdeletevalue dontcreatekey
-
-[Code]
-function TaskKillImage(const ImageName: String): Integer;
-begin
-  { Do not use taskkill /T here: the updater launches Setup from NetLights.exe. }
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM ' + ImageName, '', SW_HIDE, ewWaitUntilTerminated, Result);
-end;
-
-function WaitUntilAppExited: Boolean;
-var
-  I: Integer;
-begin
-  Result := False;
-  for I := 1 to 30 do
-  begin
-    if (TaskKillImage('NetLights.exe') = 128) and (TaskKillImage('NetLights.UpdateAgent.exe') = 128) then
-    begin
-      Result := True;
-      Exit;
-    end;
-    Sleep(250);
-  end;
-  Result := (TaskKillImage('NetLights.exe') = 128) and (TaskKillImage('NetLights.UpdateAgent.exe') = 128);
-end;
-
-function LockedAppMessage: String;
-begin
-  Result := 'Net Lights всё ещё запущена, файлы заняты. Завершите её через «Выход» в трее и запустите установку снова.';
-end;
-
-function PrepareToInstall(var NeedsRestart: Boolean): String;
-begin
-  NeedsRestart := False;
-  if WaitUntilAppExited then
-    Result := ''
-  else
-    Result := LockedAppMessage;
-end;
-
-function InitializeUninstall(): Boolean;
-begin
-  Result := WaitUntilAppExited;
-  if not Result then
-    MsgBox(LockedAppMessage, mbError, MB_OK);
-end;
-
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-begin
-  if CurUninstallStep = usUninstall then
-    WaitUntilAppExited;
-end;

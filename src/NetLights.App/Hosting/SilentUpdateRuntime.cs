@@ -21,7 +21,11 @@ internal static class SilentUpdateRuntime
             return;
         }
 
-        _ = Task.Run(() => Loop(autoUpdateEnabled, currentVersion, processPath, requestExit, updateGate, cancellationToken));
+        _ = Task.Run(async () =>
+        {
+            CleanupOldStaging();
+            await Loop(autoUpdateEnabled, currentVersion, processPath, requestExit, updateGate, cancellationToken).ConfigureAwait(false);
+        });
     }
 
     private static async Task Loop(
@@ -59,10 +63,8 @@ internal static class SilentUpdateRuntime
                     cancellationToken).ConfigureAwait(false);
 
                 string downloadDirectory = Path.Combine(
-                    Path.GetTempPath(),
-                    "NetLights",
-                    "updates",
-                    Guid.NewGuid().ToString("N"));
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "NetLights", "updates", Guid.NewGuid().ToString("N"));
 
                 await updateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 SilentUpdateOutcome outcome;
@@ -78,13 +80,17 @@ internal static class SilentUpdateRuntime
                         architecture,
                         probe,
                         feed,
-                        new CmdSilentSetupInstaller(),
+                        new AgentSilentSetupInstaller(processPath),
                         () => exitRequested = true,
                         cancellationToken)).ConfigureAwait(false);
                 }
                 finally
                 {
                     updateGate.Release();
+                    if (!exitRequested)
+                    {
+                        TryDeleteStaging(downloadDirectory);
+                    }
                 }
 
                 if (exitRequested)
@@ -121,6 +127,46 @@ internal static class SilentUpdateRuntime
                 await Task.Delay(SilentUpdatePolicy.FailedRetry, cancellationToken).ConfigureAwait(false);
             }
         }
+    }
+
+    internal static void TryDeleteStaging(string directory)
+    {
+        string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NetLights", "updates");
+        string name = Path.GetFileName(directory);
+        if (!UpdatePolicy.IsInsideRoot(root, directory) || name.Length != 32 || !name.All(Uri.IsHexDigit))
+        {
+            return;
+        }
+        try
+        {
+            foreach (string file in Directory.EnumerateFiles(directory))
+            {
+                if (UpdatePolicy.SafeInstallerFileName(Path.GetFileName(file)) is not null
+                    || file.EndsWith(".partial", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(Path.GetFileName(file), "NetLights.UpdateAgent.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Delete(file);
+                }
+            }
+            Directory.Delete(directory, recursive: false);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static void CleanupOldStaging()
+    {
+        string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NetLights", "updates");
+        try
+        {
+            foreach (string directory in Directory.EnumerateDirectories(root))
+            {
+                if (Directory.GetLastWriteTimeUtc(directory) < DateTime.UtcNow.AddHours(-1))
+                    TryDeleteStaging(directory);
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     private static TimeSpan DelayAfter(SilentUpdateOutcome outcome)

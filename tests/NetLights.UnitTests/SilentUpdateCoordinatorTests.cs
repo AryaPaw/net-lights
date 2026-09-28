@@ -115,6 +115,41 @@ public sealed class SilentUpdateCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task RunOnce_RejectsOversizedInstallerBeforeDownload()
+    {
+        GitHubAsset asset = ReleaseAssets("1.0.2")[0];
+        FakeFeed feed = new()
+        {
+            Latest = new GitHubRelease
+            {
+                TagName = "v1.0.2",
+                Assets = [new GitHubAsset
+                {
+                    Name = asset.Name,
+                    BrowserDownloadUrl = asset.BrowserDownloadUrl,
+                    Digest = asset.Digest,
+                    Size = UpdatePolicy.MaxInstallerBytes + 1
+                }]
+            }
+        };
+        SilentUpdateOutcome outcome = await SilentUpdateCoordinator.RunOnce(Context("NetLights", feed, new FakeInstaller()));
+        Assert.Equal(SilentUpdateOutcome.Failed, outcome);
+        Assert.Empty(feed.DownloadedUrls);
+    }
+
+    [Fact]
+    public async Task RunOnce_RejectsInstallerForDifferentVersion()
+    {
+        FakeFeed feed = new()
+        {
+            Latest = new GitHubRelease { TagName = "v1.0.2", Assets = ReleaseAssets("1.0.3") }
+        };
+        SilentUpdateOutcome outcome = await SilentUpdateCoordinator.RunOnce(Context("NetLights", feed, new FakeInstaller()));
+        Assert.Equal(SilentUpdateOutcome.Failed, outcome);
+        Assert.Empty(feed.DownloadedUrls);
+    }
+
+    [Fact]
     public async Task RunOnce_FailsWhenDigestMissing()
     {
         string setup = "https://github.com/AryaPaw/net-lights/releases/download/v1.0.2/NetLights-Setup-win-x64-1.0.2.exe";
@@ -125,7 +160,7 @@ public sealed class SilentUpdateCoordinatorTests : IDisposable
                 TagName = "v1.0.2",
                 Assets =
                 [
-                    new GitHubAsset { Name = "NetLights-Setup-win-x64-1.0.2.exe", BrowserDownloadUrl = new Uri(setup), Digest = null }
+                    new GitHubAsset { Name = "NetLights-Setup-win-x64-1.0.2.exe", BrowserDownloadUrl = new Uri(setup), Size = 1, Digest = null }
                 ]
             },
             DownloadOk = true
@@ -134,6 +169,7 @@ public sealed class SilentUpdateCoordinatorTests : IDisposable
         SilentUpdateOutcome outcome = await SilentUpdateCoordinator.RunOnce(Context("NetLights", feed, installer));
         Assert.Equal(SilentUpdateOutcome.Failed, outcome);
         Assert.Null(installer.Started);
+        Assert.Empty(feed.DownloadedUrls);
     }
 
     [Fact]
@@ -150,6 +186,7 @@ public sealed class SilentUpdateCoordinatorTests : IDisposable
                     {
                         Name = "NetLights-Setup-win-x64-1.0.2.exe",
                         BrowserDownloadUrl = new Uri("https://evil.example/setup.exe"),
+                        Size = 1,
                         Digest = MatchingDigest()
                     }
                 ]
@@ -213,6 +250,7 @@ public sealed class SilentUpdateCoordinatorTests : IDisposable
             {
                 Name = $"NetLights-Setup-win-x64-{version}.exe",
                 BrowserDownloadUrl = new Uri(setup),
+                Size = 1,
                 Digest = MatchingDigest()
             }
         ];

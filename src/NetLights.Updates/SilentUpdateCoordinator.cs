@@ -85,6 +85,8 @@ public static class SilentUpdateCoordinator
             UpdatePolicy.SafeInstallerFileName(item.Name) is not null);
         if (asset is null
             || asset.BrowserDownloadUrl is null
+            || asset.Size <= 0
+            || asset.Size > UpdatePolicy.MaxInstallerBytes
             || !UpdatePolicy.IsAllowedAssetUrl(asset.BrowserDownloadUrl)
             || IntegrityVerifier.DigestSha256(asset.Digest) is not string expected)
         {
@@ -92,7 +94,8 @@ public static class SilentUpdateCoordinator
         }
 
         string? fileName = UpdatePolicy.SafeInstallerFileName(asset.Name);
-        if (fileName is null)
+        if (fileName is null
+            || !string.Equals(fileName, $"NetLights-Setup-win-x64-{candidate}.exe", StringComparison.OrdinalIgnoreCase))
         {
             return SilentUpdateOutcome.Failed;
         }

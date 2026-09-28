@@ -105,10 +105,15 @@ internal sealed class TrayIconRenderer : IDisposable
     {
         using Bitmap bmp = RenderBitmap(left, right, size, paused);
         IntPtr handle = bmp.GetHicon();
-        using var temp = Icon.FromHandle(handle);
-        var clone = (Icon)temp.Clone();
-        DestroyIcon(handle);
-        return clone;
+        try
+        {
+            using var temp = Icon.FromHandle(handle);
+            return (Icon)temp.Clone();
+        }
+        finally
+        {
+            DestroyIcon(handle);
+        }
     }
 
     [DllImport("user32.dll")]

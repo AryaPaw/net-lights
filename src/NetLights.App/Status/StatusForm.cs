@@ -22,6 +22,7 @@ internal sealed class StatusForm : Form
     private readonly Label _letterSizeLabel = new();
     private readonly ComboBox _letterSize = new();
     private readonly Label _updateLine = new();
+    private readonly Label _persistenceLine = new();
     private readonly ThemedButton _checkUpdates = new("Проверить обновления", true);
     private readonly ThemedButton _exportLog = new("Экспорт журнала", false);
     private readonly ThemedButton _openSettingsFolder = new("Открыть папку настроек", false);
@@ -252,6 +253,12 @@ internal sealed class StatusForm : Form
 
         _checkUpdates.Enabled = !busy;
         _manualUpdateLine.Text = text;
+    }
+
+    public void SetPersistenceWarning(string? message)
+    {
+        _persistenceLine.Text = message ?? string.Empty;
+        _persistenceLine.Visible = !string.IsNullOrWhiteSpace(message);
     }
 
     public void Bind(MonitorSnapshot snapshot)
@@ -797,6 +804,13 @@ internal sealed class StatusForm : Form
         _resetWindowSize.Click += (_, _) => ResetWindowSizeRequested?.Invoke();
         windowActions.Controls.Add(_openSettingsFolder);
         windowActions.Controls.Add(_resetWindowSize);
+        _persistenceLine.AutoSize = true;
+        _persistenceLine.Font = UiTheme.Caption;
+        _persistenceLine.ForeColor = Color.FromArgb(174, 38, 38);
+        _persistenceLine.BackColor = UiTheme.Card;
+        _persistenceLine.Margin = new Padding(0, 8, 0, 0);
+        _persistenceLine.Visible = false;
+        _persistenceLine.AccessibleName = "persistenceWarning";
         _manualUpdateLine.AutoSize = true;
         _manualUpdateLine.Font = UiTheme.Caption;
         _manualUpdateLine.ForeColor = UiTheme.Muted;
@@ -820,7 +834,7 @@ internal sealed class StatusForm : Form
         links.Controls.Add(github);
         links.Controls.Add(releases);
         stack.Controls.Add(SettingsBlock("Общие", _autoStart, _geoCountryDetection, _geoCountryIcon, _letterSizeLabel, _letterSize));
-        stack.Controls.Add(SettingsBlock("Приложение", windowActions));
+        stack.Controls.Add(SettingsBlock("Приложение", windowActions, _persistenceLine));
         stack.Controls.Add(SettingsBlock("Обновления", _autoUpdate, _updateLine, actions, _manualUpdateLine));
         stack.Controls.Add(links);
         _settingsPage.Controls.Add(stack);

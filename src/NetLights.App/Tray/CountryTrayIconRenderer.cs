@@ -145,30 +145,41 @@ internal sealed class CountryTrayIconRenderer : IDisposable
         {
             IntPtr color = CreateColorDib(bmp);
             IntPtr mask = CreateBitmap(bmp.Width, bmp.Height, 1, 1, IntPtr.Zero);
-            var info = new IconInfo
+            IntPtr handle;
+            try
             {
-                fIcon = true,
-                xHotspot = 0,
-                yHotspot = 0,
-                hbmMask = mask,
-                hbmColor = color
-            };
-            IntPtr handle = CreateIconIndirect(ref info);
-            DeleteObject(color);
-            DeleteObject(mask);
+                var info = new IconInfo
+                {
+                    fIcon = true,
+                    xHotspot = 0,
+                    yHotspot = 0,
+                    hbmMask = mask,
+                    hbmColor = color
+                };
+                handle = CreateIconIndirect(ref info);
+            }
+            finally
+            {
+                if (color != IntPtr.Zero) DeleteObject(color);
+                if (mask != IntPtr.Zero) DeleteObject(mask);
+            }
             if (handle == IntPtr.Zero)
             {
                 IntPtr fallback = bmp.GetHicon();
-                using var tempFallback = Icon.FromHandle(fallback);
-                var cloneFallback = (Icon)tempFallback.Clone();
-                DestroyIcon(fallback);
-                return cloneFallback;
+                try
+                {
+                    using var tempFallback = Icon.FromHandle(fallback);
+                    return (Icon)tempFallback.Clone();
+                }
+                finally { DestroyIcon(fallback); }
             }
 
-            using var temp = Icon.FromHandle(handle);
-            var clone = (Icon)temp.Clone();
-            DestroyIcon(handle);
-            return clone;
+            try
+            {
+                using var temp = Icon.FromHandle(handle);
+                return (Icon)temp.Clone();
+            }
+            finally { DestroyIcon(handle); }
         }
     }
 
@@ -191,17 +202,22 @@ internal sealed class CountryTrayIconRenderer : IDisposable
         }
 
         var rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
-        BitmapData data = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
         try
         {
-        int bytes = Math.Abs(data.Stride) * bmp.Height;
-        byte[] buffer = new byte[bytes];
-        Marshal.Copy(data.Scan0, buffer, 0, bytes);
-        Marshal.Copy(buffer, 0, bits, bytes);
+            BitmapData data = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                int bytes = Math.Abs(data.Stride) * bmp.Height;
+                byte[] buffer = new byte[bytes];
+                Marshal.Copy(data.Scan0, buffer, 0, bytes);
+                Marshal.Copy(buffer, 0, bits, bytes);
+            }
+            finally { bmp.UnlockBits(data); }
         }
-        finally
+        catch
         {
-            bmp.UnlockBits(data);
+            DeleteObject(dib);
+            throw;
         }
 
         return dib;

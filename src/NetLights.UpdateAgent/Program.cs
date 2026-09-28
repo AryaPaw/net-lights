@@ -43,11 +43,16 @@ internal static class Program
                 return 6;
             }
 
-            using FileStream stream = File.OpenRead(fullInstaller);
-            string actual = IntegrityVerifier.Sha256Hex(stream);
+            string actual;
+            using (FileStream stream = File.OpenRead(fullInstaller))
+            {
+                actual = IntegrityVerifier.Sha256Hex(stream);
+            }
             if (!IntegrityVerifier.Matches(sha256, actual))
             {
                 store.WriteResult("unknown", false, "Контрольная сумма установщика не совпала.");
+                CleanupInstaller(fullInstaller, allowedRoot);
+                Restart(parsed);
                 return 5;
             }
 
@@ -70,23 +75,25 @@ internal static class Program
                 }
 
                 store.WriteResult("unknown", false, "Установщик не завершился вовремя.");
+                CleanupInstaller(fullInstaller, allowedRoot);
+                Restart(parsed);
                 return 7;
             }
-            bool ok = install.ExitCode == 0;
-            store.WriteResult(Path.GetFileName(fullInstaller), ok, ok ? "Установлено." : "Установщик завершился с ошибкой " + install.ExitCode);
+            bool ok = install.ExitCode == 0 && InstalledExpectedVersion(parsed, fullInstaller);
+            string resultMessage = install.ExitCode != 0
+                ? "Установщик завершился с ошибкой " + install.ExitCode
+                : ok ? "Установлено." : "Установщик завершился, но ожидаемая версия не найдена.";
+            store.WriteResult(Path.GetFileName(fullInstaller), ok, resultMessage);
             if (ok)
             {
                 store.ClearPending();
-                if (parsed.TryGetValue("restart", out string? restart) && UpdatePolicy.IsSafeRestartPath(restart))
-                {
-                    string fullRestart = Path.GetFullPath(restart);
-                    using var next = new Process();
-                    next.StartInfo.FileName = fullRestart;
-                    next.StartInfo.WorkingDirectory = Path.GetDirectoryName(fullRestart);
-                    next.StartInfo.UseShellExecute = false;
-                    next.Start();
-                }
             }
+
+            // Restart the old binary on install failure as well. Monitoring must
+            // recover even if the installer returns an error.
+            Restart(parsed);
+
+            CleanupInstaller(fullInstaller, allowedRoot);
 
             return install.ExitCode;
         }
@@ -100,8 +107,67 @@ internal static class Program
             {
             }
 
+            try
+            {
+                Dictionary<string, string> failedArgs = Parse(args);
+                if (failedArgs.TryGetValue("pending", out string? failedInstaller))
+                {
+                    string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NetLights", "updates");
+                    CleanupInstaller(Path.GetFullPath(failedInstaller), Path.GetFullPath(root));
+                }
+            }
+            catch (Exception) { }
+
+            try { Restart(Parse(args)); }
+            catch (Exception) { }
+
             return 1;
         }
+    }
+
+    private static void Restart(Dictionary<string, string> parsed)
+    {
+        if (!parsed.TryGetValue("restart", out string? restart) || !UpdatePolicy.IsSafeRestartPath(restart))
+        {
+            return;
+        }
+
+        string fullRestart = Path.GetFullPath(restart);
+        using var next = new Process();
+        next.StartInfo.FileName = fullRestart;
+        next.StartInfo.WorkingDirectory = Path.GetDirectoryName(fullRestart);
+        next.StartInfo.UseShellExecute = false;
+        next.Start();
+    }
+
+    private static bool InstalledExpectedVersion(Dictionary<string, string> parsed, string installer)
+    {
+        const string prefix = "NetLights-Setup-win-x64-";
+        string name = Path.GetFileNameWithoutExtension(installer);
+        if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            || !Version.TryParse(name[prefix.Length..], out Version? expected)
+            || !parsed.TryGetValue("restart", out string? restart)
+            || !UpdatePolicy.IsSafeRestartPath(restart)) return false;
+
+        string? productVersion = FileVersionInfo.GetVersionInfo(restart).ProductVersion;
+        return productVersion is not null
+            && Version.TryParse(UpdatePolicy.Normalize(productVersion), out Version? actual)
+            && actual == expected;
+    }
+
+    private static void CleanupInstaller(string installer, string root)
+    {
+        try
+        {
+            if (!UpdatePolicy.IsInsideRoot(root, installer)
+                || UpdatePolicy.SafeInstallerFileName(Path.GetFileName(installer)) is null) return;
+            File.Delete(installer);
+            string? directory = Path.GetDirectoryName(installer);
+            if (directory is not null && !string.Equals(directory.TrimEnd(Path.DirectorySeparatorChar), root.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+                Directory.Delete(directory, recursive: false);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     private static bool WaitForParent(int parentId)

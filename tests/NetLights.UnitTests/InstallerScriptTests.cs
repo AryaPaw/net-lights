@@ -5,17 +5,14 @@ namespace NetLights.UnitTests;
 public sealed class InstallerScriptTests
 {
     [Fact]
-    public void SetupDoesNotUseRestartManagerCloseDialog()
+    public void SetupWaitsForAppWithoutForceKillingItOrTheUpdateAgent()
     {
         string script = File.ReadAllText(FindInstallerScript());
         Assert.Contains("CloseApplications=no", script, StringComparison.Ordinal);
         Assert.Contains("RestartApplications=no", script, StringComparison.Ordinal);
-        Assert.Contains("PrepareToInstall", script, StringComparison.Ordinal);
-        Assert.Contains("taskkill.exe", script, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("TaskKillImage('NetLights.exe')", script, StringComparison.Ordinal);
-        Assert.Contains("TaskKillImage('NetLights.UpdateAgent.exe')", script, StringComparison.Ordinal);
-        Assert.Contains("'/F /IM ' + ImageName", script, StringComparison.Ordinal);
-        Assert.DoesNotContain("ImageName + ' /T'", script, StringComparison.Ordinal);
+        Assert.Contains(@"AppMutex=Local\NetLights.SingleInstance", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("taskkill.exe", script, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("TaskKillImage", script, StringComparison.Ordinal);
         Assert.DoesNotContain("CloseApplications=yes", script, StringComparison.Ordinal);
     }
 
