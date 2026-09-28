@@ -1,4 +1,3 @@
-using System.Net;
 using Microsoft.Extensions.Time.Testing;
 using NetLights.Core;
 using Xunit;
@@ -8,159 +7,159 @@ namespace NetLights.UnitTests;
 public sealed class GeoCountrySchedulerTests
 {
     [Fact]
-    public void IpWatch_IsTenSeconds()
-        => Assert.Equal(TimeSpan.FromSeconds(10), GeoCountryPolicy.IpWatchInterval);
-
-    [Fact]
-    public async Task ConfirmedIso_WhenSourcesAgree()
+    public void RefreshPolicy_StaysWithinFreeProviderDailyQuota()
     {
-        var source = new FakeCountrySource("8.8.8.8", "DE", "DE");
-        using var scheduler = new GeoCountryScheduler(source, TimeProvider.System);
-        scheduler.Start();
-        GeoCountryDisplay display = await WaitDisplay(scheduler, letters: "DE");
-        Assert.Equal("Германия / Germany", display.Tooltip);
-        Assert.Equal(1, source.SelfCount);
-        Assert.Equal(1, source.ConfirmCount);
-        Assert.Equal(IPAddress.Parse("8.8.8.8"), source.LastConfirmIp);
+        Assert.Equal(TimeSpan.FromMinutes(5), GeoCountryPolicy.RefreshInterval);
+        Assert.True(TimeSpan.FromDays(1).Ticks / GeoCountryPolicy.RefreshInterval.Ticks < 1000);
     }
 
     [Fact]
-    public async Task ShowsSelfCountry_WhenSourcesDiffer()
+    public async Task InitialLookup_PublishesCountryFromSingleSource()
     {
-        var source = new FakeCountrySource("8.8.8.8", "PL", "DE");
+        var source = new FakeCountrySource("AE");
         using var scheduler = new GeoCountryScheduler(source, TimeProvider.System);
         scheduler.Start();
-        GeoCountryDisplay display = await WaitDisplay(scheduler, letters: "PL", minConfirms: 1);
-        Assert.Equal("Польша / Poland", display.Tooltip);
+
+        GeoCountryDisplay display = await WaitDisplay(scheduler, "AE");
+
+        Assert.Equal("ОАЭ / United Arab Emirates", display.Tooltip);
+        Assert.Equal(1, source.LookupCount);
     }
 
     [Fact]
-    public async Task ConfirmUsesSameIpAsSelf()
+    public async Task UnchangedCountry_RefreshesWithoutRepublishing()
     {
-        var source = new FakeCountrySource("2001:4860:4860::8888", "US", "US");
-        using var scheduler = new GeoCountryScheduler(source, TimeProvider.System);
+        var time = new FakeTimeProvider();
+        var source = new FakeCountrySource("AE");
+        var seen = new List<GeoCountryDisplay>();
+        using var scheduler = new GeoCountryScheduler(source, time, seen.Add);
         scheduler.Start();
-        await WaitDisplay(scheduler, "US");
-        Assert.Equal(IPAddress.Parse("2001:4860:4860::8888"), source.LastConfirmIp);
+        await WaitDisplay(scheduler, "AE");
+
+        time.Advance(GeoCountryPolicy.RefreshInterval);
+        await WaitUntil(() => source.LookupCount == 2);
+
+        Assert.Single(seen);
+        Assert.Equal("AE", scheduler.Current.Letters);
+    }
+
+    [Fact]
+    public async Task CountryChangeFromSameProvider_IsPublished()
+    {
+        var time = new FakeTimeProvider();
+        var source = new FakeCountrySource("NL");
+        using var scheduler = new GeoCountryScheduler(source, time);
+        scheduler.Start();
+        await WaitDisplay(scheduler, "NL");
+
+        source.Country = "AE";
+        time.Advance(GeoCountryPolicy.RefreshInterval);
+
+        GeoCountryDisplay display = await WaitDisplay(scheduler, "AE");
+        Assert.Equal("ОАЭ / United Arab Emirates", display.Tooltip);
+        Assert.Equal(2, source.LookupCount);
     }
 
     [Fact]
     public async Task OneInflight_SkipsOverlappingTicks()
     {
         var time = new FakeTimeProvider();
-        var source = new FakeCountrySource("8.8.8.8", "DE", "DE")
+        var source = new FakeCountrySource("DE")
         {
-            SelfGate = new TaskCompletionSource<GeoCountrySelfResult>(TaskCreationOptions.RunContinuationsAsynchronously)
+            LookupGate = new TaskCompletionSource<GeoCountryLookupResult>(TaskCreationOptions.RunContinuationsAsynchronously)
         };
         using var scheduler = new GeoCountryScheduler(source, time);
         scheduler.Start();
-        await WaitUntil(() => source.SelfCount == 1);
-        time.Advance(GeoCountryPolicy.IpWatchInterval);
-        time.Advance(GeoCountryPolicy.IpWatchInterval);
-        Assert.Equal(1, source.SelfCount);
-        Assert.Equal(0, source.ConfirmCount);
-        source.SelfGate.SetResult(source.SelfValue);
+        await WaitUntil(() => source.LookupCount == 1);
+        time.Advance(GeoCountryPolicy.RefreshInterval);
+        time.Advance(GeoCountryPolicy.RefreshInterval);
+        Assert.Equal(1, source.LookupCount);
+
+        source.LookupGate.SetResult(source.LookupValue);
         await WaitDisplay(scheduler, "DE");
-        Assert.Equal(1, source.ConfirmCount);
+        Assert.Equal(1, source.LookupCount);
     }
 
     [Fact]
-    public async Task StableIp_DoesNotReconfirmBeforeFifteenMinutes()
+    public async Task NetworkChange_RefreshesImmediatelyAndKeepsLastCountryUntilResult()
     {
         var time = new FakeTimeProvider();
-        var source = new FakeCountrySource("8.8.8.8", "DE", "DE");
+        var source = new FakeCountrySource("DE");
         using var scheduler = new GeoCountryScheduler(source, time);
         scheduler.Start();
         await WaitDisplay(scheduler, "DE");
-        time.Advance(GeoCountryPolicy.IpWatchInterval);
-        await WaitUntil(() => source.SelfCount == 2);
-        Assert.Equal(1, source.ConfirmCount);
-        Assert.Equal("DE", scheduler.Current.Letters);
-        time.Advance(GeoCountryPolicy.ConfirmMaxAge);
-        await WaitUntil(() => source.ConfirmCount == 2);
-        Assert.Equal("DE", scheduler.Current.Letters);
-    }
 
-    [Fact]
-    public async Task NewIp_KeepsPreviousLettersUntilNewCountryArrives()
-    {
-        var time = new FakeTimeProvider();
-        var source = new FakeCountrySource("8.8.8.8", "DE", "DE");
-        var seen = new List<string>();
-        using var scheduler = new GeoCountryScheduler(source, time, display => seen.Add(display.Letters));
-        scheduler.Start();
-        await WaitDisplay(scheduler, "DE");
-        int unconfirmedAfterStart = seen.Count(letter => letter == "??");
-        source.Ip = IPAddress.Parse("1.1.1.1");
-        source.SelfCountry = "NL";
-        source.ConfirmCountry = "NL";
-        time.Advance(GeoCountryPolicy.IpWatchInterval);
-        await WaitDisplay(scheduler, "NL");
-        Assert.Equal(unconfirmedAfterStart, seen.Count(letter => letter == "??"));
-        Assert.Equal(2, source.ConfirmCount);
-    }
-
-    [Fact]
-    public async Task UsesSelfCountry_WhenConfirmFails()
-    {
-        var source = new FakeCountrySource("8.8.8.8", "DE", "DE") { ConfirmOk = false };
-        using var scheduler = new GeoCountryScheduler(source, TimeProvider.System);
-        scheduler.Start();
-        await WaitDisplay(scheduler, "DE");
-        Assert.Equal("Германия / Germany", scheduler.Current.Tooltip);
-    }
-
-    [Fact]
-    public async Task NetworkChange_KeepsLettersAndReconfirms()
-    {
-        var time = new FakeTimeProvider();
-        var source = new FakeCountrySource("8.8.8.8", "DE", "DE");
-        var seen = new List<string>();
-        using var scheduler = new GeoCountryScheduler(source, time, display => seen.Add(display.Letters));
-        scheduler.Start();
-        await WaitDisplay(scheduler, "DE");
-        int confirms = source.ConfirmCount;
+        source.Country = "AE";
         scheduler.NotifyNetworkOrResume();
-        Assert.Equal("DE", scheduler.Current.Letters);
-        Assert.DoesNotContain("??", seen);
-        await WaitUntil(() => source.ConfirmCount > confirms);
-        Assert.Equal("DE", scheduler.Current.Letters);
+
+        GeoCountryDisplay display = await WaitDisplay(scheduler, "AE");
+        Assert.Equal(2, source.LookupCount);
+        Assert.Equal("AE", display.Letters);
     }
 
     [Fact]
-    public async Task FailureBackoff_ThenReturnsToIpWatch()
+    public async Task FailureBackoff_ThenReturnsToRefreshInterval()
     {
         var time = new FakeTimeProvider();
-        var source = new FakeCountrySource("8.8.8.8", "DE", "DE") { SelfOk = false };
+        var source = new FakeCountrySource("DE") { LookupOk = false };
         using var scheduler = new GeoCountryScheduler(source, time);
         scheduler.Start();
-        await WaitUntil(() => source.SelfCount == 1);
+        await WaitUntil(() => source.LookupCount == 1);
+
         time.Advance(TimeSpan.FromSeconds(14));
-        Assert.Equal(1, source.SelfCount);
+        Assert.Equal(1, source.LookupCount);
         time.Advance(TimeSpan.FromSeconds(1));
-        await WaitUntil(() => source.SelfCount == 2);
+        await WaitUntil(() => source.LookupCount == 2);
         time.Advance(TimeSpan.FromSeconds(45));
-        await WaitUntil(() => source.SelfCount == 3);
+        await WaitUntil(() => source.LookupCount == 3);
         time.Advance(TimeSpan.FromMinutes(2));
-        await WaitUntil(() => source.SelfCount == 4);
-        time.Advance(GeoCountryPolicy.IpWatchInterval);
-        await WaitUntil(() => source.SelfCount == 5);
-        Assert.Equal(0, source.ConfirmCount);
+        await WaitUntil(() => source.LookupCount == 4);
+        time.Advance(GeoCountryPolicy.RefreshInterval);
+        await WaitUntil(() => source.LookupCount == 5);
+    }
+
+    [Fact]
+    public async Task StaleAfterRepeatedFailures_MarksLastCountryStale()
+    {
+        var time = new FakeTimeProvider();
+        var source = new FakeCountrySource("AE");
+        using var scheduler = new GeoCountryScheduler(source, time);
+        scheduler.Start();
+        await WaitDisplay(scheduler, "AE");
+        source.LookupOk = false;
+
+        time.Advance(GeoCountryPolicy.RefreshInterval);
+        await WaitUntil(() => source.LookupCount == 2);
+        time.Advance(TimeSpan.FromSeconds(15));
+        await WaitUntil(() => source.LookupCount == 3);
+        time.Advance(TimeSpan.FromSeconds(45));
+        await WaitUntil(() => source.LookupCount == 4);
+        time.Advance(TimeSpan.FromMinutes(2));
+        await WaitUntil(() => source.LookupCount == 5);
+        time.Advance(GeoCountryPolicy.RefreshInterval);
+        await WaitUntil(() => source.LookupCount == 6);
+        Assert.True(scheduler.Current.Fresh);
+        time.Advance(GeoCountryPolicy.RefreshInterval);
+
+        await WaitUntil(() => !scheduler.Current.Fresh);
+        Assert.Equal("AE", scheduler.Current.Letters);
+        Assert.Contains("устарело", scheduler.Current.Tooltip, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
     public async Task Stop_CancelsSchedule()
     {
         var time = new FakeTimeProvider();
-        var source = new FakeCountrySource("8.8.8.8", "DE", "DE");
+        var source = new FakeCountrySource("DE");
         using var scheduler = new GeoCountryScheduler(source, time);
         scheduler.Start();
         await WaitDisplay(scheduler, "DE");
         scheduler.Stop();
-        int selves = source.SelfCount;
+        int calls = source.LookupCount;
         time.Advance(TimeSpan.FromHours(1));
         await Task.Delay(50);
-        Assert.Equal(selves, source.SelfCount);
+
+        Assert.Equal(calls, source.LookupCount);
         Assert.False(scheduler.IsEnabled);
         Assert.Equal(GeoCountryDisplay.Disabled, scheduler.Current);
     }
@@ -169,21 +168,22 @@ public sealed class GeoCountrySchedulerTests
     public async Task RetryAfter_IsHonoredOn429()
     {
         var time = new FakeTimeProvider();
-        var source = new FakeCountrySource("8.8.8.8", "DE", "DE")
+        var source = new FakeCountrySource("DE")
         {
-            SelfOk = false,
-            SelfRetryAfter = TimeSpan.FromSeconds(90)
+            LookupOk = false,
+            RetryAfter = TimeSpan.FromSeconds(90)
         };
         using var scheduler = new GeoCountryScheduler(source, time);
         scheduler.Start();
-        await WaitUntil(() => source.SelfCount == 1);
+        await WaitUntil(() => source.LookupCount == 1);
+
         time.Advance(TimeSpan.FromSeconds(89));
-        Assert.Equal(1, source.SelfCount);
+        Assert.Equal(1, source.LookupCount);
         time.Advance(TimeSpan.FromSeconds(1));
-        await WaitUntil(() => source.SelfCount == 2);
+        await WaitUntil(() => source.LookupCount == 2);
     }
 
-    private static async Task<GeoCountryDisplay> WaitDisplay(GeoCountryScheduler scheduler, string letters, int minConfirms = 0)
+    private static async Task<GeoCountryDisplay> WaitDisplay(GeoCountryScheduler scheduler, string letters)
     {
         await WaitUntil(() => scheduler.Current.Letters == letters);
         return scheduler.Current;
@@ -199,45 +199,26 @@ public sealed class GeoCountrySchedulerTests
         }
     }
 
-    private sealed class FakeCountrySource : IGeoCountrySource
+    private sealed class FakeCountrySource(string country) : IGeoCountrySource
     {
-        public FakeCountrySource(string ip, string selfCountry, string confirmCountry)
+        public string Country { get; set; } = country;
+        public bool LookupOk { get; set; } = true;
+        public TimeSpan? RetryAfter { get; set; }
+        public int LookupCount { get; private set; }
+        public TaskCompletionSource<GeoCountryLookupResult>? LookupGate { get; init; }
+
+        public GeoCountryLookupResult LookupValue
+            => new(LookupOk, LookupOk ? Country : null, RetryAfter);
+
+        public async Task<GeoCountryLookupResult> GetCurrentAsync(CancellationToken cancellationToken)
         {
-            Ip = IPAddress.Parse(ip);
-            SelfCountry = selfCountry;
-            ConfirmCountry = confirmCountry;
-        }
-
-        public IPAddress Ip { get; set; }
-        public string SelfCountry { get; set; }
-        public string ConfirmCountry { get; set; }
-        public bool SelfOk { get; set; } = true;
-        public bool ConfirmOk { get; set; } = true;
-        public TimeSpan? SelfRetryAfter { get; set; }
-        public int SelfCount { get; private set; }
-        public int ConfirmCount { get; private set; }
-        public IPAddress? LastConfirmIp { get; private set; }
-        public TaskCompletionSource<GeoCountrySelfResult>? SelfGate { get; init; }
-
-        public GeoCountrySelfResult SelfValue
-            => new(SelfOk, SelfOk ? Ip : null, SelfOk ? SelfCountry : null, SelfRetryAfter);
-
-        public async Task<GeoCountrySelfResult> GetSelfAsync(CancellationToken cancellationToken)
-        {
-            SelfCount++;
-            if (SelfGate is not null && SelfCount == 1)
+            LookupCount++;
+            if (LookupGate is not null && LookupCount == 1)
             {
-                return await SelfGate.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                return await LookupGate.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            return SelfValue;
-        }
-
-        public Task<GeoCountryConfirmResult> ConfirmAsync(IPAddress ip, CancellationToken cancellationToken)
-        {
-            ConfirmCount++;
-            LastConfirmIp = ip;
-            return Task.FromResult(new GeoCountryConfirmResult(ConfirmOk, ConfirmOk ? ConfirmCountry : null, null));
+            return LookupValue;
         }
     }
 }

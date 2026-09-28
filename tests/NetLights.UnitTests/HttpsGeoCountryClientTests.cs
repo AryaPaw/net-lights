@@ -10,59 +10,58 @@ namespace NetLights.UnitTests;
 public sealed class HttpsGeoCountryClientTests
 {
     [Fact]
-    public async Task AgreeingSources_ReturnConfirmedLookupParts()
+    public async Task CurrentLookup_UsesOneIpWhoRequestWithoutPuttingIpInUrl()
     {
         var handler = new ScriptedHandler()
-            .On("https://api.country.is/", """{"ip":"8.8.8.8","country":"DE"}""")
-            .On("https://ipwho.is/8.8.8.8?fields=success,country_code", """{"success":true,"country_code":"DE"}""");
+            .On(GeoCountryPolicy.IpWhoUri.AbsoluteUri, """{"success":true,"country_code":"AE"}""");
         using var client = new HttpsGeoCountryClient("1.1.1", handler);
-        GeoCountrySelfResult self = await client.GetSelfAsync(CancellationToken.None);
-        GeoCountryConfirmResult confirm = await client.ConfirmAsync(self.Ip!, CancellationToken.None);
-        Assert.True(self.Ok);
-        Assert.Equal("DE", self.CountryCode);
-        Assert.True(confirm.Ok);
-        Assert.Equal("DE", confirm.CountryCode);
-        Assert.Equal(HttpMethod.Get, handler.Methods[0]);
+        GeoCountryLookupResult lookup = await client.GetCurrentAsync(CancellationToken.None);
+        Assert.True(lookup.Ok);
+        Assert.Equal("AE", lookup.CountryCode);
+        Assert.Equal(1, handler.Hits);
+        Assert.Equal(HttpMethod.Get, handler.Methods.Single());
+        Assert.Equal(GeoCountryPolicy.IpWhoUri, handler.Uris.Single());
+        Assert.DoesNotContain("8.8.8.8", handler.Uris.Single().AbsoluteUri, StringComparison.Ordinal);
+        Assert.Contains("fields=success,country_code", handler.Uris.Single().Query, StringComparison.Ordinal);
         Assert.Equal(HttpVersion.Version11, handler.Versions[0]);
     }
 
     [Fact]
-    public async Task Confirm_EncodesIpv6AndUsesSameAddress()
+    public async Task EndpointCanBeOverriddenForTests()
     {
-        IPAddress ip = IPAddress.Parse("2001:db8::1");
-        var handler = new ScriptedHandler()
-            .On("https://ipwho.is/2001%3Adb8%3A%3A1?fields=success,country_code", """{"success":true,"country_code":"DE"}""");
-        using var client = new HttpsGeoCountryClient("1.1.1", handler);
-        GeoCountryConfirmResult confirm = await client.ConfirmAsync(ip, CancellationToken.None);
-        Assert.True(confirm.Ok);
-        Assert.Equal("https://ipwho.is/2001%3Adb8%3A%3A1?fields=success,country_code", handler.Uris[0].OriginalString);
+        var endpoint = new Uri("https://geo.test/current?fields=success,country_code");
+        var handler = new ScriptedHandler().On(endpoint.AbsoluteUri, """{"success":true,"country_code":"DE"}""");
+        using var client = new HttpsGeoCountryClient("1.1.1", handler, endpoint);
+        GeoCountryLookupResult lookup = await client.GetCurrentAsync(CancellationToken.None);
+        Assert.True(lookup.Ok);
+        Assert.Equal(endpoint, handler.Uris.Single());
     }
 
     [Fact]
-    public async Task Redirect_IsUnconfirmed()
+    public async Task Redirect_IsRejected()
     {
         var handler = new ScriptedHandler { Status = HttpStatusCode.Found };
         using var client = new HttpsGeoCountryClient("1.1.1", handler);
-        GeoCountrySelfResult self = await client.GetSelfAsync(CancellationToken.None);
-        Assert.False(self.Ok);
+        GeoCountryLookupResult lookup = await client.GetCurrentAsync(CancellationToken.None);
+        Assert.False(lookup.Ok);
         Assert.Equal(1, handler.Hits);
     }
 
     [Fact]
-    public async Task Timeout_IsUnconfirmed()
+    public async Task Timeout_IsRejected()
     {
         using var client = new HttpsGeoCountryClient("1.1.1", new HangHandler(), deadline: TimeSpan.FromMilliseconds(50));
-        GeoCountrySelfResult self = await client.GetSelfAsync(CancellationToken.None);
-        Assert.False(self.Ok);
+        GeoCountryLookupResult lookup = await client.GetCurrentAsync(CancellationToken.None);
+        Assert.False(lookup.Ok);
     }
 
     [Fact]
-    public async Task OversizedBody_IsUnconfirmed()
+    public async Task OversizedBody_IsRejected()
     {
         var handler = new ScriptedHandler()
-            .On("https://api.country.is/", new string('x', GeoCountryPolicy.MaxBodyBytes + 8));
+            .On(GeoCountryPolicy.IpWhoUri.AbsoluteUri, new string('x', GeoCountryPolicy.MaxBodyBytes + 8));
         using var client = new HttpsGeoCountryClient("1.1.1", handler);
-        Assert.False((await client.GetSelfAsync(CancellationToken.None)).Ok);
+        Assert.False((await client.GetCurrentAsync(CancellationToken.None)).Ok);
     }
 
     [Fact]
@@ -74,9 +73,9 @@ public sealed class HttpsGeoCountryClientTests
             RetryAfter = TimeSpan.FromSeconds(12)
         };
         using var client = new HttpsGeoCountryClient("1.1.1", handler);
-        GeoCountrySelfResult self = await client.GetSelfAsync(CancellationToken.None);
-        Assert.False(self.Ok);
-        Assert.Equal(TimeSpan.FromSeconds(12), self.RetryAfter);
+        GeoCountryLookupResult lookup = await client.GetCurrentAsync(CancellationToken.None);
+        Assert.False(lookup.Ok);
+        Assert.Equal(TimeSpan.FromSeconds(12), lookup.RetryAfter);
     }
 
     [Fact]

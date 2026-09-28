@@ -218,20 +218,20 @@ public sealed class GeoCountryTrayTests
         using var host = new GeoCountryTrayHost(() => opens++, source, TimeProvider.System, ui: null);
         Assert.False(host.Visible);
         Assert.False(host.TrayIconCreated);
-        Assert.Equal(0, source.SelfCount);
+        Assert.Equal(0, source.LookupCount);
         host.SetEnabled(true);
         await WaitUntil(() => host.Current.Letters == "DE");
         Assert.True(host.Visible);
-        Assert.True(source.SelfCount >= 1);
+        Assert.True(source.LookupCount >= 1);
         host.SetEnabled(false);
-        int selves = source.SelfCount;
+        int lookups = source.LookupCount;
         await Task.Delay(80);
-        Assert.Equal(selves, source.SelfCount);
+        Assert.Equal(lookups, source.LookupCount);
         Assert.False(host.Visible);
         host.Restore();
         Assert.False(host.Visible);
         host.SetEnabled(true);
-        await WaitUntil(() => source.SelfCount > selves);
+        await WaitUntil(() => source.LookupCount > lookups);
         host.RaiseClickForTests(MouseButtons.Left);
         Assert.Equal(1, opens);
         host.RaiseClickForTests(MouseButtons.Right);
@@ -248,13 +248,13 @@ public sealed class GeoCountryTrayTests
         host.SetDetectionEnabled(true);
         await WaitUntil(() => host.Current.Letters == "DE");
         host.SetTrayIconEnabled(false);
-        int calls = source.SelfCount;
+        int calls = source.LookupCount;
         await Task.Delay(80);
 
         Assert.False(host.Visible);
         Assert.True(host.DetectionEnabled);
         host.NotifyNetworkOrResume();
-        await WaitUntil(() => source.SelfCount > calls);
+        await WaitUntil(() => source.LookupCount > calls);
 
         host.SetDetectionEnabled(false);
         Assert.False(host.Visible);
@@ -455,15 +455,12 @@ public sealed class GeoCountryTrayTests
 
     private sealed class FakeSource : IGeoCountrySource
     {
-        public int SelfCount { get; private set; }
+        public int LookupCount { get; private set; }
 
-        public Task<GeoCountrySelfResult> GetSelfAsync(CancellationToken cancellationToken)
+        public Task<GeoCountryLookupResult> GetCurrentAsync(CancellationToken cancellationToken)
         {
-            SelfCount++;
-            return Task.FromResult(new GeoCountrySelfResult(true, IPAddress.Parse("8.8.8.8"), "DE", null));
+            LookupCount++;
+            return Task.FromResult(new GeoCountryLookupResult(true, "DE", null));
         }
-
-        public Task<GeoCountryConfirmResult> ConfirmAsync(IPAddress ip, CancellationToken cancellationToken)
-            => Task.FromResult(new GeoCountryConfirmResult(true, "DE", null));
     }
 }

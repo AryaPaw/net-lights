@@ -10,23 +10,20 @@ public sealed class HttpsGeoCountryClient : IGeoCountrySource, IDisposable
 {
     private readonly HttpClient _client;
     private readonly TimeSpan _deadline;
-    private readonly Uri _countryIs;
-    private readonly Uri _ipWhoBase;
+    private readonly Uri _endpoint;
     private readonly TimeProvider _time;
     private readonly string _userAgent;
 
     public HttpsGeoCountryClient(
         string version,
         HttpMessageHandler? handler = null,
-        Uri? countryIs = null,
-        Uri? ipWhoBase = null,
+        Uri? endpoint = null,
         TimeSpan? deadline = null,
         TimeProvider? time = null)
     {
         _userAgent = "NetLights/" + version;
         _deadline = deadline ?? GeoCountryPolicy.RequestDeadline;
-        _countryIs = countryIs ?? GeoCountryPolicy.CountryIsUri;
-        _ipWhoBase = ipWhoBase ?? GeoCountryPolicy.IpWhoBaseUri;
+        _endpoint = endpoint ?? GeoCountryPolicy.IpWhoUri;
         _time = time ?? TimeProvider.System;
         HttpMessageHandler inner = handler ?? CreateProductionHandler();
         if (inner is SocketsHttpHandler sockets)
@@ -56,22 +53,13 @@ public sealed class HttpsGeoCountryClient : IGeoCountrySource, IDisposable
 
     public static HttpsGeoCountryClient CreateProduction(string version) => new(version);
 
-    public Task<GeoCountrySelfResult> GetSelfAsync(CancellationToken cancellationToken)
+    public Task<GeoCountryLookupResult> GetCurrentAsync(CancellationToken cancellationToken)
         => GetAsync(
-            _countryIs,
-            static body => GeoCountryParsers.TryParseCountryIs(body, out IPAddress ip, out string country)
-                ? new GeoCountrySelfResult(true, ip, country, null)
+            _endpoint,
+            static body => GeoCountryParsers.TryParseIpWhoCurrent(body, out string country)
+                ? new GeoCountryLookupResult(true, country, null)
                 : default,
-            static retry => new GeoCountrySelfResult(false, null, null, retry),
-            cancellationToken);
-
-    public Task<GeoCountryConfirmResult> ConfirmAsync(IPAddress ip, CancellationToken cancellationToken)
-        => GetAsync(
-            GeoCountryParsers.IpWhoLookupUri(_ipWhoBase, ip),
-            static body => GeoCountryParsers.TryParseIpWho(body, out string country)
-                ? new GeoCountryConfirmResult(true, country, null)
-                : default,
-            static retry => new GeoCountryConfirmResult(false, null, retry),
+            static retry => new GeoCountryLookupResult(false, null, retry),
             cancellationToken);
 
     public void Dispose() => _client.Dispose();
