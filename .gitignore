@@ -3,7 +3,11 @@ obj/
 artifacts/
 .vs/
 .idea/
-.cursor/
+.cursor/*
+!.cursor/skills/
+.cursor/skills/*
+!.cursor/skills/net-lights-ship/
+!.cursor/skills/net-lights-ship/**
 *.user
 *.suo
 *.userosscache

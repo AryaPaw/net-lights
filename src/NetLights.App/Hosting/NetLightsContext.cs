@@ -15,7 +15,11 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly StatusForm _status = new();
     private readonly GeoCountryTrayHost _countryTray;
     private readonly LocationHistory _locations;
-    private DateTimeOffset _locationsSavedAt;
+    private readonly AvailabilityHistory _availabilityHistory;
+    private long _locationsSavedAtTicks;
+    private long _availabilitySavedAtTicks;
+    private int _availabilitySavePending;
+    private int _locationSavePending;
     private readonly AppSettings _settings;
     private readonly MonitorHost _host;
     private readonly HttpsProbe _probe;
@@ -29,6 +33,7 @@ internal sealed class NetLightsContext : ApplicationContext
     private MonitorSnapshot _snapshot;
     private bool _exiting;
     private bool _syncingToggles;
+    private bool _windowWasShown;
     private string? _updateNotice;
 
     public NetLightsContext()
@@ -37,6 +42,7 @@ internal sealed class NetLightsContext : ApplicationContext
         (AppSettings loadedSettings, SettingsLoadStatus loadStatus) = SettingsStore.LoadDetailed();
         _settings = loadedSettings;
         _locations = LocationHistoryStore.Load();
+        _availabilityHistory = AvailabilityHistoryStore.Load();
         if (loadStatus is not SettingsLoadStatus.Corrupt and not SettingsLoadStatus.IoError
             && _settings.SettingsVersion < 2)
         {
@@ -50,21 +56,50 @@ internal sealed class NetLightsContext : ApplicationContext
             TrySaveSettings();
         }
 
+        if (loadStatus is not SettingsLoadStatus.Corrupt and not SettingsLoadStatus.IoError
+            && _settings.SettingsVersion < 3)
+        {
+            _settings.GeoCountryDetectionEnabled = _settings.GeoCountryIconEnabled;
+            _settings.SettingsVersion = 3;
+            TrySaveSettings();
+        }
+
+        if (loadStatus is not SettingsLoadStatus.Corrupt and not SettingsLoadStatus.IoError
+            && SettingsStore.MigrateToSettingsVersion4(_settings))
+        {
+            TrySaveSettings();
+        }
+
+        if (loadStatus is not SettingsLoadStatus.Corrupt and not SettingsLoadStatus.IoError
+            && SettingsStore.MigrateToSettingsVersion5(_settings))
+        {
+            TrySaveSettings();
+        }
+
+        if (loadStatus is not SettingsLoadStatus.Corrupt and not SettingsLoadStatus.IoError
+            && SettingsStore.MigrateToSettingsVersion6(_settings))
+        {
+            TrySaveSettings();
+        }
+
+        if (loadStatus is not SettingsLoadStatus.Corrupt and not SettingsLoadStatus.IoError
+            && SettingsStore.MigrateToSettingsVersion7(_settings))
+        {
+            TrySaveSettings();
+        }
+
+        if (_settings.GeoCountryIconEnabled && !_settings.GeoCountryDetectionEnabled)
+        {
+            _settings.GeoCountryIconEnabled = false;
+            TrySaveSettings();
+        }
+
         AutoStartStore.Set(_settings.AutoStart, Application.ExecutablePath);
         (MonitorConfiguration config, string? warning) = SettingsStore.LoadPool();
         _probe = HttpsProbeFactory.CreateProduction(TimeProvider.System, ProductInfo.Version);
         var kernel = new MonitorKernel(config, TimeProvider.System);
         _host = new MonitorHost(kernel, _probe, TimeProvider.System, () => _probe.RecycleConnections(), _ui);
         _snapshot = kernel.Snapshot;
-        try
-        {
-            SettingsStore.DeleteLegacyStateHistory();
-        }
-        catch (Exception ex)
-        {
-            kernel.Log.Add(DateTimeOffset.UtcNow, "history", ex.Message);
-        }
-
         if (new PendingUpdateStore().TryReadLastFailure(out string? updateError))
         {
             _updateNotice = updateError;
@@ -74,18 +109,25 @@ internal sealed class NetLightsContext : ApplicationContext
         _status.AutoStartChanged = OnAutoStartFromWindow;
         _status.AutoUpdateChanged = OnAutoUpdateFromWindow;
         _status.GeoCountryIconChanged = OnGeoCountryIconFromWindow;
+        _status.GeoCountryDetectionChanged = OnGeoCountryDetectionFromWindow;
+        _status.EmphasizeShortStatusesChanged = OnEmphasizeShortStatusesFromWindow;
         _status.GeoCountryLetterScaleChanged = OnGeoCountryLetterScaleFromWindow;
         _status.LocationChartWindowHoursChanged = OnLocationChartWindowFromWindow;
         _status.DiagnoseRequested = DiagnoseAsync;
         _status.ExportRequested = Export;
         _status.CheckUpdatesRequested = () => _ = CheckUpdatesManualAsync();
+        _status.OpenSettingsFolderRequested = OpenSettingsFolder;
+        _status.ResetWindowSizeRequested = ResetWindowSize;
+        _status.WindowGeometryChanged = SaveWindowGeometry;
         _status.BindSettings(
             AutoStartStore.IsEnabled(),
             _settings.AutoUpdateEnabled,
             _settings.GeoCountryIconEnabled,
             GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize),
             _updateNotice,
-            _settings.LocationChartWindowHours);
+            _settings.LocationChartWindowHours,
+            _settings.GeoCountryDetectionEnabled,
+            _settings.EmphasizeShortStatuses);
         _menu = new ContextMenuStrip();
         _menu.Items.Add("Открыть окно", null, (_, _) => ShowStatus());
         _pauseItem = new ToolStripMenuItem("Пауза")
@@ -115,12 +157,16 @@ internal sealed class NetLightsContext : ApplicationContext
         {
             if (TrayIconGestures.ShouldOpenWindow(e.Button))
             {
-                ShowStatus();
+                ShowStatus(0);
             }
         };
-        _countryTray = new GeoCountryTrayHost(ShowStatus, ProductInfo.Version, TimeProvider.System, _ui);
+        _countryTray = new GeoCountryTrayHost(() => ShowStatus(1), ProductInfo.Version, TimeProvider.System, _ui);
         _countryTray.DisplayChanged = OnCountryDisplay;
-        _status.BindLocations(_locations, _countryTray.Current);
+        _status.BindLocations(
+            _locations,
+            _settings.GeoCountryDetectionEnabled ? _countryTray.Current : GeoCountryDisplay.Disabled);
+        _availabilityHistory.Observe(_snapshot, _snapshot.GeneratedUtc);
+        _status.BindAvailabilityHistory(_availabilityHistory, LocationChartWindows.ParseHours(_settings.LocationChartWindowHours));
         _heartbeat = new System.Windows.Forms.Timer { Interval = 1000 };
         _heartbeat.Tick += (_, _) =>
         {
@@ -129,11 +175,18 @@ internal sealed class NetLightsContext : ApplicationContext
             if (_locations.Current is not null)
             {
                 _locations.Touch(now);
-                if (now - _locationsSavedAt >= TimeSpan.FromMinutes(1))
+                if (SaveDue(_locationsSavedAtTicks, now))
                 {
                     TrySaveLocations();
                 }
             }
+
+            if (_snapshot.Paused)
+                _availabilityHistory.Touch(now);
+            else
+                _availabilityHistory.SealStale(now);
+            _availabilityHistory.Prune(now);
+            if (SaveDue(_availabilitySavedAtTicks, now)) QueueSaveAvailabilityHistory();
 
             if (!_snapshot.Paused)
             {
@@ -147,7 +200,8 @@ internal sealed class NetLightsContext : ApplicationContext
         _heartbeat.Start();
         _host.Start();
         _countryTray.SetLetterScale(GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize));
-        _countryTray.SetEnabled(_settings.GeoCountryIconEnabled);
+        _countryTray.SetDetectionEnabled(_settings.GeoCountryDetectionEnabled);
+        _countryTray.SetTrayIconEnabled(_settings.GeoCountryIconEnabled);
         SilentUpdateRuntime.Start(
             () => _settings.AutoUpdateEnabled,
             ProductInfo.Version,
@@ -174,6 +228,7 @@ internal sealed class NetLightsContext : ApplicationContext
     private void ApplySnapshot(MonitorSnapshot snapshot)
     {
         _snapshot = snapshot;
+        _availabilityHistory.Observe(snapshot, snapshot.GeneratedUtc);
         int iconSize = _renderer.SystemSmallIconSize();
         Icon icon = _renderer.Get(snapshot.Ru.Availability, snapshot.World.Availability, iconSize, snapshot.Paused);
         if (!ReferenceEquals(_icon.Icon, icon))
@@ -196,6 +251,7 @@ internal sealed class NetLightsContext : ApplicationContext
 
         if (_status.Visible)
         {
+            _status.BindAvailabilityHistory(_availabilityHistory, LocationChartWindows.ParseHours(_settings.LocationChartWindowHours));
             if (_status.NeedsBind(snapshot))
             {
                 _status.Bind(snapshot);
@@ -228,12 +284,15 @@ internal sealed class NetLightsContext : ApplicationContext
         }
     }
 
-    private void ShowStatus()
+    private void ShowStatus(int page = 0)
     {
         if (!_status.Visible)
         {
-            _status.Size = new Size(Math.Max(_settings.WindowWidth, _status.MinimumSize.Width), Math.Max(_settings.WindowHeight, _status.MinimumSize.Height));
-            _status.PlaceCentered();
+            _status.RestoreWindowBounds(new Rectangle(
+                _settings.WindowX,
+                _settings.WindowY,
+                _settings.WindowWidth,
+                _settings.WindowHeight));
         }
 
         _status.Bind(_snapshot);
@@ -243,9 +302,14 @@ internal sealed class NetLightsContext : ApplicationContext
             _settings.GeoCountryIconEnabled,
             GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize),
             _updateNotice,
-            _settings.LocationChartWindowHours);
-        _status.BindLocations(_locations, _countryTray.Current);
-        _status.Reveal();
+            _settings.LocationChartWindowHours,
+            _settings.GeoCountryDetectionEnabled,
+            _settings.EmphasizeShortStatuses);
+        _status.BindLocations(
+            _locations,
+            _settings.GeoCountryDetectionEnabled ? _countryTray.Current : GeoCountryDisplay.Disabled);
+        _status.ShowPageAndReveal(page);
+        _windowWasShown = true;
     }
 
     private void OnAutoStartFromWindow(bool enabled)
@@ -263,14 +327,58 @@ internal sealed class NetLightsContext : ApplicationContext
 
     private void TrySaveLocations()
     {
+        if (Interlocked.CompareExchange(ref _locationSavePending, 1, 0) != 0)
+            return;
+        _ = SaveLocationHistoryAsync(LocationHistoryStore.Snapshot(_locations));
+    }
+
+    private static bool SaveDue(long savedAtTicks, DateTimeOffset now)
+    {
+        long ticks = Interlocked.Read(ref savedAtTicks);
+        return ticks == 0 || now.UtcTicks - ticks >= TimeSpan.FromMinutes(1).Ticks;
+    }
+
+    private async Task SaveLocationHistoryAsync(LocationHistorySnapshot snapshot)
+    {
         try
         {
-            LocationHistoryStore.Save(_locations);
-            _locationsSavedAt = DateTimeOffset.UtcNow;
+            await LocationHistoryStore.SaveAsync(snapshot).ConfigureAwait(false);
+            Interlocked.Exchange(ref _locationsSavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
         }
         catch (Exception ex)
         {
+            Interlocked.Exchange(ref _locationsSavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
             _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _locationSavePending, 0);
+        }
+    }
+
+    private void QueueSaveAvailabilityHistory()
+    {
+        if (Interlocked.CompareExchange(ref _availabilitySavePending, 1, 0) != 0)
+            return;
+        AvailabilityHistorySnapshot snapshot = AvailabilityHistoryStore.Snapshot(_availabilityHistory);
+        _ = SaveAvailabilityHistoryAsync(snapshot);
+    }
+
+    private async Task SaveAvailabilityHistoryAsync(AvailabilityHistorySnapshot snapshot)
+    {
+        try
+        {
+            await AvailabilityHistoryStore.SaveAsync(snapshot).ConfigureAwait(false);
+            Interlocked.Exchange(ref _availabilitySavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Exchange(ref _availabilitySavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "availability-history", ex.Message);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _availabilitySavePending, 0);
         }
     }
 
@@ -282,29 +390,89 @@ internal sealed class NetLightsContext : ApplicationContext
         }
         catch (Exception ex)
         {
-            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "settings", ex.Message);
+            if (_host is null)
+            {
+                Debug.WriteLine("settings: " + ex.Message);
+            }
+            else
+            {
+                _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "settings", ex.Message);
+            }
         }
+    }
+
+    private void OpenSettingsFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(SettingsStore.RootDirectory);
+            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{SettingsStore.RootDirectory}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(_status, "Не удалось открыть папку настроек: " + ex.Message, ProductInfo.DisplayName(), MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void ResetWindowSize()
+    {
+        _status.ResetWindowSize();
+        _settings.WindowX = _status.Location.X;
+        _settings.WindowY = _status.Location.Y;
+        _settings.WindowWidth = _status.Width;
+        _settings.WindowHeight = _status.Height;
+        TrySaveSettings();
+    }
+
+    private void SaveWindowGeometry()
+    {
+        if (!_windowWasShown || _status.WindowState != FormWindowState.Normal)
+            return;
+
+        _settings.WindowX = _status.Left;
+        _settings.WindowY = _status.Top;
+        _settings.WindowWidth = _status.Width;
+        _settings.WindowHeight = _status.Height;
+        TrySaveSettings();
     }
 
     private void OnLocationChartWindowFromWindow(int hours)
     {
         _settings.LocationChartWindowHours = LocationChartWindows.ToHours(LocationChartWindows.ParseHours(hours));
+        _status.BindAvailabilityHistory(_availabilityHistory, LocationChartWindows.ParseHours(hours));
         TrySaveSettings();
     }
 
     private void OnGeoCountryIconFromWindow(bool enabled)
     {
-        _settings.GeoCountryIconEnabled = enabled;
+        _settings.GeoCountryIconEnabled = enabled && _settings.GeoCountryDetectionEnabled;
         TrySaveSettings();
+        _countryTray.SetTrayIconEnabled(_settings.GeoCountryIconEnabled);
+    }
+
+    private void OnGeoCountryDetectionFromWindow(bool enabled)
+    {
+        _settings.GeoCountryDetectionEnabled = enabled;
         if (!enabled)
         {
+            _settings.GeoCountryIconEnabled = false;
             _locations.CloseOpen(TimeProvider.System.GetUtcNow());
             TrySaveLocations();
-
             _status.BindLocations(_locations, GeoCountryDisplay.Disabled);
         }
 
-        _countryTray.SetEnabled(enabled);
+        TrySaveSettings();
+        _countryTray.SetDetectionEnabled(enabled);
+        if (enabled)
+        {
+            _countryTray.SetTrayIconEnabled(_settings.GeoCountryIconEnabled);
+        }
+    }
+
+    private void OnEmphasizeShortStatusesFromWindow(bool enabled)
+    {
+        _settings.EmphasizeShortStatuses = enabled;
+        TrySaveSettings();
     }
 
     private void OnGeoCountryLetterScaleFromWindow(GeoCountryLetterScale scale)
@@ -316,6 +484,11 @@ internal sealed class NetLightsContext : ApplicationContext
 
     private void OnCountryDisplay(GeoCountryDisplay display)
     {
+        if (!_settings.GeoCountryDetectionEnabled)
+        {
+            return;
+        }
+
         if (_locations.NoteIso(display.Letters, TimeProvider.System.GetUtcNow()))
         {
             TrySaveLocations();
@@ -452,8 +625,10 @@ internal sealed class NetLightsContext : ApplicationContext
     {
         if (e.Mode is Microsoft.Win32.PowerModes.Suspend)
         {
+            _availabilityHistory.CloseOpen(TimeProvider.System.GetUtcNow());
+            SaveAvailabilityHistoryNow();
             _locations.CloseOpen(TimeProvider.System.GetUtcNow());
-            TrySaveLocations();
+            SaveLocationHistoryNow();
             _host.NotifyNetworkChange();
             _countryTray.NotifyNetworkOrResume();
             return;
@@ -461,8 +636,35 @@ internal sealed class NetLightsContext : ApplicationContext
 
         if (e.Mode is Microsoft.Win32.PowerModes.Resume)
         {
+            RestoreIcon();
             _host.NotifyNetworkChange();
             _countryTray.NotifyNetworkOrResume();
+        }
+    }
+
+    private void SaveAvailabilityHistoryNow()
+    {
+        try
+        {
+            AvailabilityHistoryStore.Save(AvailabilityHistoryStore.Snapshot(_availabilityHistory));
+            Interlocked.Exchange(ref _availabilitySavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
+        }
+        catch (Exception ex)
+        {
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "availability-history", ex.Message);
+        }
+    }
+
+    private void SaveLocationHistoryNow()
+    {
+        try
+        {
+            LocationHistoryStore.Save(LocationHistoryStore.Snapshot(_locations));
+            Interlocked.Exchange(ref _locationsSavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
+        }
+        catch (Exception ex)
+        {
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
         }
     }
 
@@ -486,10 +688,13 @@ internal sealed class NetLightsContext : ApplicationContext
         NetworkChange.NetworkAvailabilityChanged -= OnNetwork;
         NetworkChange.NetworkAddressChanged -= OnNetwork;
         Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPower;
-        _settings.WindowX = _status.Location.X;
-        _settings.WindowY = _status.Location.Y;
-        _settings.WindowWidth = _status.Width;
-        _settings.WindowHeight = _status.Height;
+        if (_windowWasShown && _status.WindowState == FormWindowState.Normal)
+        {
+            _settings.WindowX = _status.Left;
+            _settings.WindowY = _status.Top;
+            _settings.WindowWidth = _status.Width;
+            _settings.WindowHeight = _status.Height;
+        }
         try
         {
             SettingsStore.Save(_settings);
@@ -502,11 +707,21 @@ internal sealed class NetLightsContext : ApplicationContext
         try
         {
             _locations.CloseOpen(TimeProvider.System.GetUtcNow());
-            LocationHistoryStore.Save(_locations);
+            LocationHistoryStore.Save(LocationHistoryStore.Snapshot(_locations));
         }
         catch (Exception ex)
         {
             _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
+        }
+
+        try
+        {
+            _availabilityHistory.CloseOpen(TimeProvider.System.GetUtcNow());
+            AvailabilityHistoryStore.Save(AvailabilityHistoryStore.Snapshot(_availabilityHistory));
+        }
+        catch (Exception ex)
+        {
+            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "availability-history", ex.Message);
         }
 
         try

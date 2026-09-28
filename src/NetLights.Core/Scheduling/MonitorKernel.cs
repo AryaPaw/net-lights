@@ -20,6 +20,7 @@ public sealed partial class MonitorKernel
     private MonitorSnapshot _snapshot;
     private bool _tracing;
     private bool _paused;
+    private long _lastUiHeartbeatAt;
 
     public MonitorKernel(MonitorConfiguration config, TimeProvider time)
     {
@@ -32,6 +33,7 @@ public sealed partial class MonitorKernel
         _config = config;
         _time = time;
         _clock = new MonotonicClock(time);
+        _lastUiHeartbeatAt = _clock.Now;
         _ru = CreateGroup(EndpointGroup.Ru, _clock.Now);
         _world = CreateGroup(EndpointGroup.World, _clock.Add(_clock.Now, config.GroupOffset));
         BeginConfirmation(_ru, _clock.Now, "startup");
@@ -53,6 +55,13 @@ public sealed partial class MonitorKernel
     public IReadOnlyList<WorkItem> Tick()
     {
         var work = new List<WorkItem>();
+        long now = _clock.Now;
+        bool uiHeartbeatDue = _clock.Elapsed(_lastUiHeartbeatAt, now) >= MonitorConstants.UiHeartbeat;
+        if (uiHeartbeatDue)
+        {
+            _lastUiHeartbeatAt = now;
+        }
+
         _limiter.RemoveOlderThan(_clock, TimeSpan.FromSeconds(60));
         if (_paused)
         {
@@ -61,7 +70,7 @@ public sealed partial class MonitorKernel
 
         if (_networkUnavailable)
         {
-            MaybePublish(work, force: false);
+            MaybePublish(work, force: uiHeartbeatDue);
             return work;
         }
 
@@ -70,7 +79,7 @@ public sealed partial class MonitorKernel
         AdvanceAndMaybeRotate(_world, work);
         FillConfirmation(_ru, work);
         FillConfirmation(_world, work);
-        MaybePublish(work, force: true);
+        MaybePublish(work, force: uiHeartbeatDue);
         return work;
     }
 

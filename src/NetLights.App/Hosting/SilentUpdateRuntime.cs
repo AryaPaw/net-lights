@@ -46,6 +46,12 @@ internal static class SilentUpdateRuntime
         {
             try
             {
+                if (!autoUpdateEnabled())
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(1), cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
                 await NetworkWaitPolicy.WaitUntilOnline(
                     probe,
                     Timeout.InfiniteTimeSpan,

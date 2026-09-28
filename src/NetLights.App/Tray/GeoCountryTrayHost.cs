@@ -14,6 +14,7 @@ internal sealed class GeoCountryTrayHost : IDisposable
     private GeoCountryLetterScale _letterScale = GeoCountryLetterScale.Regular;
     private NotifyIcon? _icon;
     private bool _visible;
+    private bool _detectionEnabled;
 
     public GeoCountryTrayHost(Action showWindow, string version, TimeProvider time, SynchronizationContext? ui)
         : this(showWindow, HttpsGeoCountryClient.CreateProduction(version), time, ui, ownsClient: true)
@@ -39,6 +40,8 @@ internal sealed class GeoCountryTrayHost : IDisposable
 
     public bool Visible => _visible && _icon is { Visible: true };
 
+    public bool DetectionEnabled => _detectionEnabled;
+
     public bool TrayIconCreated => _icon is not null;
 
     public Action<GeoCountryDisplay>? DisplayChanged { get; set; }
@@ -49,18 +52,44 @@ internal sealed class GeoCountryTrayHost : IDisposable
 
     public void SetEnabled(bool enabled)
     {
-        if (enabled == _visible)
+        SetDetectionEnabled(enabled);
+        SetTrayIconEnabled(enabled);
+    }
+
+    public void SetDetectionEnabled(bool enabled)
+    {
+        if (enabled == _detectionEnabled)
         {
             return;
         }
 
+        _detectionEnabled = enabled;
         if (enabled)
         {
-            ShowAndStart();
+            _scheduler.Start();
         }
         else
         {
-            HideAndStop();
+            SetTrayIconEnabled(false);
+            _scheduler.Stop();
+        }
+    }
+
+    public void SetTrayIconEnabled(bool enabled)
+    {
+        bool shouldShow = enabled && _detectionEnabled;
+        if (shouldShow == _visible)
+        {
+            return;
+        }
+
+        if (shouldShow)
+        {
+            ShowIcon();
+        }
+        else
+        {
+            HideIcon();
         }
     }
 
@@ -107,23 +136,27 @@ internal sealed class GeoCountryTrayHost : IDisposable
         _ownedClient?.Dispose();
     }
 
-    private void ShowAndStart()
+    private void ShowIcon()
     {
         NotifyIcon icon = EnsureIcon();
         _visible = true;
         Apply(_scheduler.Current);
         icon.Visible = true;
-        _scheduler.Start();
     }
 
-    private void HideAndStop()
+    private void HideIcon()
     {
         _visible = false;
-        _scheduler.Stop();
         if (_icon is not null)
         {
             _icon.Visible = false;
         }
+    }
+
+    private void HideAndStop()
+    {
+        SetTrayIconEnabled(false);
+        SetDetectionEnabled(false);
     }
 
     private NotifyIcon EnsureIcon()

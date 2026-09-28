@@ -9,13 +9,21 @@ internal sealed class LocationTimelinePanel : Panel
     private readonly Panel _stack;
     private LocationHistory _history = new();
     private GeoCountryDisplay _live = GeoCountryDisplay.Unconfirmed;
-    private string _fingerprint = "";
-    private Label? _liveDuration;
+    private LocationHistory? _boundHistory;
+    private long _boundRevision = -1;
+    private GeoCountryDisplay _boundLive = GeoCountryDisplay.Unconfirmed;
     private LocationSpanChart? _chart;
+    private LocationFrequencyChart? _frequency;
     private SegmentTrack? _windowBar;
     private ThemedButton[] _windowButtons = [];
     private TimeSpan _chartWindow = LocationChartWindows.Default;
     private bool _layouting;
+    private HistoryRow[] _historyRows = [];
+    private int _historyStartY;
+    private int _historyRowHeight = 44;
+    private string _historyTipText = "";
+    private readonly ToolTip _historyTip = new() { ShowAlways = true, InitialDelay = 350, ReshowDelay = 100, AutoPopDelay = 5000 };
+    private int HistoryHeaderHeight => Scale(12);
 
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action<int>? ChartWindowHoursChanged { get; set; }
@@ -69,20 +77,25 @@ internal sealed class LocationTimelinePanel : Panel
         }
 
         _chartWindow = next;
+        AutoScrollPosition = Point.Empty;
         SyncWindowButtons();
-        if (_chart is not null)
-        {
-            DateTimeOffset now = _time.GetUtcNow();
-            _chart.Bind(ChartStays(now), now, now - _chartWindow);
-            return true;
-        }
-
-        _fingerprint = "";
+        _boundRevision = -1;
         Rebuild();
         return true;
     }
 
     public TimeSpan ChartWindow => _chartWindow;
+
+    internal int VisibleHistoryRowCount => _historyRows.Length;
+    internal int HistoryRowHeight => _historyRowHeight;
+    internal Rectangle HistoryRowBounds(int index)
+    {
+        if ((uint)index >= (uint)_historyRows.Length)
+            throw new ArgumentOutOfRangeException(nameof(index));
+
+        int y = _historyStartY + HistoryHeaderHeight + index * _historyRowHeight + AutoScrollPosition.Y;
+        return new Rectangle(Scale(12), y, Math.Max(1, VisibleWidth() - Scale(24)), _historyRowHeight);
+    }
 
     public void Relayout() => SyncScrollSize();
 
@@ -90,14 +103,18 @@ internal sealed class LocationTimelinePanel : Panel
     {
         _history = history;
         _live = live ?? LiveFromHistory(history);
-        string next = Fingerprint(history, _live);
-        if (next == _fingerprint && _stack.Controls.Count > 0)
+        if (ReferenceEquals(history, _boundHistory)
+            && history.Revision == _boundRevision
+            && _live == _boundLive
+            && _stack.Controls.Count > 0)
         {
             Tick();
             return;
         }
 
-        _fingerprint = next;
+        _boundHistory = history;
+        _boundRevision = history.Revision;
+        _boundLive = _live;
         Rebuild();
     }
 
@@ -105,23 +122,58 @@ internal sealed class LocationTimelinePanel : Panel
     {
         DateTimeOffset now = _time.GetUtcNow();
         _chart?.Tick(now);
-        if (_liveDuration is null || !GeoCountryParsers.IsIso3166Alpha2(_live.Letters))
-        {
-            return;
-        }
-
-        LocationStay stay = LiveStay(now);
-        string text = DurationLine(stay, now);
-        if (_liveDuration.Text != text)
-        {
-            _liveDuration.Text = text;
-        }
+        _frequency?.Tick(now);
+        InvalidateCurrentHistoryRow();
     }
 
     protected override void OnSizeChanged(EventArgs e)
     {
         base.OnSizeChanged(e);
         SyncScrollSize();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        DrawVirtualHistory(e.Graphics, e.ClipRectangle);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        HistoryRow? row = HistoryRowAt(e.Location);
+        string tip = row is HistoryRow value ? HistoryTip(value, _time.GetUtcNow()) : "";
+        if (string.Equals(_historyTipText, tip, StringComparison.Ordinal))
+            return;
+
+        _historyTipText = tip;
+        _historyTip.SetToolTip(this, tip);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        _historyTipText = "";
+        _historyTip.SetToolTip(this, "");
+    }
+
+    protected override void OnScroll(ScrollEventArgs se)
+    {
+        base.OnScroll(se);
+        Invalidate();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _historyTip.Dispose();
+            if (_frequency?.Parent is null) _frequency?.Dispose();
+            if (_chart?.Parent is null) _chart?.Dispose();
+            if (_windowBar?.Parent is null) _windowBar?.Dispose();
+        }
+
+        base.Dispose(disposing);
     }
 
     protected override Point ScrollToControl(Control activeControl) => DisplayRectangle.Location;
@@ -134,63 +186,56 @@ internal sealed class LocationTimelinePanel : Panel
         _stack.Controls.Clear();
         foreach (Control child in previous)
         {
-            if (!ReferenceEquals(child, _chart) && !ReferenceEquals(child, _windowBar))
+            if (!ReferenceEquals(child, _chart) && !ReferenceEquals(child, _windowBar) && !ReferenceEquals(child, _frequency))
             {
                 child.Dispose();
             }
         }
 
-        _liveDuration = null;
         DateTimeOffset now = _time.GetUtcNow();
-        bool hasLive = true;
+        bool enabled = _live != GeoCountryDisplay.Disabled;
+        bool hasKnownLocation = _history.Stays.Any(stay => stay.EndedUtc is not null)
+            || GeoCountryParsers.IsIso3166Alpha2(_live.Letters);
         if (_live == GeoCountryDisplay.Disabled)
         {
             HideChart();
             HideWindowBar();
             AddRow(DisabledState());
-            hasLive = false;
         }
-        else if (_history.Stays.Count == 0 && !GeoCountryParsers.IsIso3166Alpha2(_live.Letters))
+        else if (!hasKnownLocation)
         {
             HideChart();
             HideWindowBar();
             AddRow(EmptyState());
-            hasLive = false;
         }
 
         IReadOnlyList<LocationStay> chartStays = ChartStays(now);
         DateTimeOffset windowStart = now - _chartWindow;
-        bool showChart = hasLive || chartStays.Count > 0;
-        if (showChart)
+        if (enabled && chartStays.Count > 0)
         {
             EnsureWindowBar();
-            AddRow(Kicker("Период"));
             AddRow(_windowBar!);
             _chart ??= new LocationSpanChart();
             _chart.Bind(chartStays, now, windowStart);
             AddRow(_chart);
+            _frequency ??= new LocationFrequencyChart();
+            _frequency.Visible = true;
+            _frequency.Bind(chartStays, _history.Revision, now, _chartWindow);
+            AddRow(_frequency);
         }
         else
         {
             HideChart();
             HideWindowBar();
-        }
-
-        if (hasLive)
-        {
-            AddRow(Kicker(_live.Fresh ? "Сейчас" : "Последняя известная"));
-            AddRow(StayRow(LiveStay(now), now, live: true));
-        }
-
-        IReadOnlyList<LocationStay> past = _history.Past;
-        if (past.Count > 0)
-        {
-            AddRow(Kicker("Раньше"));
-            foreach (LocationStay stay in past)
+            if (_frequency is not null)
             {
-                AddRow(StayRow(stay, now, live: false));
+                _frequency.Visible = false;
             }
         }
+
+        _historyRows = BuildHistoryRows(chartStays, windowStart, enabled);
+        if (_historyRows.Length > 0)
+            AddRow(HistoryHeading());
 
         _stack.ResumeLayout(true);
         ResumeLayout(true);
@@ -199,6 +244,151 @@ internal sealed class LocationTimelinePanel : Panel
     }
 
     private void AddRow(Control child) => _stack.Controls.Add(child);
+
+    private Control HistoryHeading()
+    {
+        return new Label
+        {
+            AutoSize = true,
+            Text = "История смен",
+            Font = UiTheme.BodyBold,
+            ForeColor = UiTheme.Ink,
+            BackColor = UiTheme.Surface,
+            Margin = new Padding(0, 10, 0, 2),
+            Padding = Padding.Empty,
+            UseMnemonic = false,
+            AccessibleName = "locationHistoryHeading"
+        };
+    }
+
+    private HistoryRow[] BuildHistoryRows(IReadOnlyList<LocationStay> stays, DateTimeOffset visibleSince, bool enabled)
+    {
+        var rows = new List<HistoryRow>(stays.Count);
+        for (int i = stays.Count - 1; i >= 0; i--)
+        {
+            LocationStay stay = stays[i];
+            if (!GeoCountryParsers.IsIso3166Alpha2(stay.Iso) || stay.StartedUtc == default)
+                continue;
+
+            bool current = i == stays.Count - 1 && stay.EndedUtc is null && enabled;
+            if (stay.EndedUtc is null && !current)
+                continue;
+            if (current || stay.EndedUtc is null || stay.EndedUtc > visibleSince)
+                rows.Add(new HistoryRow(stay, current));
+        }
+
+        return rows.ToArray();
+    }
+
+    private void DrawVirtualHistory(Graphics graphics, Rectangle clip)
+    {
+        if (_historyRows.Length == 0 || _historyStartY <= 0)
+            return;
+
+        int pad = Scale(12);
+        int rowAreaTop = _historyStartY + AutoScrollPosition.Y;
+        int rowTop = rowAreaTop + HistoryHeaderHeight;
+        int rowsHeight = checked(_historyRows.Length * _historyRowHeight);
+        int totalHeight = HistoryHeaderHeight + rowsHeight + pad;
+        int left = Scale(0);
+        int width = Math.Max(1, Math.Min(ClientSize.Width, VisibleWidth()));
+        Rectangle card = new(left, rowAreaTop, width, totalHeight);
+        Rectangle visible = Rectangle.Intersect(card, clip);
+        if (visible.Width <= 0 || visible.Height <= 0)
+            return;
+
+        using var cardFill = new SolidBrush(UiTheme.Card);
+        graphics.FillRectangle(cardFill, visible);
+        using var border = new Pen(UiTheme.Border);
+        graphics.DrawLine(border, card.Left, card.Top, card.Right - 1, card.Top);
+        graphics.DrawLine(border, card.Left, card.Top, card.Left, card.Bottom - 1);
+        graphics.DrawLine(border, card.Right - 1, card.Top, card.Right - 1, card.Bottom - 1);
+        if (clip.Bottom >= card.Bottom - 1)
+            graphics.DrawLine(border, card.Left, card.Bottom - 1, card.Right - 1, card.Bottom - 1);
+
+        int first = Math.Clamp((clip.Top - rowTop) / _historyRowHeight, 0, _historyRows.Length - 1);
+        int last = Math.Clamp((clip.Bottom - rowTop) / _historyRowHeight, 0, _historyRows.Length - 1);
+        DateTimeOffset now = _time.GetUtcNow();
+        for (int index = first; index <= last; index++)
+        {
+            int y = rowTop + index * _historyRowHeight;
+            DrawHistoryRow(graphics, new Rectangle(card.Left + pad, y, card.Width - pad * 2, _historyRowHeight), _historyRows[index], now);
+        }
+    }
+
+    private void DrawHistoryRow(Graphics graphics, Rectangle bounds, HistoryRow row, DateTimeOffset now)
+    {
+        if (row.Current)
+        {
+            using var currentFill = new SolidBrush(UiTheme.Brand50);
+            graphics.FillRectangle(currentFill, bounds);
+        }
+
+        int edge = Scale(28);
+        int insetX = Scale(2);
+        int badgeY = bounds.Top + (bounds.Height - edge) / 2;
+        Rectangle badge = new(bounds.Left + insetX, badgeY, edge, edge);
+        UiDrawing.PaintRounded(graphics, badge, Scale(6), LocationChartPalette.Fill(row.Stay.Iso), LocationChartPalette.Fill(row.Stay.Iso));
+        TextRenderer.DrawText(graphics, row.Stay.Iso, UiTheme.IsoMono, badge, LocationChartPalette.Ink(row.Stay.Iso), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+
+        int x = badge.Right + Scale(10);
+        int rightInset = Scale(4);
+        int durationWidth = Scale(86);
+        int available = Math.Max(1, bounds.Right - rightInset - x);
+        durationWidth = Math.Min(durationWidth, Math.Max(Scale(58), available / 3));
+        int nameWidth = Math.Min(Scale(160), Math.Max(Scale(90), available / 4));
+        int gap = Scale(12);
+        int timeWidth = Math.Max(1, available - nameWidth - durationWidth - gap * 2);
+        string country = GeoCountryNames.Russian(row.Stay.Iso);
+        string when = row.Current
+            ? (_live.Fresh ? "Сейчас" : "Последняя известная") + " · с " + LocationCopy.When(row.Stay.StartedUtc)
+            : LocationCopy.Range(row.Stay.StartedUtc, row.Stay.EndedUtc ?? now);
+        string duration = LocationCopy.Duration(LocationCopy.Elapsed(row.Stay, now));
+        int textHeight = Scale(22);
+        int textY = bounds.Top + (bounds.Height - textHeight) / 2;
+        TextRenderer.DrawText(graphics, country, UiTheme.BodyBold, new Rectangle(x, textY, nameWidth, textHeight), LocationChartPalette.HistoryLabel(row.Stay.Iso), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        int whenX = x + nameWidth + gap;
+        TextRenderer.DrawText(graphics, when, UiTheme.Caption, new Rectangle(whenX, textY, timeWidth, textHeight), UiTheme.Muted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        int durationX = whenX + timeWidth + gap;
+        TextRenderer.DrawText(graphics, duration, UiTheme.Caption, new Rectangle(durationX, textY, durationWidth, textHeight), UiTheme.Ink, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+
+        using var separator = new Pen(UiTheme.Border);
+        graphics.DrawLine(separator, bounds.Left, bounds.Bottom - 1, bounds.Right, bounds.Bottom - 1);
+    }
+
+    private HistoryRow? HistoryRowAt(Point point)
+    {
+        if (_historyRows.Length == 0)
+            return null;
+
+        int virtualY = point.Y - AutoScrollPosition.Y;
+        int rowStart = _historyStartY + HistoryHeaderHeight;
+        if (virtualY < rowStart)
+            return null;
+        int index = (virtualY - rowStart) / _historyRowHeight;
+        return (uint)index < (uint)_historyRows.Length ? _historyRows[index] : null;
+    }
+
+    private static string HistoryTip(HistoryRow row, DateTimeOffset now)
+    {
+        string country = GeoCountryNames.Russian(row.Stay.Iso);
+        string when = row.Current
+            ? "Текущая страна · с " + LocationCopy.When(row.Stay.StartedUtc)
+            : LocationCopy.Range(row.Stay.StartedUtc, row.Stay.EndedUtc ?? now);
+        return $"{country} · {row.Stay.Iso}\n{when}\n{LocationCopy.Duration(LocationCopy.Elapsed(row.Stay, now))}";
+    }
+
+    private void InvalidateCurrentHistoryRow()
+    {
+        if (_historyRows.Length == 0 || !_historyRows[0].Current)
+            return;
+
+        int y = _historyStartY + AutoScrollPosition.Y + HistoryHeaderHeight;
+        Rectangle row = new(0, y, ClientSize.Width, _historyRowHeight);
+        Rectangle visible = Rectangle.Intersect(ClientRectangle, row);
+        if (visible.Height > 0)
+            Invalidate(visible);
+    }
 
     private int VisibleWidth()
     {
@@ -248,6 +438,7 @@ internal sealed class LocationTimelinePanel : Panel
     private void LayoutStack(int width)
     {
         _stack.Width = width;
+        _historyRowHeight = Scale(44);
         int y = _stack.Padding.Top;
         int inner = Math.Max(0, width - _stack.Padding.Horizontal);
         foreach (Control child in _stack.Controls)
@@ -265,34 +456,22 @@ internal sealed class LocationTimelinePanel : Panel
             y += child.Margin.Vertical + height;
         }
 
-        int total = y + _stack.Padding.Bottom;
-        if (_stack.Height != total)
+        int topHeight = y + _stack.Padding.Bottom;
+        if (_stack.Height != topHeight)
         {
-            _stack.Height = total;
+            _stack.Height = topHeight;
         }
 
-        var min = new Size(0, total);
+        _historyStartY = topHeight;
+        long contentHeight = (long)topHeight + (_historyRows.Length == 0
+            ? 0
+            : HistoryHeaderHeight + (long)_historyRows.Length * _historyRowHeight + Scale(12));
+        int totalHeight = (int)Math.Clamp(contentHeight, 0, int.MaxValue);
+        var min = new Size(0, totalHeight);
         if (AutoScrollMinSize != min)
         {
             AutoScrollMinSize = min;
         }
-    }
-
-    private Control StayRow(LocationStay stay, DateTimeOffset now, bool live)
-    {
-        string name = GeoCountryParsers.IsIso3166Alpha2(stay.Iso)
-            ? GeoCountryNames.Russian(stay.Iso)
-            : "Неизвестно";
-        string when = live
-            ? (stay.StartedUtc == default ? "" : "с " + LocationCopy.When(stay.StartedUtc))
-            : LocationCopy.Range(stay.StartedUtc, stay.EndedUtc ?? now);
-        var card = new StayCard(stay.Iso, name, when, DurationLine(stay, now), live);
-        if (live)
-        {
-            _liveDuration = card.Duration;
-        }
-
-        return card;
     }
 
     private void HideChart()
@@ -362,17 +541,26 @@ internal sealed class LocationTimelinePanel : Panel
         LocationStay live = LiveStay(now);
         if (live.StartedUtc == default || !GeoCountryParsers.IsIso3166Alpha2(live.Iso))
         {
+            if (_live == GeoCountryDisplay.Unconfirmed && stays.Count > 0 && stays[^1].EndedUtc is null)
+                stays.RemoveAt(stays.Count - 1);
             return stays;
         }
 
-        if (stays.Count > 0
-            && stays[^1].Iso == live.Iso
-            && stays[^1].EndedUtc is null)
+        if (stays.Count > 0 && stays[^1].EndedUtc is null)
         {
-            return stays;
+            LocationStay previous = stays[^1];
+            if (string.Equals(previous.Iso, live.Iso, StringComparison.OrdinalIgnoreCase))
+                return stays;
+
+            DateTimeOffset transition = live.StartedUtc > previous.StartedUtc ? live.StartedUtc : now;
+            if (transition < previous.StartedUtc)
+                transition = previous.StartedUtc;
+            stays[^1] = previous with { EndedUtc = transition };
+            live = live with { StartedUtc = transition };
         }
 
-        stays.Add(live);
+        if (stays.Count == 0 || stays[^1].StartedUtc != live.StartedUtc || !string.Equals(stays[^1].Iso, live.Iso, StringComparison.OrdinalIgnoreCase))
+            stays.Add(live);
         return stays;
     }
 
@@ -393,15 +581,9 @@ internal sealed class LocationTimelinePanel : Panel
         return new LocationStay("??", default, null);
     }
 
-    private static string DurationLine(LocationStay stay, DateTimeOffset now)
-    {
-        if (stay.StartedUtc == default)
-        {
-            return "Длительность: —";
-        }
+    private int Scale(int logical) => LocationChartCardChrome.Scale(this, logical);
 
-        return "Длительность: " + LocationCopy.Duration(LocationCopy.Elapsed(stay, now));
-    }
+    private readonly record struct HistoryRow(LocationStay Stay, bool Current);
 
     private static GeoCountryDisplay LiveFromHistory(LocationHistory history)
         => history.Current is LocationStay current
@@ -446,182 +628,6 @@ internal sealed class LocationTimelinePanel : Panel
             UseMnemonic = false
         };
 
-    private static string Fingerprint(LocationHistory history, GeoCountryDisplay live)
-        => live.Letters + "|" + string.Join('|', history.Stays.Select(stay =>
-            stay.Iso + stay.StartedUtc.UtcTicks + (stay.EndedUtc?.UtcTicks.ToString() ?? "-")));
-}
-
-internal sealed class IsoChip : Control
-{
-    public const int Edge = 32;
-
-    public IsoChip(string iso)
-    {
-        ApplyEdge(Edge);
-        Text = iso;
-        Font = UiTheme.IsoMono;
-        ForeColor = UiTheme.OnBrand;
-        BackColor = UiTheme.Card;
-        TabStop = false;
-        AccessibleName = "isoChip";
-        DoubleBuffered = true;
-        SetStyle(
-            ControlStyles.UserPaint
-            | ControlStyles.AllPaintingInWmPaint
-            | ControlStyles.OptimizedDoubleBuffer
-            | ControlStyles.ResizeRedraw,
-            true);
-    }
-
-    public override Size GetPreferredSize(Size proposedSize) => Size;
-
-    protected override void OnHandleCreated(EventArgs e)
-    {
-        base.OnHandleCreated(e);
-        ApplyEdge(LogicalToDeviceUnits(Edge));
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        Graphics g = e.Graphics;
-        g.Clear(BackColor);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        Rectangle box = new(0, 0, Math.Max(0, Width - 1), Math.Max(0, Height - 1));
-        UiDrawing.PaintRounded(g, box, 6, UiTheme.Brand950, UiTheme.Brand950);
-        TextRenderer.DrawText(
-            g,
-            Text,
-            Font,
-            ClientRectangle,
-            ForeColor,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
-    }
-
-    private void ApplyEdge(int edge)
-    {
-        var size = new Size(edge, edge);
-        MinimumSize = size;
-        MaximumSize = size;
-        Size = size;
-    }
-}
-
-internal sealed class StayCard : Panel
-{
-    private const TextFormatFlags TextFlags =
-        TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl;
-
-    private readonly IsoChip _chip;
-    private readonly Label _title;
-    private readonly Label _when;
-
-    public StayCard(string iso, string name, string when, string duration, bool live)
-    {
-        Margin = new Padding(0, 0, 0, 8);
-        BackColor = UiTheme.Surface;
-        DoubleBuffered = true;
-        SetStyle(
-            ControlStyles.UserPaint
-            | ControlStyles.AllPaintingInWmPaint
-            | ControlStyles.OptimizedDoubleBuffer
-            | ControlStyles.ResizeRedraw,
-            true);
-        _chip = new IsoChip(iso) { Margin = new Padding(0, 0, 12, 0) };
-        _title = TextLine(name, UiTheme.BodyBold, UiTheme.Ink);
-        _when = TextLine(when, UiTheme.Caption, UiTheme.Muted);
-        Duration = TextLine(duration, UiTheme.Body, UiTheme.Muted);
-        Duration.Margin = new Padding(0, 6, 0, 0);
-        if (live)
-        {
-            Duration.AccessibleName = "currentLocationDuration";
-        }
-
-        Controls.Add(_chip);
-        Controls.Add(_title);
-        Controls.Add(_when);
-        Controls.Add(Duration);
-        Padding = new Padding(14, 12, 14, 12);
-    }
-
-    public Label Duration { get; }
-
-    public override Size GetPreferredSize(Size proposedSize)
-    {
-        int width = proposedSize.Width > 0 ? proposedSize.Width : Math.Max(Width, 240);
-        int textWidth = TextColumnWidth(width);
-        int textHeight = Measure(_title, textWidth).Height
-            + Measure(_when, textWidth).Height
-            + Measure(Duration, textWidth).Height
-            + Duration.Margin.Vertical;
-        int chipHeight = _chip.GetPreferredSize(Size.Empty).Height;
-        return new Size(width, Padding.Vertical + Math.Max(chipHeight, textHeight));
-    }
-
-    protected override void OnLayout(LayoutEventArgs levent)
-    {
-        if (!IsHandleCreated && Controls.Count < 4)
-        {
-            return;
-        }
-
-        Size chip = _chip.GetPreferredSize(Size.Empty);
-        int x = Padding.Left;
-        int y = Padding.Top;
-        _chip.SetBounds(x, y, chip.Width, chip.Height);
-        x += chip.Width + _chip.Margin.Horizontal;
-        int textWidth = Math.Max(32, ClientSize.Width - Padding.Right - x);
-        int titleHeight = Measure(_title, textWidth).Height;
-        int whenHeight = Measure(_when, textWidth).Height;
-        int durationHeight = Measure(Duration, textWidth).Height;
-        _title.SetBounds(x, y, textWidth, titleHeight);
-        y += titleHeight;
-        _when.SetBounds(x, y, textWidth, whenHeight);
-        y += whenHeight + Duration.Margin.Top;
-        Duration.SetBounds(x, y, textWidth, durationHeight);
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        Graphics g = e.Graphics;
-        g.Clear(Parent?.BackColor ?? UiTheme.Surface);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        Rectangle box = new(0, 0, Math.Max(0, Width - 1), Math.Max(0, Height - 1));
-        UiDrawing.PaintRounded(g, box, UiTheme.CardRadius, UiTheme.Card, UiTheme.Border);
-    }
-
-    private int TextColumnWidth(int cardWidth)
-    {
-        int chip = _chip.GetPreferredSize(Size.Empty).Width + _chip.Margin.Horizontal;
-        return Math.Max(32, cardWidth - Padding.Horizontal - chip);
-    }
-
-    private static Label TextLine(string text, Font font, Color color)
-        => new()
-        {
-            AutoSize = false,
-            Text = text,
-            Font = font,
-            ForeColor = color,
-            BackColor = UiTheme.Card,
-            Margin = Padding.Empty,
-            Padding = Padding.Empty,
-            UseMnemonic = false
-        };
-
-    private static Size Measure(Label label, int width)
-    {
-        if (string.IsNullOrEmpty(label.Text) || width <= 0)
-        {
-            return new Size(width, label.Font.Height);
-        }
-
-        Size text = TextRenderer.MeasureText(
-            label.Text,
-            label.Font,
-            new Size(width, int.MaxValue),
-            TextFlags);
-        return new Size(width, Math.Max(text.Height, label.Font.Height));
-    }
 }
 
 internal sealed class RoundedCard : Panel

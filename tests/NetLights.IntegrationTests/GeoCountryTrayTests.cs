@@ -48,12 +48,20 @@ public sealed class GeoCountryTrayTests
             File.WriteAllText(SettingsStore.SettingsPath, """{"autoStart":true,"autoUpdateEnabled":true,"settingsVersion":1}""");
             AppSettings loaded = SettingsStore.Load();
             Assert.False(loaded.GeoCountryIconEnabled);
+            Assert.False(loaded.GeoCountryDetectionEnabled);
+            Assert.True(loaded.EmphasizeShortStatuses);
+            Assert.Equal(UiTheme.WindowDefaultWidth, loaded.WindowWidth);
+            Assert.Equal(UiTheme.WindowDefaultHeight, loaded.WindowHeight);
             Assert.Equal((int)GeoCountryLetterScale.Regular, loaded.GeoCountryLetterSize);
             loaded.GeoCountryIconEnabled = true;
+            loaded.GeoCountryDetectionEnabled = true;
+            loaded.EmphasizeShortStatuses = true;
             loaded.GeoCountryLetterSize = (int)GeoCountryLetterScale.Compact;
             SettingsStore.Save(loaded);
             AppSettings again = SettingsStore.Load();
             Assert.True(again.GeoCountryIconEnabled);
+            Assert.True(again.GeoCountryDetectionEnabled);
+            Assert.True(again.EmphasizeShortStatuses);
             Assert.Equal((int)GeoCountryLetterScale.Compact, again.GeoCountryLetterSize);
         }
         finally
@@ -70,7 +78,75 @@ public sealed class GeoCountryTrayTests
     }
 
     [Fact]
-    public void SettingsStore_BumpsShortSavedHeightToDefault()
+    public void SettingsStore_MigratesLegacyDefaultWindowSizeAndPreservesCustomSize()
+    {
+        var legacyDefault = new AppSettings { SettingsVersion = 3, WindowWidth = 1040, WindowHeight = 920 };
+        Assert.True(SettingsStore.MigrateToSettingsVersion4(legacyDefault));
+        Assert.Equal(4, legacyDefault.SettingsVersion);
+        Assert.Equal(UiTheme.WindowDefaultWidth, legacyDefault.WindowWidth);
+        Assert.Equal(UiTheme.WindowDefaultHeight, legacyDefault.WindowHeight);
+        Assert.Equal(int.MinValue, legacyDefault.WindowX);
+        Assert.Equal(int.MinValue, legacyDefault.WindowY);
+        Assert.True(SettingsStore.MigrateToSettingsVersion5(legacyDefault));
+        Assert.Equal(5, legacyDefault.SettingsVersion);
+        Assert.True(legacyDefault.EmphasizeShortStatuses);
+        Assert.True(SettingsStore.MigrateToSettingsVersion6(legacyDefault));
+        Assert.Equal(6, legacyDefault.SettingsVersion);
+        Assert.Equal(UiTheme.WindowDefaultWidth, legacyDefault.WindowWidth);
+        Assert.Equal(UiTheme.WindowDefaultHeight, legacyDefault.WindowHeight);
+
+        var custom = new AppSettings { SettingsVersion = 3, WindowX = 80, WindowY = 80, WindowWidth = 1280, WindowHeight = 900 };
+        Assert.True(SettingsStore.MigrateToSettingsVersion4(custom));
+        Assert.Equal(1280, custom.WindowWidth);
+        Assert.Equal(900, custom.WindowHeight);
+        Assert.Equal(int.MinValue, custom.WindowX);
+        Assert.Equal(int.MinValue, custom.WindowY);
+        Assert.True(SettingsStore.MigrateToSettingsVersion5(custom));
+        Assert.True(custom.EmphasizeShortStatuses);
+        Assert.True(SettingsStore.MigrateToSettingsVersion6(custom));
+        Assert.Equal(1280, custom.WindowWidth);
+        Assert.Equal(900, custom.WindowHeight);
+
+        var previousReleaseSettings = new AppSettings { SettingsVersion = 4, WindowWidth = 1040, WindowHeight = 920, EmphasizeShortStatuses = false };
+        Assert.True(SettingsStore.MigrateToSettingsVersion5(previousReleaseSettings));
+        Assert.True(previousReleaseSettings.EmphasizeShortStatuses);
+        Assert.True(SettingsStore.MigrateToSettingsVersion6(previousReleaseSettings));
+        Assert.Equal(UiTheme.WindowDefaultWidth, previousReleaseSettings.WindowWidth);
+        Assert.Equal(UiTheme.WindowDefaultHeight, previousReleaseSettings.WindowHeight);
+    }
+
+    [Theory]
+    [InlineData(900, 800)]
+    [InlineData(1360, 1177)]
+    public void SettingsStore_MigratesOldAndRecentlyApprovedWindowSizes(int width, int height)
+    {
+        var settings = new AppSettings { SettingsVersion = 5, WindowWidth = width, WindowHeight = height };
+
+        Assert.True(SettingsStore.MigrateToSettingsVersion6(settings));
+
+        Assert.Equal(UiTheme.WindowDefaultWidth, settings.WindowWidth);
+        Assert.Equal(UiTheme.WindowDefaultHeight, settings.WindowHeight);
+        Assert.Equal(6, settings.SettingsVersion);
+        Assert.False(SettingsStore.MigrateToSettingsVersion6(settings));
+    }
+
+    [Theory]
+    [InlineData(1400, 1200)]
+    [InlineData(1421, 1273)]
+    public void SettingsStore_MigratesPreviousDefaultToRoundedCurrentWindowSize(int width, int height)
+    {
+        var settings = new AppSettings { SettingsVersion = 6, WindowWidth = width, WindowHeight = height };
+
+        Assert.True(SettingsStore.MigrateToSettingsVersion7(settings));
+
+        Assert.Equal(1450, settings.WindowWidth);
+        Assert.Equal(1300, settings.WindowHeight);
+        Assert.Equal(7, settings.SettingsVersion);
+        Assert.False(SettingsStore.MigrateToSettingsVersion7(settings));
+    }
+
+    [Fact]
+    public void SettingsStore_ResetsTooShortHeightAndPreservesCustomWidth()
     {
         string previous = SettingsStore.RootDirectory;
         string temp = Path.Combine(Path.GetTempPath(), "net-lights-size-" + Guid.NewGuid().ToString("N"));
@@ -78,9 +154,9 @@ public sealed class GeoCountryTrayTests
         try
         {
             SettingsStore.RootDirectory = temp;
-            File.WriteAllText(SettingsStore.SettingsPath, """{"windowWidth":1040,"windowHeight":800}""");
+            File.WriteAllText(SettingsStore.SettingsPath, """{"windowWidth":1040,"windowHeight":400}""");
             AppSettings loaded = SettingsStore.Load();
-            Assert.Equal(UiTheme.WindowDefaultWidth, loaded.WindowWidth);
+            Assert.Equal(1040, loaded.WindowWidth);
             Assert.Equal(UiTheme.WindowDefaultHeight, loaded.WindowHeight);
         }
         finally
@@ -100,7 +176,7 @@ public sealed class GeoCountryTrayTests
         };
         form.Reveal();
         FindButton(form, "settingsTab").PerformClick();
-        form.BindSettings(true, true, true, GeoCountryLetterScale.Regular, null);
+        form.BindSettings(true, true, true, GeoCountryLetterScale.Regular, null, geoCountryDetection: true);
         int calls = 0;
         bool last = true;
         form.GeoCountryIconChanged = value =>
@@ -128,9 +204,9 @@ public sealed class GeoCountryTrayTests
         Assert.Equal(1, calls);
         Assert.False(last);
         Assert.False(scale.Visible);
-        form.BindSettings(true, true, false, GeoCountryLetterScale.Regular, null);
+        form.BindSettings(true, true, false, GeoCountryLetterScale.Regular, null, geoCountryDetection: true);
         Assert.False(scale.Visible);
-        form.BindSettings(true, true, true, GeoCountryLetterScale.Regular, null);
+        form.BindSettings(true, true, true, GeoCountryLetterScale.Regular, null, geoCountryDetection: true);
         Assert.True(scale.Visible);
     }
 
@@ -162,6 +238,60 @@ public sealed class GeoCountryTrayTests
         Assert.Equal(1, opens);
         host.Restore();
         Assert.True(host.Visible);
+    }
+
+    [Fact]
+    public async Task Host_DetectionContinuesWhenTrayIconIsHidden()
+    {
+        var source = new FakeSource();
+        using var host = new GeoCountryTrayHost(() => { }, source, TimeProvider.System, ui: null);
+        host.SetDetectionEnabled(true);
+        await WaitUntil(() => host.Current.Letters == "DE");
+        host.SetTrayIconEnabled(false);
+        int calls = source.SelfCount;
+        await Task.Delay(80);
+
+        Assert.False(host.Visible);
+        Assert.True(host.DetectionEnabled);
+        host.NotifyNetworkOrResume();
+        await WaitUntil(() => source.SelfCount > calls);
+
+        host.SetDetectionEnabled(false);
+        Assert.False(host.Visible);
+        Assert.False(host.DetectionEnabled);
+    }
+
+    [Fact]
+    public void Settings_DetectionControlsTrayOptionAndClearsItWhenDisabled()
+    {
+        using var form = new StatusForm
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(-32000, -32000)
+        };
+        form.Reveal();
+        FindButton(form, "settingsTab").PerformClick();
+        form.BindSettings(true, true, false, GeoCountryLetterScale.Regular, null, geoCountryDetection: true);
+        CheckBox detection = FindCheckBox(form, "geoCountryDetection");
+        CheckBox icon = FindCheckBox(form, "geoCountryIcon");
+        Assert.True(detection.Checked);
+        Assert.True(icon.Enabled);
+
+        int detectionChanges = 0;
+        form.GeoCountryDetectionChanged = _ => detectionChanges++;
+        detection.Checked = false;
+        Assert.Equal(1, detectionChanges);
+        Assert.False(icon.Enabled);
+        Assert.False(icon.Checked);
+
+        detection.Checked = true;
+        Assert.True(icon.Enabled);
+        icon.Checked = true;
+        Assert.True(icon.Checked);
+        detection.Checked = false;
+        Assert.False(icon.Checked);
+        Assert.False(icon.Enabled);
+        Assert.Equal(3, detectionChanges);
     }
 
     private static int CountOpaque(Bitmap bmp)

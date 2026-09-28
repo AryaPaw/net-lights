@@ -26,8 +26,8 @@ internal static class UiTheme
     public const int ButtonHeight = 36;
     public const int TabHeight = 40;
     public const int PagePad = 20;
-    public const int WindowDefaultWidth = 1040;
-    public const int WindowDefaultHeight = 920;
+    public const int WindowDefaultWidth = 1450;
+    public const int WindowDefaultHeight = 1300;
     public const int WindowMinWidth = 760;
     public const int WindowMinHeight = 640;
 

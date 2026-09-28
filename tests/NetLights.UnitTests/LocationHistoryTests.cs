@@ -127,16 +127,15 @@ public sealed class LocationHistoryTests
     }
 
     [Fact]
-    public void Prune_DropsClosedStaysOlderThanThreeDays()
+    public void Prune_KeepsLatestExpiredStayAsAnchor()
     {
         DateTimeOffset now = DateTimeOffset.Parse("2026-09-20T12:00:00Z");
         var log = new LocationHistory([
-            new LocationStay("DE", now.AddDays(-5), now.AddDays(-4)),
+            new LocationStay("DE", now.AddDays(-18), now.AddDays(-17)),
             new LocationStay("NL", now.AddHours(-2), null)
         ]);
         log.Prune(now);
-        Assert.Single(log.Stays);
-        Assert.Equal("NL", log.Stays[0].Iso);
+        Assert.Equal(new[] { "DE", "NL" }, log.Stays.Select(stay => stay.Iso));
     }
 
     [Fact]
@@ -145,12 +144,31 @@ public sealed class LocationHistoryTests
         DateTimeOffset now = DateTimeOffset.Parse("2026-09-20T12:00:00Z");
         DateTimeOffset cutoff = now - LocationHistory.Retention;
         var log = new LocationHistory([
-            new LocationStay("FI", now.AddDays(-5), now.AddDays(-1))
+            new LocationStay("FI", now.AddDays(-16), now.AddDays(-1))
         ]);
         log.Prune(now);
         Assert.Single(log.Stays);
         Assert.Equal(cutoff, log.Stays[0].StartedUtc);
         Assert.Equal(now.AddDays(-1), log.Stays[0].EndedUtc);
+    }
+
+    [Fact]
+    public void Prune_KeepsOneExpiredStayAsTransitionAnchor()
+    {
+        DateTimeOffset now = DateTimeOffset.Parse("2026-09-20T12:00:00Z");
+        var history = new LocationHistory([
+            new LocationStay("DE", now.AddDays(-18), now.AddDays(-17)),
+            new LocationStay("NL", now.AddDays(-16), now.AddDays(-15)),
+            new LocationStay("FR", now.AddDays(-13), now.AddDays(-12)),
+            new LocationStay("FI", now.AddDays(-2), null)
+        ]);
+
+        history.Prune(now);
+
+        Assert.Equal(new[] { "FR", "FI" }, history.Stays.Select(stay => stay.Iso));
+        LocationFrequencyModel model = LocationFrequencyLayout.Build(history.Stays, now, TimeSpan.FromDays(7));
+        Assert.Equal(1, model.ChangeCount);
+        Assert.Equal(1, model.ChangesPerInterval.Sum());
     }
 
     [Theory]

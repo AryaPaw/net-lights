@@ -9,7 +9,35 @@ namespace NetLights.IntegrationTests;
 public sealed class StateHistoryAndExportTests
 {
     [Fact]
-    public void DeleteLegacyStateHistory_RemovesJsonlAndTemp()
+    public async Task AvailabilityHistoryStore_AsyncSaveUsesStableSnapshot()
+    {
+        string previous = SettingsStore.RootDirectory;
+        string temp = Path.Combine(Path.GetTempPath(), "nl-state-history-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            SettingsStore.RootDirectory = temp;
+            DateTimeOffset t = DateTimeOffset.UtcNow;
+            var history = new AvailabilityHistory();
+            history.Observe(Snapshot(GroupAvailability.Online, GroupAvailability.Unknown, false), t);
+            AvailabilityHistorySnapshot snapshot = AvailabilityHistoryStore.Snapshot(history);
+            history.Observe(Snapshot(GroupAvailability.Offline, GroupAvailability.Unknown, false), t.AddMinutes(1));
+            AvailabilityHistorySnapshot newerSnapshot = AvailabilityHistoryStore.Snapshot(history);
+
+            await AvailabilityHistoryStore.SaveAsync(newerSnapshot);
+            await AvailabilityHistoryStore.SaveAsync(snapshot);
+
+            Assert.Equal(3, AvailabilityHistoryStore.Load().Spans.Count);
+        }
+        finally
+        {
+            SettingsStore.RootDirectory = previous;
+            Directory.Delete(temp, true);
+        }
+    }
+
+    [Fact]
+    public void Load_MigratesLegacyStateHistoryAndPreservesOriginalFile()
     {
         string previous = SettingsStore.RootDirectory;
         string temp = Path.Combine(Path.GetTempPath(), "nl-hist-" + Guid.NewGuid().ToString("N"));
@@ -17,11 +45,53 @@ public sealed class StateHistoryAndExportTests
         try
         {
             SettingsStore.RootDirectory = temp;
-            File.WriteAllText(Path.Combine(temp, "state-history.jsonl"), "{}\n");
-            File.WriteAllText(Path.Combine(temp, "state-history.jsonl.tmp"), "x");
-            SettingsStore.DeleteLegacyStateHistory();
-            Assert.False(File.Exists(Path.Combine(temp, "state-history.jsonl")));
-            Assert.False(File.Exists(Path.Combine(temp, "state-history.jsonl.tmp")));
+            DateTimeOffset first = DateTimeOffset.UtcNow.AddHours(-2);
+            DateTimeOffset second = first.AddHours(1);
+            string legacyPath = Path.Combine(temp, "state-history.jsonl");
+            File.WriteAllLines(legacyPath,
+            [
+                $"{{\"utc\":\"{first:O}\",\"ru\":\"Online\",\"world\":\"Offline\"}}",
+                $"{{\"utc\":\"{second:O}\",\"ru\":\"Limited\",\"world\":\"Offline\"}}",
+                $"{{\"utc\":\"{second.AddMinutes(1):O}\",\"ru\":\"Limited\",\"world\":\"Online\"}}"
+            ]);
+
+            AvailabilityHistory history = AvailabilityHistoryStore.Load();
+
+            Assert.Equal(4, history.Spans.Count);
+            Assert.Equal(first, history.Spans.Single(s => s.Group == EndpointGroup.Ru && s.State == GroupAvailability.Online).StartedUtc);
+            Assert.Equal(second, history.Spans.Single(s => s.Group == EndpointGroup.Ru && s.State == GroupAvailability.Online).EndedUtc);
+            Assert.Contains(history.Spans, s => s.Group == EndpointGroup.World && s.State == GroupAvailability.Offline && s.EndedUtc == second.AddMinutes(1));
+            Assert.True(File.Exists(legacyPath));
+            Assert.True(File.Exists(AvailabilityHistoryStore.FilePath));
+            Assert.Equal(history.Spans, AvailabilityHistoryStore.Load().Spans);
+        }
+        finally
+        {
+            SettingsStore.RootDirectory = previous;
+            Directory.Delete(temp, true);
+        }
+    }
+
+    [Fact]
+    public void Load_LegacyFallbackDoesNotOverwriteUnreadableAvailabilityHistory()
+    {
+        string previous = SettingsStore.RootDirectory;
+        string temp = Path.Combine(Path.GetTempPath(), "nl-state-corrupt-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            SettingsStore.RootDirectory = temp;
+            string currentPath = AvailabilityHistoryStore.FilePath;
+            File.WriteAllText(currentPath, "keep this unreadable file");
+            DateTimeOffset now = DateTimeOffset.UtcNow.AddHours(-1);
+            File.WriteAllText(
+                Path.Combine(temp, "state-history.jsonl"),
+                $"{{\"utc\":\"{now:O}\",\"ru\":\"Online\",\"world\":\"Unknown\"}}\n");
+
+            AvailabilityHistory history = AvailabilityHistoryStore.Load();
+
+            Assert.Equal(2, history.Spans.Count);
+            Assert.Equal("keep this unreadable file", File.ReadAllText(currentPath));
         }
         finally
         {
@@ -118,4 +188,7 @@ public sealed class StateHistoryAndExportTests
             null,
             false);
     }
+
+    private static MonitorSnapshot Snapshot(GroupAvailability ru, GroupAvailability world, bool paused)
+        => new(1, DateTimeOffset.UtcNow, 1, new GroupSnapshot(EndpointGroup.Ru, ru, "", null, false, []), new GroupSnapshot(EndpointGroup.World, world, "", null, false, []), true, null, false, null, paused);
 }

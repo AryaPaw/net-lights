@@ -17,6 +17,44 @@ public sealed class SchedulerTests
     }
 
     [Fact]
+    public void Tick_PublishesUiHeartbeatAtBoundedRate()
+    {
+        var runner = new VirtualRunner();
+        _ = runner.Kernel.Tick();
+
+        runner.Time.Advance(TimeSpan.FromMilliseconds(50));
+        IReadOnlyList<WorkItem> quietTick = runner.Kernel.Tick();
+        Assert.DoesNotContain(quietTick, item => item.Kind == WorkKind.PublishSnapshot);
+
+        runner.Time.Advance(MonitorConstants.UiHeartbeat - TimeSpan.FromMilliseconds(50));
+        IReadOnlyList<WorkItem> heartbeat = runner.Kernel.Tick();
+        Assert.Contains(heartbeat, item => item.Kind == WorkKind.PublishSnapshot);
+    }
+
+    [Fact]
+    public void ApplyObservation_PublishesRealChangeWithoutWaitingForHeartbeat()
+    {
+        var runner = new VirtualRunner();
+        _ = runner.Kernel.Tick();
+        runner.Time.Advance(TimeSpan.FromMilliseconds(50));
+        EndpointDefinition endpoint = TestPools.Independent()[0];
+        long now = runner.Time.GetTimestamp();
+        EndpointObservation observation = ObservationFactory.Create(
+            endpoint,
+            runner.Kernel.Epoch,
+            1,
+            now,
+            now,
+            ProbeOutcome.Reachable,
+            TimeSpan.FromMilliseconds(1),
+            200);
+
+        IReadOnlyList<WorkItem> work = runner.Kernel.ApplyObservation(observation);
+
+        Assert.Contains(work, item => item.Kind == WorkKind.PublishSnapshot);
+    }
+
+    [Fact]
     public void T02_AllHealthy_NoConfirmStorm()
     {
         var runner = new VirtualRunner();

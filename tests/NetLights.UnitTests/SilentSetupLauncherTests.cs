@@ -24,4 +24,18 @@ public sealed class SilentSetupLauncherTests
     {
         Assert.Throws<ArgumentException>(() => SilentSetupLauncher.BuildCommand(@"C:\Temp\setup.exe & notepad.exe"));
     }
+
+    [Fact]
+    public void InstallerStartsDetachedCommandRunnerSoAppCanExitBeforeSetup()
+    {
+        string setup = @"C:\Temp\NetLights\NetLights-Setup-win-x64-1.0.2.exe";
+        System.Diagnostics.ProcessStartInfo start = CmdSilentSetupInstaller.CreateStartInfo(setup);
+
+        Assert.Equal(Path.Combine(Environment.SystemDirectory, "cmd.exe"), start.FileName, ignoreCase: true);
+        Assert.Equal(Environment.SystemDirectory, start.WorkingDirectory, ignoreCase: true);
+        Assert.False(start.UseShellExecute);
+        Assert.True(start.CreateNoWindow);
+        Assert.Equal(SilentSetupLauncher.BuildCommand(setup), start.Arguments);
+        Assert.Contains("ping 127.0.0.1 -n 5", start.Arguments, StringComparison.Ordinal);
+    }
 }

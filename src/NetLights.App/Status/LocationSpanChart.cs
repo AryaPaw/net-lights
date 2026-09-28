@@ -5,9 +5,8 @@ namespace NetLights.App;
 
 internal sealed class LocationSpanChart : Control
 {
-    private const int LogicalHeight = 88;
-    private const int PadX = 16;
-    private const int PadTop = 14;
+    private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(30);
+    private const int LogicalHeight = 126;
     private const int AxisHeight = 20;
     private const int TrackHeight = 32;
     private readonly ToolTip _tip = new()
@@ -22,8 +21,16 @@ internal sealed class LocationSpanChart : Control
     private IReadOnlyList<LocationStay> _stays = [];
     private DateTimeOffset _now;
     private DateTimeOffset? _windowStart;
+    private TimeSpan? _windowDuration;
     private LocationChartModel _model = new(default, default, []);
     private string _tipText = "";
+    private DateTimeOffset _lastLayoutAt;
+    private TimeSpan? _laidOutWindow;
+    private int _laidOutWidth = -1;
+    private int _laidOutStayCount = -1;
+    private DateTimeOffset _laidOutLastStart;
+    private DateTimeOffset? _laidOutLastEnd;
+    private string _laidOutLastIso = "";
 
     public LocationSpanChart()
     {
@@ -42,17 +49,34 @@ internal sealed class LocationSpanChart : Control
 
     public void Bind(IReadOnlyList<LocationStay> stays, DateTimeOffset now, DateTimeOffset? windowStart = null)
     {
+        TimeSpan? window = windowStart is DateTimeOffset windowOrigin ? now - windowOrigin : null;
+        bool geometryChanged = window != _laidOutWindow || TrackBounds().Width != _laidOutWidth;
+        bool dataChanged = TailChanged(stays);
         _stays = stays;
         _now = now;
         _windowStart = windowStart;
-        RelayoutModel();
-        AccessibleDescription = Describe();
-        Invalidate();
+        _windowDuration = window;
+        if (geometryChanged || _lastLayoutAt == default || dataChanged)
+        {
+            RelayoutModel();
+            AccessibleDescription = Describe();
+            Invalidate();
+        }
     }
 
     public void Tick(DateTimeOffset now)
     {
         _now = now;
+        if (_windowDuration is TimeSpan duration)
+        {
+            _windowStart = now - duration;
+        }
+
+        if (now >= _lastLayoutAt && now - _lastLayoutAt < RefreshInterval)
+        {
+            return;
+        }
+
         RelayoutModel();
         Invalidate();
     }
@@ -113,8 +137,7 @@ internal sealed class LocationSpanChart : Control
         Graphics g = e.Graphics;
         g.Clear(Parent?.BackColor ?? UiTheme.Surface);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        Rectangle card = new(0, 0, Math.Max(0, Width - 1), Math.Max(0, Height - 1));
-        UiDrawing.PaintRounded(g, card, UiTheme.CardRadius, UiTheme.Card, UiTheme.Border);
+        LocationChartCardChrome.Paint(g, this, "История смен страны");
 
         Rectangle track = TrackBounds();
         if (track.Width <= 0 || track.Height <= 0)
@@ -131,14 +154,14 @@ internal sealed class LocationSpanChart : Control
         g.SmoothingMode = SmoothingMode.None;
         foreach (LocationChartSegment segment in _model.Segments)
         {
-            if (segment.WidthPx <= 0 || segment.Iso is null)
+            if (segment.Iso is null)
             {
                 continue;
             }
 
-            Rectangle box = new(track.X + segment.StartPx, track.Y, segment.WidthPx, track.Height);
-            using SolidBrush fill = new(LocationChartPalette.Fill(segment.Iso));
-            g.FillRectangle(fill, box);
+            int displayWidth = Math.Max(1, segment.WidthPx);
+            Rectangle box = new(track.X + segment.StartPx, track.Y, displayWidth, track.Height);
+            g.FillRectangle(LocationChartPalette.FillBrush(segment.Iso), box);
             if (segment.Live)
             {
                 using Pen live = new(UiTheme.Brand800, 2);
@@ -174,17 +197,47 @@ internal sealed class LocationSpanChart : Control
     {
         Rectangle track = TrackBounds();
         _model = LocationChartLayout.Build(_stays, _now, Math.Max(0, track.Width), windowStart: _windowStart);
+        _lastLayoutAt = _now;
+        _laidOutWindow = _windowStart is DateTimeOffset start ? _now - start : null;
+        _laidOutWidth = track.Width;
+        _laidOutStayCount = _stays.Count;
+        if (_laidOutStayCount > 0)
+        {
+            LocationStay last = _stays[^1];
+            _laidOutLastStart = last.StartedUtc;
+            _laidOutLastEnd = last.EndedUtc;
+            _laidOutLastIso = last.Iso;
+        }
+        else
+        {
+            _laidOutLastStart = default;
+            _laidOutLastEnd = null;
+            _laidOutLastIso = "";
+        }
     }
 
-    private Rectangle TrackBounds()
+    private bool TailChanged(IReadOnlyList<LocationStay> stays)
     {
-        int padX = IsHandleCreated ? LogicalToDeviceUnits(PadX) : PadX;
-        int padTop = IsHandleCreated ? LogicalToDeviceUnits(PadTop) : PadTop;
-        int trackH = IsHandleCreated ? LogicalToDeviceUnits(TrackHeight) : TrackHeight;
+        if (stays.Count != _laidOutStayCount)
+            return true;
+        if (stays.Count == 0)
+            return _laidOutLastStart != default;
+        LocationStay last = stays[^1];
+        return last.StartedUtc != _laidOutLastStart
+            || last.EndedUtc != _laidOutLastEnd
+            || !string.Equals(last.Iso, _laidOutLastIso, StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal Rectangle TrackBounds()
+    {
+        int padLeft = LocationChartCardChrome.Scale(this, LocationChartCardChrome.CardInset);
+        int padRight = LocationChartCardChrome.Scale(this, LocationChartCardChrome.CardInset);
+        int padTop = LocationChartCardChrome.Scale(this, 57);
+        int trackH = LocationChartCardChrome.Scale(this, TrackHeight);
         return new Rectangle(
-            padX,
+            padLeft,
             padTop,
-            Math.Max(0, Width - (padX * 2) - 1),
+            Math.Max(0, Width - padLeft - padRight),
             trackH);
     }
 
@@ -196,28 +249,39 @@ internal sealed class LocationSpanChart : Control
             return null;
         }
 
+        long windowTicks = (_model.HorizonUtc - _model.OriginUtc).Ticks;
+        if (windowTicks <= 0)
+            return null;
+
+        int localX = Math.Clamp(x - track.Left, 0, Math.Max(0, track.Width - 1));
+        long startTicks = windowTicks * localX / track.Width;
+        long endTicks = windowTicks * (localX + 1L) / track.Width;
+        DateTimeOffset pixelStart = _model.OriginUtc + TimeSpan.FromTicks(startTicks);
+        DateTimeOffset pixelEnd = _model.OriginUtc + TimeSpan.FromTicks(Math.Max(startTicks + 1, endTicks));
+
+        LocationChartSegment? best = null;
+        long bestDuration = long.MaxValue;
         foreach (LocationChartSegment segment in _model.Segments)
         {
-            if (segment.Iso is null || segment.WidthPx <= 0)
-            {
+            if (segment.Iso is null || segment.EndUtc <= pixelStart || segment.StartUtc >= pixelEnd)
                 continue;
-            }
 
-            int left = track.X + segment.StartPx;
-            if (x >= left && x < left + segment.WidthPx)
+            long duration = (segment.EndUtc - segment.StartUtc).Ticks;
+            if (duration < bestDuration)
             {
-                return segment;
+                best = segment;
+                bestDuration = duration;
             }
         }
 
-        return null;
+        return best;
     }
 
     private string TipFor(LocationChartSegment segment)
     {
         string iso = segment.Iso ?? "";
         string name = GeoCountryParsers.IsIso3166Alpha2(iso) ? GeoCountryNames.Russian(iso) : iso;
-        TimeSpan elapsed = segment.EndUtc - segment.StartUtc;
+        TimeSpan elapsed = (segment.Live ? _now : segment.EndUtc) - segment.StartUtc;
         if (elapsed < TimeSpan.Zero)
         {
             elapsed = TimeSpan.Zero;
@@ -239,54 +303,108 @@ internal sealed class LocationSpanChart : Control
 
         return string.Join(", ", parts);
     }
+
+    internal DateTimeOffset LastModelBuiltAt => _lastLayoutAt;
+
 }
 
 internal static class LocationChartPalette
 {
-    private static readonly Color[] Fills =
-    [
-        Color.FromArgb(14, 124, 194),
-        Color.FromArgb(196, 112, 32),
-        Color.FromArgb(16, 140, 132),
-        Color.FromArgb(168, 56, 80),
-        Color.FromArgb(72, 132, 64),
-        Color.FromArgb(108, 80, 168),
-        Color.FromArgb(70, 90, 118),
-        Color.FromArgb(200, 92, 64),
-        Color.FromArgb(32, 108, 148),
-        Color.FromArgb(168, 132, 36),
-        Color.FromArgb(176, 72, 112),
-        Color.FromArgb(36, 100, 88)
-    ];
+    private static readonly Dictionary<string, SolidBrush> Brushes = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Color RussiaRed = Color.FromArgb(220, 0, 0);
+    private static readonly IReadOnlyDictionary<string, Color> FamiliarColors = new Dictionary<string, Color>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["FI"] = Color.FromArgb(32, 108, 148),
+        ["DE"] = Color.FromArgb(15, 126, 118),
+        ["FR"] = Color.FromArgb(200, 120, 36),
+        ["NL"] = Color.FromArgb(168, 56, 80),
+        ["PL"] = Color.FromArgb(108, 80, 168),
+        ["RU"] = RussiaRed,
+        ["TR"] = Color.FromArgb(210, 108, 78)
+    };
 
-    public static Color Fill(string iso) => Fills[Slot(iso)];
+    public static Color Fill(string iso)
+    {
+        if (FamiliarColors.TryGetValue(iso, out Color familiar))
+            return familiar;
+
+        uint hash = Hash(iso);
+        int hue = (int)(hash % 360);
+        int saturation = 48 + (int)((hash >> 9) % 13);
+        int lightness = 62 + (int)((hash >> 17) % 7);
+        return HslToColor(hue, saturation / 100d, lightness / 100d);
+    }
+
+    public static Color HistoryLabel(string iso)
+        => string.Equals(iso, "RU", StringComparison.OrdinalIgnoreCase) ? RussiaRed : UiTheme.Ink;
+
+    public static SolidBrush FillBrush(string iso)
+    {
+        if (!Brushes.TryGetValue(iso, out SolidBrush? brush))
+        {
+            brush = new SolidBrush(Fill(iso));
+            Brushes[iso] = brush;
+        }
+
+        return brush;
+    }
 
     public static Color Ink(string iso)
     {
-        _ = iso;
-        return UiTheme.OnBrand;
+        Color fill = Fill(iso);
+        Color dark = Color.FromArgb(22, 32, 48);
+        double luminance = RelativeLuminance(fill);
+        double whiteContrast = 1.05 / (luminance + 0.05);
+        double darkContrast = (luminance + 0.05) / (RelativeLuminance(dark) + 0.05);
+        return whiteContrast >= darkContrast ? Color.White : dark;
     }
 
     public static int Slot(string iso)
-    {
-        int index = Hash(iso) % Fills.Length;
-        if (index < 0)
-        {
-            index += Fills.Length;
-        }
+        => (int)(Hash(iso) % 360);
 
-        return index;
-    }
-
-    private static int Hash(string iso)
+    private static uint Hash(string iso)
     {
-        int hash = unchecked((int)2166136261);
+        uint hash = 2166136261;
         foreach (char c in iso)
         {
             hash ^= c;
             hash = unchecked(hash * 16777619);
         }
 
+        hash ^= hash >> 16;
+        hash = unchecked(hash * 0x7feb352d);
+        hash ^= hash >> 15;
         return hash;
+    }
+
+    private static Color HslToColor(int hue, double saturation, double lightness)
+    {
+        double chroma = (1 - Math.Abs(2 * lightness - 1)) * saturation;
+        double x = chroma * (1 - Math.Abs((hue / 60d) % 2 - 1));
+        double m = lightness - chroma / 2;
+        (double r, double g, double b) = hue switch
+        {
+            < 60 => (chroma, x, 0d),
+            < 120 => (x, chroma, 0d),
+            < 180 => (0d, chroma, x),
+            < 240 => (0d, x, chroma),
+            < 300 => (x, 0d, chroma),
+            _ => (chroma, 0d, x)
+        };
+        return Color.FromArgb(
+            (int)Math.Round((r + m) * 255),
+            (int)Math.Round((g + m) * 255),
+            (int)Math.Round((b + m) * 255));
+    }
+
+    private static double RelativeLuminance(Color color)
+    {
+        static double Linear(byte component)
+        {
+            double value = component / 255d;
+            return value <= 0.04045 ? value / 12.92 : Math.Pow((value + 0.055) / 1.055, 2.4);
+        }
+
+        return 0.2126 * Linear(color.R) + 0.7152 * Linear(color.G) + 0.0722 * Linear(color.B);
     }
 }

@@ -5,6 +5,8 @@ namespace NetLights.App;
 internal sealed class StatusForm : Form
 {
     private readonly StatusListView _list = new();
+    private readonly AvailabilityHistoryChart _availabilityChart = new();
+    private readonly ThemedButton[] _availabilityWindowButtons = new ThemedButton[LocationChartWindows.All.Length];
     private readonly StatusBadge _ruBadge = new();
     private readonly StatusBadge _worldBadge = new();
     private readonly Label _confirmLine = new();
@@ -14,12 +16,16 @@ internal sealed class StatusForm : Form
     private readonly TextBox _diagOut = new();
     private readonly CheckBox _autoStart = new();
     private readonly CheckBox _autoUpdate = new();
+    private readonly CheckBox _geoCountryDetection = new();
     private readonly CheckBox _geoCountryIcon = new();
+    private readonly MouseFocusCueCheckBox _emphasizeShortStatuses = new() { Checked = true };
     private readonly Label _letterSizeLabel = new();
     private readonly ComboBox _letterSize = new();
     private readonly Label _updateLine = new();
     private readonly ThemedButton _checkUpdates = new("Проверить обновления", true);
     private readonly ThemedButton _exportLog = new("Экспорт журнала", false);
+    private readonly ThemedButton _openSettingsFolder = new("Открыть папку настроек", false);
+    private readonly ThemedButton _resetWindowSize = new("Сбросить размер окна", false);
     private readonly Label _manualUpdateLine = new();
     private readonly ThemedButton _tabLive = new("Состояние", true);
     private readonly ThemedButton _tabLocations = new("Локации", false);
@@ -29,6 +35,7 @@ internal sealed class StatusForm : Form
     private readonly Panel _locationsPage = new() { Dock = DockStyle.Fill, BackColor = UiTheme.Surface };
     private readonly Panel _diagPage = new() { Dock = DockStyle.Fill, BackColor = UiTheme.Surface };
     private readonly Panel _settingsPage = new() { Dock = DockStyle.Fill, BackColor = UiTheme.Surface };
+    private SegmentTrack? _availabilityWindowBar;
     private readonly System.Windows.Forms.Timer _ages = new();
     private readonly TimeProvider _time;
     private readonly LocationTimelinePanel _locations;
@@ -37,6 +44,8 @@ internal sealed class StatusForm : Form
     private readonly Dictionary<Color, Pen> _pens = [];
     private MonitorSnapshot? _snapshot;
     private string _fingerprint = "";
+    private AvailabilityHistory? _availabilityHistory;
+    private TimeSpan _availabilityWindow = LocationChartWindows.Default;
     private bool _suppressSettings;
     private bool _allowShow;
     public int DataBindCount { get; private set; }
@@ -50,6 +59,10 @@ internal sealed class StatusForm : Form
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action<bool>? GeoCountryIconChanged { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<bool>? GeoCountryDetectionChanged { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<bool>? EmphasizeShortStatusesChanged { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action<GeoCountryLetterScale>? GeoCountryLetterScaleChanged { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Func<string, Task<string>>? DiagnoseRequested { get; set; }
@@ -57,6 +70,12 @@ internal sealed class StatusForm : Form
     public Action? ExportRequested { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action? CheckUpdatesRequested { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action? OpenSettingsFolderRequested { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action? ResetWindowSizeRequested { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action? WindowGeometryChanged { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action<int>? LocationChartWindowHoursChanged { get; set; }
 
@@ -112,6 +131,7 @@ internal sealed class StatusForm : Form
         {
             ScaleColumns(_list, [120, 140, 100, 60, 110, 90, 120, 170]);
         };
+        ResizeEnd += (_, _) => NotifyWindowGeometryChanged();
     }
 
     public void PlaceCentered()
@@ -136,12 +156,45 @@ internal sealed class StatusForm : Form
             area.Top + Math.Max(0, (area.Height - Height) / 2));
     }
 
+    public void RestoreWindowBounds(Rectangle requestedBounds)
+    {
+        WindowState = FormWindowState.Normal;
+        StartPosition = FormStartPosition.Manual;
+
+        bool hasSavedPosition = requestedBounds.X != int.MinValue && requestedBounds.Y != int.MinValue;
+        Screen screen = hasSavedPosition ? Screen.FromRectangle(requestedBounds) : Screen.FromPoint(Cursor.Position);
+        Rectangle area = screen.WorkingArea;
+        int width = Math.Min(Math.Max(MinimumSize.Width, requestedBounds.Width), Math.Max(320, area.Width));
+        int height = Math.Min(Math.Max(MinimumSize.Height, requestedBounds.Height), Math.Max(240, area.Height));
+        if (width > area.Width) width = area.Width;
+        if (height > area.Height) height = area.Height;
+        Size = new Size(Math.Max(320, width), Math.Max(240, height));
+        int maxX = Math.Max(area.Left, area.Right - Width);
+        int maxY = Math.Max(area.Top, area.Bottom - Height);
+        int x = hasSavedPosition ? Math.Clamp(requestedBounds.X, area.Left, maxX) : area.Left + Math.Max(0, (area.Width - Width) / 2);
+        int y = hasSavedPosition ? Math.Clamp(requestedBounds.Y, area.Top, maxY) : area.Top + Math.Max(0, (area.Height - Height) / 2);
+        Location = new Point(x, y);
+    }
+
+    public void ResetWindowSize()
+    {
+        WindowState = FormWindowState.Normal;
+        Size = new Size(UiTheme.WindowDefaultWidth, UiTheme.WindowDefaultHeight);
+        PlaceCentered();
+    }
+
     public void Reveal()
     {
         _allowShow = true;
         ShowInTaskbar = true;
         Show();
         Activate();
+    }
+
+    public void ShowPageAndReveal(int index)
+    {
+        ShowPage(index);
+        Reveal();
     }
 
     internal bool HideToTrayIfUserClosing(CloseReason reason)
@@ -165,15 +218,23 @@ internal sealed class StatusForm : Form
         bool geoCountryIcon,
         GeoCountryLetterScale letterScale,
         string? updateNotice,
-        int locationChartWindowHours = 12)
+        int locationChartWindowHours = 12,
+        bool geoCountryDetection = false,
+        bool emphasizeShortStatuses = true)
     {
         _suppressSettings = true;
         _autoStart.Checked = autoStart;
         _autoUpdate.Checked = autoUpdate;
+        _geoCountryDetection.Checked = geoCountryDetection;
         _geoCountryIcon.Checked = geoCountryIcon;
+        _geoCountryIcon.Enabled = geoCountryDetection;
+        _emphasizeShortStatuses.Checked = emphasizeShortStatuses;
+        _availabilityChart.SetEmphasizeShortSpans(emphasizeShortStatuses);
         _letterSize.SelectedIndex = (int)GeoCountryLetterScales.Parse((int)letterScale);
         SyncLetterSizeVisibility();
         _locations.ApplyChartWindowHours(locationChartWindowHours);
+        _availabilityWindow = _locations.ChartWindow;
+        SyncAvailabilityWindowButtons();
         _updateLine.Text = string.IsNullOrWhiteSpace(updateNotice)
             ? "Обновления с GitHub ставятся тихо, когда есть сеть."
             : "Последняя ошибка обновления: " + updateNotice;
@@ -250,6 +311,10 @@ internal sealed class StatusForm : Form
         }
 
         DateTimeOffset now = _time.GetUtcNow();
+        if (_availabilityHistory is not null && _livePage.Visible)
+        {
+            _availabilityChart.Bind(_availabilityHistory, now, _availabilityWindow);
+        }
         bool changed = false;
         for (int i = 0; i < _list.Items.Count; i++)
         {
@@ -288,6 +353,17 @@ internal sealed class StatusForm : Form
         }
 
         _locations.Bind(history, live);
+    }
+
+    public void BindAvailabilityHistory(AvailabilityHistory history, TimeSpan window)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke(() => BindAvailabilityHistory(history, window)); return; }
+        _availabilityHistory = history;
+        _availabilityWindow = window;
+        _locations.ApplyChartWindowHours(LocationChartWindows.ToHours(window));
+        SyncAvailabilityWindowButtons();
+        _availabilityChart.Bind(history, _time.GetUtcNow(), window);
     }
 
     private Panel BuildHeader()
@@ -459,16 +535,33 @@ internal sealed class StatusForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 2,
+            RowCount = 4,
             BackColor = UiTheme.Surface,
             Margin = Padding.Empty,
             Padding = Padding.Empty
         };
         page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         page.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        EnsureAvailabilityWindowBar();
         var hint = Hint("Колонка «С запуска» — доля успешных HTTPS с этого запуска.");
         ConfigureList(_list, "Текущие проверки", DrawRow);
+        StyleCheck(_emphasizeShortStatuses, "Увеличивать короткие отметки", new Padding(0, 0, 0, 6));
+        _emphasizeShortStatuses.Font = UiTheme.Caption;
+        _emphasizeShortStatuses.ForeColor = UiTheme.Muted;
+        _emphasizeShortStatuses.BackColor = UiTheme.Card;
+        _emphasizeShortStatuses.Margin = Padding.Empty;
+        _emphasizeShortStatuses.AccessibleName = "emphasizeShortStatuses";
+        _emphasizeShortStatuses.CheckedChanged += (_, _) =>
+        {
+            if (_suppressSettings)
+                return;
+            _availabilityChart.SetEmphasizeShortSpans(_emphasizeShortStatuses.Checked);
+            EmphasizeShortStatusesChanged?.Invoke(_emphasizeShortStatuses.Checked);
+        };
+        _availabilityChart.SetShortStatusesToggle(_emphasizeShortStatuses);
         _list.Columns.Add("Группа", 120);
         _list.Columns.Add("Адрес", 140);
         _list.Columns.Add("Результат", 100);
@@ -478,9 +571,70 @@ internal sealed class StatusForm : Form
         _list.Columns.Add("Проверено", 120);
         _list.Columns.Add("Причина", 170);
         _list.Layout += (_, _) => LayoutCount++;
-        page.Controls.Add(_list, 0, 0);
-        page.Controls.Add(hint, 0, 1);
+        page.Controls.Add(_availabilityWindowBar!, 0, 0);
+        page.Controls.Add(_availabilityChart, 0, 1);
+        page.Controls.Add(_list, 0, 2);
+        page.Controls.Add(hint, 0, 3);
         _livePage.Controls.Add(page);
+    }
+
+    private void EnsureAvailabilityWindowBar()
+    {
+        if (_availabilityWindowBar is not null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < _availabilityWindowButtons.Length; i++)
+        {
+            TimeSpan window = LocationChartWindows.All[i];
+            var button = new ThemedButton(LocationChartWindows.Captions[i], window == _availabilityWindow)
+            {
+                AccessibleName = "availabilityChartWindow" + LocationChartWindows.ToHours(window)
+            };
+            TimeSpan captured = window;
+            button.Click += (_, _) => SetAvailabilityWindow(captured);
+            _availabilityWindowButtons[i] = button;
+        }
+
+        _availabilityWindowBar = new SegmentTrack(_availabilityWindowButtons)
+        {
+            Dock = DockStyle.Top,
+            Margin = new Padding(0, 0, 0, 8),
+            AccessibleName = "availabilityChartWindow"
+        };
+    }
+
+    private void SyncAvailabilityWindowButtons()
+    {
+        for (int i = 0; i < _availabilityWindowButtons.Length; i++)
+        {
+            ThemedButton? button = _availabilityWindowButtons[i];
+            if (button is not null)
+            {
+                button.Primary = LocationChartWindows.All[i] == _availabilityWindow;
+            }
+        }
+    }
+
+    private void SetAvailabilityWindow(TimeSpan window)
+    {
+        if (window == _availabilityWindow)
+        {
+            SyncAvailabilityWindowButtons();
+            return;
+        }
+
+        int hours = LocationChartWindows.ToHours(window);
+        _locations.ApplyChartWindowHours(hours);
+        _availabilityWindow = window;
+        SyncAvailabilityWindowButtons();
+        if (_availabilityHistory is not null)
+        {
+            _availabilityChart.Bind(_availabilityHistory, _time.GetUtcNow(), window);
+        }
+
+        LocationChartWindowHoursChanged?.Invoke(hours);
     }
 
     private void FillDiagPage()
@@ -545,6 +699,24 @@ internal sealed class StatusForm : Form
                 AutoUpdateChanged?.Invoke(_autoUpdate.Checked);
             }
         };
+        StyleCheck(_geoCountryDetection, "Определять страну", new Padding(0, 0, 0, 8));
+        _geoCountryDetection.AccessibleName = "geoCountryDetection";
+        _geoCountryDetection.CheckedChanged += (_, _) =>
+        {
+            if (_suppressSettings)
+                return;
+
+            if (!_geoCountryDetection.Checked)
+            {
+                _suppressSettings = true;
+                _geoCountryIcon.Checked = false;
+                _suppressSettings = false;
+            }
+
+            _geoCountryIcon.Enabled = _geoCountryDetection.Checked;
+            SyncLetterSizeVisibility();
+            GeoCountryDetectionChanged?.Invoke(_geoCountryDetection.Checked);
+        };
         StyleCheck(_geoCountryIcon, "Показывать страну в трее", new Padding(0, 0, 0, 8));
         _geoCountryIcon.AccessibleName = "geoCountryIcon";
         _geoCountryIcon.CheckedChanged += (_, _) =>
@@ -603,6 +775,28 @@ internal sealed class StatusForm : Form
         _exportLog.Click += (_, _) => ExportRequested?.Invoke();
         actions.Controls.Add(_checkUpdates);
         actions.Controls.Add(_exportLog);
+        var windowActions = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true,
+            Margin = new Padding(0, 0, 0, 0),
+            Padding = Padding.Empty,
+            BackColor = UiTheme.Card
+        };
+        _openSettingsFolder.Stretch = false;
+        _openSettingsFolder.FitToText();
+        _openSettingsFolder.Margin = new Padding(0, 0, 10, 0);
+        _openSettingsFolder.AccessibleName = "openSettingsFolder";
+        _openSettingsFolder.Click += (_, _) => OpenSettingsFolderRequested?.Invoke();
+        _resetWindowSize.Stretch = false;
+        _resetWindowSize.FitToText();
+        _resetWindowSize.Margin = Padding.Empty;
+        _resetWindowSize.AccessibleName = "resetWindowSize";
+        _resetWindowSize.Click += (_, _) => ResetWindowSizeRequested?.Invoke();
+        windowActions.Controls.Add(_openSettingsFolder);
+        windowActions.Controls.Add(_resetWindowSize);
         _manualUpdateLine.AutoSize = true;
         _manualUpdateLine.Font = UiTheme.Caption;
         _manualUpdateLine.ForeColor = UiTheme.Muted;
@@ -625,7 +819,8 @@ internal sealed class StatusForm : Form
         releases.LinkClicked += (_, _) => UiDrawing.OpenHttps(AppCredits.ReleasesUrl);
         links.Controls.Add(github);
         links.Controls.Add(releases);
-        stack.Controls.Add(SettingsBlock("Общие", _autoStart, _geoCountryIcon, _letterSizeLabel, _letterSize));
+        stack.Controls.Add(SettingsBlock("Общие", _autoStart, _geoCountryDetection, _geoCountryIcon, _letterSizeLabel, _letterSize));
+        stack.Controls.Add(SettingsBlock("Приложение", windowActions));
         stack.Controls.Add(SettingsBlock("Обновления", _autoUpdate, _updateLine, actions, _manualUpdateLine));
         stack.Controls.Add(links);
         _settingsPage.Controls.Add(stack);
@@ -634,7 +829,7 @@ internal sealed class StatusForm : Form
 
     private void SyncLetterSizeVisibility()
     {
-        bool show = _geoCountryIcon.Checked;
+        bool show = _geoCountryDetection.Checked && _geoCountryIcon.Checked;
         _letterSizeLabel.Visible = show;
         _letterSize.Visible = show;
         if (_settingsPage.Controls.Count > 0 && _settingsPage.Controls[0] is VerticalStack stack)
@@ -994,10 +1189,17 @@ internal sealed class StatusForm : Form
     {
         if (HideToTrayIfUserClosing(e.CloseReason))
         {
+            NotifyWindowGeometryChanged();
             e.Cancel = true;
         }
 
         base.OnFormClosing(e);
+    }
+
+    private void NotifyWindowGeometryChanged()
+    {
+        if (WindowState == FormWindowState.Normal && !IsDisposed)
+            WindowGeometryChanged?.Invoke();
     }
 
     protected override void Dispose(bool disposing)

@@ -9,10 +9,9 @@ public sealed record LocationStay(
 
 public sealed class LocationHistory
 {
-    public const int MaxStays = 256;
     public static readonly TimeSpan ResumeMergeWindow = TimeSpan.FromMinutes(2);
     public static readonly TimeSpan OfflineGap = TimeSpan.FromMinutes(2);
-    public static readonly TimeSpan Retention = TimeSpan.FromDays(3);
+    public static readonly TimeSpan Retention = TimeSpan.FromDays(7);
 
     private readonly List<LocationStay> _stays;
 
@@ -23,6 +22,8 @@ public sealed class LocationHistory
     }
 
     public DateTimeOffset? LastObservedUtc { get; private set; }
+
+    public long Revision { get; private set; }
 
     public IReadOnlyList<LocationStay> Stays => _stays;
 
@@ -66,6 +67,7 @@ public sealed class LocationHistory
         if (_stays.Count == 0)
         {
             _stays.Add(new LocationStay(code, utcNow, null));
+            Revision++;
             return true;
         }
 
@@ -80,6 +82,7 @@ public sealed class LocationHistory
             && utcNow - ended <= ResumeMergeWindow)
         {
             _stays[^1] = last with { EndedUtc = null };
+            Revision++;
             return true;
         }
 
@@ -90,32 +93,42 @@ public sealed class LocationHistory
 
         _stays.Add(new LocationStay(code, utcNow, null));
         Prune(utcNow);
-        while (_stays.Count > MaxStays)
-        {
-            _stays.RemoveAt(0);
-        }
-
+        Revision++;
         return true;
     }
 
     public void Prune(DateTimeOffset now)
     {
         DateTimeOffset cutoff = now - Retention;
+        bool changed = false;
+        int transitionAnchor = -1;
+        for (int i = 0; i < _stays.Count; i++)
+        {
+            if (_stays[i].EndedUtc is DateTimeOffset ended && ended <= cutoff)
+            {
+                transitionAnchor = i;
+            }
+        }
+
         for (int i = _stays.Count - 1; i >= 0; i--)
         {
             LocationStay stay = _stays[i];
             DateTimeOffset end = stay.EndedUtc ?? now;
-            if (end <= cutoff)
+            if (end <= cutoff && i != transitionAnchor)
             {
                 _stays.RemoveAt(i);
+                changed = true;
                 continue;
             }
 
-            if (stay.StartedUtc < cutoff)
+            if (i != transitionAnchor && stay.StartedUtc < cutoff)
             {
                 _stays[i] = stay with { StartedUtc = cutoff };
+                changed = true;
             }
         }
+
+        if (changed) Revision++;
     }
 
     public void Touch(DateTimeOffset utcNow)
@@ -149,6 +162,7 @@ public sealed class LocationHistory
         if (last.EndedUtc is null)
         {
             _stays[^1] = last with { EndedUtc = now };
+            Revision++;
         }
     }
 }

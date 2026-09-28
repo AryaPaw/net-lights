@@ -60,7 +60,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: 
 [Code]
 function TaskKillImage(const ImageName: String): Integer;
 begin
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM ' + ImageName + ' /T', '', SW_HIDE, ewWaitUntilTerminated, Result);
+  { Do not use taskkill /T here: the updater launches Setup from NetLights.exe. }
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM ' + ImageName, '', SW_HIDE, ewWaitUntilTerminated, Result);
 end;
 
 function WaitUntilAppExited: Boolean;

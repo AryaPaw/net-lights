@@ -35,26 +35,18 @@ public sealed class CmdSilentSetupInstaller : ISetupInstaller
 {
     public bool TryStartSilent(string setupPath)
     {
-        string full = Path.GetFullPath(setupPath);
-        ProcessStartInfo start = new()
+        ProcessStartInfo start = CreateStartInfo(setupPath);
+        using Process? process = Process.Start(start);
+        return process is not null;
+    }
+
+    internal static ProcessStartInfo CreateStartInfo(string setupPath)
+        => new()
         {
-            FileName = full,
-            Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /FORCECLOSEAPPLICATIONS",
+            FileName = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            Arguments = SilentSetupLauncher.BuildCommand(setupPath),
             UseShellExecute = false,
             CreateNoWindow = true,
-            WorkingDirectory = Path.GetDirectoryName(full) ?? Environment.SystemDirectory
+            WorkingDirectory = Environment.SystemDirectory
         };
-        using Process? process = Process.Start(start);
-        if (process is null)
-        {
-            return false;
-        }
-
-        if (process.WaitForExit(15_000))
-        {
-            return process.ExitCode == 0;
-        }
-
-        return true;
-    }
 }

@@ -20,7 +20,6 @@ public static class LocationChartLayout
         IReadOnlyList<LocationStay> stays,
         DateTimeOffset now,
         int widthPx,
-        int minStayPx = 5,
         DateTimeOffset? windowStart = null)
     {
         if (widthPx <= 0)
@@ -68,14 +67,14 @@ public static class LocationChartLayout
 
         double spanTicks = horizon.UtcTicks - origin.UtcTicks;
         var fractions = new double[raw.Count];
-        for (int i = 0; i < raw.Count; i++)
+        for (int i = 0; i < fractions.Length; i++)
         {
             long end = Math.Min(raw[i].End.UtcTicks, horizon.UtcTicks);
             long start = Math.Max(raw[i].Start.UtcTicks, origin.UtcTicks);
             fractions[i] = Math.Max(0, end - start) / spanTicks;
         }
 
-        int[] pixels = ToPixels(raw, fractions, widthPx, minStayPx);
+        int[] pixels = ToPixels(fractions, widthPx);
         var segments = new LocationChartSegment[raw.Count];
         int x = 0;
         for (int i = 0; i < raw.Count; i++)
@@ -125,7 +124,20 @@ public static class LocationChartLayout
             ordered.Add(stay);
         }
 
-        ordered.Sort(static (a, b) => a.StartedUtc.CompareTo(b.StartedUtc));
+        bool orderedByStart = true;
+        for (int i = 1; i < ordered.Count; i++)
+        {
+            if (ordered[i].StartedUtc < ordered[i - 1].StartedUtc)
+            {
+                orderedByStart = false;
+                break;
+            }
+        }
+
+        if (!orderedByStart)
+        {
+            ordered.Sort(static (a, b) => a.StartedUtc.CompareTo(b.StartedUtc));
+        }
         var raw = new List<RawSpan>();
         DateTimeOffset? cursor = null;
         foreach (LocationStay stay in ordered)
@@ -155,100 +167,22 @@ public static class LocationChartLayout
         return raw;
     }
 
-    private static int[] ToPixels(List<RawSpan> raw, double[] fractions, int widthPx, int minStayPx)
+    private static int[] ToPixels(double[] fractions, int widthPx)
     {
-        int stayCount = 0;
-        foreach (RawSpan span in raw)
+        var pixels = new int[fractions.Length];
+        int previousEdge = 0;
+        double accumulatedFraction = 0;
+        for (int i = 0; i < fractions.Length; i++)
         {
-            if (span.Iso is not null)
-            {
-                stayCount++;
-            }
-        }
-
-        int minPx = minStayPx;
-        if (stayCount > 0)
-        {
-            minPx = Math.Clamp(minStayPx, 1, Math.Max(1, widthPx / Math.Max(stayCount, 1)));
-        }
-
-        var pixels = new int[raw.Count];
-        int used = 0;
-        for (int i = 0; i < raw.Count; i++)
-        {
-            pixels[i] = (int)Math.Round(fractions[i] * widthPx, MidpointRounding.AwayFromZero);
-            used += pixels[i];
-        }
-
-        int drift = used - widthPx;
-        if (drift != 0)
-        {
-            int index = LargestIndex(pixels, skipGaps: false, raw);
-            pixels[index] = Math.Max(0, pixels[index] - drift);
-        }
-
-        int extra = 0;
-        for (int i = 0; i < raw.Count; i++)
-        {
-            if (raw[i].Iso is null || pixels[i] >= minPx || fractions[i] <= 0)
-            {
-                continue;
-            }
-
-            extra += minPx - pixels[i];
-            pixels[i] = minPx;
-        }
-
-        while (extra > 0)
-        {
-            int index = LargestIndex(pixels, skipGaps: false, raw, above: minPx);
-            if (index < 0 || pixels[index] <= minPx)
-            {
-                break;
-            }
-
-            pixels[index]--;
-            extra--;
-        }
-
-        int sum = 0;
-        for (int i = 0; i < pixels.Length; i++)
-        {
-            sum += pixels[i];
-        }
-
-        int fix = sum - widthPx;
-        if (fix != 0)
-        {
-            int index = LargestIndex(pixels, skipGaps: false, raw);
-            if (index >= 0)
-            {
-                pixels[index] = Math.Max(0, pixels[index] - fix);
-            }
+            accumulatedFraction += fractions[i];
+            int edge = i == fractions.Length - 1
+                ? widthPx
+                : Math.Clamp((int)Math.Round(accumulatedFraction * widthPx, MidpointRounding.AwayFromZero), previousEdge, widthPx);
+            pixels[i] = edge - previousEdge;
+            previousEdge = edge;
         }
 
         return pixels;
-    }
-
-    private static int LargestIndex(int[] pixels, bool skipGaps, List<RawSpan> raw, int above = int.MinValue)
-    {
-        int best = -1;
-        int bestPx = above;
-        for (int i = 0; i < pixels.Length; i++)
-        {
-            if (skipGaps && raw[i].Iso is null)
-            {
-                continue;
-            }
-
-            if (pixels[i] > bestPx)
-            {
-                bestPx = pixels[i];
-                best = i;
-            }
-        }
-
-        return best;
     }
 
     private readonly record struct RawSpan(string? Iso, DateTimeOffset Start, DateTimeOffset End, bool Live);

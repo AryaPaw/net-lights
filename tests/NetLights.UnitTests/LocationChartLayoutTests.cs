@@ -26,7 +26,7 @@ public sealed class LocationChartLayoutTests
             new("NL", t1, null)
         ];
 
-        LocationChartModel model = LocationChartLayout.Build(stays, now, 400, minStayPx: 1);
+        LocationChartModel model = LocationChartLayout.Build(stays, now, 400);
         Assert.Equal(t0, model.OriginUtc);
         Assert.Equal(now, model.HorizonUtc);
         Assert.Equal(2, model.Segments.Count);
@@ -53,7 +53,7 @@ public sealed class LocationChartLayoutTests
             new("FI", t0.AddHours(2), null)
         ];
 
-        LocationChartModel model = LocationChartLayout.Build(stays, now, 400, minStayPx: 1);
+        LocationChartModel model = LocationChartLayout.Build(stays, now, 400);
         Assert.Equal(3, model.Segments.Count);
         Assert.Equal("DE", model.Segments[0].Iso);
         Assert.Null(model.Segments[1].Iso);
@@ -71,8 +71,7 @@ public sealed class LocationChartLayoutTests
         LocationChartModel model = LocationChartLayout.Build(
             [new LocationStay("PL", t0, null)],
             now,
-            200,
-            minStayPx: 1);
+            200);
         Assert.Single(model.Segments);
         Assert.True(model.Segments[0].Live);
         Assert.Equal(200, model.Segments[0].WidthPx);
@@ -91,14 +90,13 @@ public sealed class LocationChartLayoutTests
                 new LocationStay("NL", t0, null)
             ],
             now,
-            100,
-            minStayPx: 1);
+            100);
         Assert.Single(model.Segments);
         Assert.Equal("NL", model.Segments[0].Iso);
     }
 
     [Fact]
-    public void ShortStay_GetsMinimumPixelsWithoutOverflow()
+    public void ShortStay_KeepsTrueTimeWidthWithoutInflatingNeighbor()
     {
         DateTimeOffset t0 = DateTimeOffset.Parse("2026-09-20T00:00:00Z");
         DateTimeOffset now = t0.AddHours(100);
@@ -108,12 +106,13 @@ public sealed class LocationChartLayoutTests
             new("NL", t0.AddMinutes(1), null)
         ];
 
-        LocationChartModel model = LocationChartLayout.Build(stays, now, 100, minStayPx: 6);
+        LocationChartModel model = LocationChartLayout.Build(stays, now, 100);
         Assert.Equal(2, model.Segments.Count);
-        Assert.True(model.Segments[0].WidthPx >= 6);
+        Assert.Equal(0, model.Segments[0].WidthPx);
+        Assert.True(model.Segments[0].Fraction > 0);
         Assert.Equal(100, model.Segments.Sum(s => s.WidthPx));
         Assert.Equal(0, model.Segments[0].StartPx);
-        Assert.Equal(model.Segments[0].WidthPx, model.Segments[1].StartPx);
+        Assert.Equal(0, model.Segments[1].StartPx);
     }
 
     [Fact]
@@ -125,7 +124,6 @@ public sealed class LocationChartLayoutTests
             [new LocationStay("DE", now.AddHours(-2), null)],
             now,
             360,
-            minStayPx: 1,
             windowStart: window);
         Assert.Equal(window, model.OriginUtc);
         Assert.Equal(now, model.HorizonUtc);
@@ -153,8 +151,14 @@ public sealed class LocationChartLayoutTests
         Assert.Equal(LocationChartWindows.Hours3, LocationChartWindows.ParseHours(3));
         Assert.Equal(LocationChartWindows.Hours12, LocationChartWindows.ParseHours(12));
         Assert.Equal(LocationChartWindows.Days3, LocationChartWindows.ParseHours(72));
+        Assert.Equal(LocationChartWindows.Days5, LocationChartWindows.ParseHours(120));
+        Assert.Equal(LocationChartWindows.Days7, LocationChartWindows.ParseHours(168));
         Assert.Equal(LocationChartWindows.Default, LocationChartWindows.ParseHours(9));
         Assert.Equal(12, LocationChartWindows.ToHours(LocationChartWindows.Hours12));
         Assert.Equal(72, LocationChartWindows.ToHours(LocationChartWindows.Days3));
+        Assert.Equal(120, LocationChartWindows.ToHours(LocationChartWindows.Days5));
+        Assert.Equal(168, LocationChartWindows.ToHours(LocationChartWindows.Days7));
+        Assert.Equal("5 дней", LocationChartWindows.Label(LocationChartWindows.Days5));
+        Assert.Equal("7 дней", LocationChartWindows.Label(LocationChartWindows.Days7));
     }
 }

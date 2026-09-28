@@ -14,7 +14,8 @@ public sealed class InstallerScriptTests
         Assert.Contains("taskkill.exe", script, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("TaskKillImage('NetLights.exe')", script, StringComparison.Ordinal);
         Assert.Contains("TaskKillImage('NetLights.UpdateAgent.exe')", script, StringComparison.Ordinal);
-        Assert.Contains("'/F /IM ' + ImageName + ' /T'", script, StringComparison.Ordinal);
+        Assert.Contains("'/F /IM ' + ImageName", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("ImageName + ' /T'", script, StringComparison.Ordinal);
         Assert.DoesNotContain("CloseApplications=yes", script, StringComparison.Ordinal);
     }
 

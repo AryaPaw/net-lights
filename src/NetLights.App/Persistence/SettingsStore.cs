@@ -8,14 +8,16 @@ internal sealed class AppSettings
 {
     public bool AutoStart { get; set; } = true;
     public bool AutoUpdateEnabled { get; set; } = true;
+    public bool EmphasizeShortStatuses { get; set; } = true;
+    public bool GeoCountryDetectionEnabled { get; set; }
     public bool GeoCountryIconEnabled { get; set; }
     public int GeoCountryLetterSize { get; set; } = (int)GeoCountryLetterScale.Regular;
     public int LocationChartWindowHours { get; set; } = 12;
     public int SettingsVersion { get; set; }
-    public int WindowX { get; set; } = 80;
-    public int WindowY { get; set; } = 80;
-    public int WindowWidth { get; set; } = 1040;
-    public int WindowHeight { get; set; } = 920;
+    public int WindowX { get; set; } = int.MinValue;
+    public int WindowY { get; set; } = int.MinValue;
+    public int WindowWidth { get; set; } = UiTheme.WindowDefaultWidth;
+    public int WindowHeight { get; set; } = UiTheme.WindowDefaultHeight;
 }
 
 internal enum SettingsLoadStatus
@@ -28,6 +30,75 @@ internal enum SettingsLoadStatus
 
 internal static class SettingsStore
 {
+    public static bool MigrateToSettingsVersion4(AppSettings settings)
+    {
+        if (settings.SettingsVersion >= 4)
+            return false;
+
+        if (settings.WindowWidth == 1040 && settings.WindowHeight == 920)
+        {
+            settings.WindowWidth = UiTheme.WindowDefaultWidth;
+            settings.WindowHeight = UiTheme.WindowDefaultHeight;
+        }
+
+        if (settings.WindowX == 80 && settings.WindowY == 80)
+        {
+            settings.WindowX = int.MinValue;
+            settings.WindowY = int.MinValue;
+        }
+
+        settings.SettingsVersion = 4;
+        return true;
+    }
+
+    public static bool MigrateToSettingsVersion5(AppSettings settings)
+    {
+        if (settings.SettingsVersion >= 5)
+            return false;
+
+        settings.EmphasizeShortStatuses = true;
+        settings.SettingsVersion = 5;
+        return true;
+    }
+
+    public static bool MigrateToSettingsVersion6(AppSettings settings)
+    {
+        if (settings.SettingsVersion >= 6)
+            return false;
+
+        bool hasPreviousDefault = (settings.WindowWidth, settings.WindowHeight) is (900, 800)
+            or (1040, 920)
+            or (1360, 1177);
+        if (hasPreviousDefault)
+        {
+            settings.WindowWidth = UiTheme.WindowDefaultWidth;
+            settings.WindowHeight = UiTheme.WindowDefaultHeight;
+        }
+
+        settings.SettingsVersion = 6;
+        return true;
+    }
+
+    public static bool MigrateToSettingsVersion7(AppSettings settings)
+    {
+        if (settings.SettingsVersion >= 7)
+            return false;
+
+        bool hasPreviousDefault = (settings.WindowWidth, settings.WindowHeight) is (900, 800)
+            or (1040, 920)
+            or (1360, 1177)
+            or (1400, 1200)
+            or (1421, 1273);
+        if (hasPreviousDefault)
+        {
+            settings.WindowWidth = UiTheme.WindowDefaultWidth;
+            settings.WindowHeight = UiTheme.WindowDefaultHeight;
+        }
+
+        settings.SettingsVersion = 7;
+        return true;
+    }
+
     private static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = true,
@@ -41,29 +112,6 @@ internal static class SettingsStore
 
     public static string SettingsPath => Path.Combine(RootDirectory, "settings.json");
     public static string EndpointsPath => Path.Combine(RootDirectory, "endpoints.json");
-
-    public static void DeleteLegacyStateHistory()
-    {
-        TryDelete(Path.Combine(RootDirectory, "state-history.jsonl"));
-        TryDelete(Path.Combine(RootDirectory, "state-history.jsonl.tmp"));
-    }
-
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
-        }
-    }
 
     public static AppSettings Load()
     {
@@ -91,7 +139,7 @@ internal static class SettingsStore
                 settings.WindowWidth = UiTheme.WindowDefaultWidth;
             }
 
-            if (settings.WindowHeight < UiTheme.WindowDefaultHeight)
+            if (settings.WindowHeight < UiTheme.WindowMinHeight)
             {
                 settings.WindowHeight = UiTheme.WindowDefaultHeight;
             }
