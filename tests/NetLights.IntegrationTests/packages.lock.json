@@ -25,9 +25,9 @@
       },
       "xunit.runner.visualstudio": {
         "type": "Direct",
-        "requested": "[3.1.4, )",
-        "resolved": "3.1.4",
-        "contentHash": "5mj99LvCqrq3CNi06xYdyIAXOEh+5b33F2nErCzI5zWiDdLHXiPXEWFSUAF8zlIv0ZWqjZNCwHTQeAPYbF3pCg=="
+        "requested": "[3.1.5, )",
+        "resolved": "3.1.5",
+        "contentHash": "tKi7dSTwP4m5m9eXPM2Ime4Kn7xNf4x4zT9sdLO/G4hZVnQCRiMTWoSZqI/pYTVeI27oPPqHBKYI/DjJ9GsYgA=="
       },
       "Microsoft.CodeCoverage": {
         "type": "Transitive",
@@ -96,9 +96,9 @@
       "NetLights": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.2.0, )",
-          "NetLights.Networking": "[1.2.0, )",
-          "NetLights.Updates": "[1.2.0, )"
+          "NetLights.Core": "[1.4.2, )",
+          "NetLights.Networking": "[1.4.2, )",
+          "NetLights.Updates": "[1.4.2, )"
         }
       },
       "netlights.core": {
@@ -107,13 +107,13 @@
       "netlights.networking": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.2.0, )"
+          "NetLights.Core": "[1.4.2, )"
         }
       },
       "netlights.testsupport": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.2.0, )"
+          "NetLights.Core": "[1.4.2, )"
         }
       },
       "netlights.updates": {
