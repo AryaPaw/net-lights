@@ -1,6 +1,6 @@
 #define MyAppName "Net Lights"
 #ifndef MyAppVersion
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.5.1"
 #endif
 #define MyAppPublisher "AryaPaw"
 #define MyAppURL "https://github.com/AryaPaw/net-lights"
@@ -37,9 +37,6 @@ AppMutex=Local\NetLights.SingleInstance
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-[Tasks]
-Name: "startup"; Description: "Запускать вместе с Windows"
-
 #ifndef PublishDir
 #define PublishDir "..\artifacts\publish"
 #endif
@@ -49,11 +46,24 @@ Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
 [Icons]
 Name: "{group}\Net Lights"; Filename: "{app}\{#MyAppExeName}"
-Name: "{userstartup}\Net Lights"; Filename: "{app}\{#MyAppExeName}"; Tasks: startup
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall skipifsilent
-Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall skipifsilent; Check: not IsUpdateAgentInstall
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent; Check: not IsUpdateAgentInstall
+
+[Code]
+function IsUpdateAgentInstall: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/NETLIGHTSUPDATE') = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+end;
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "NetLights"; Flags: uninsdeletevalue dontcreatekey

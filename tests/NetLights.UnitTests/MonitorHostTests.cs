@@ -102,6 +102,40 @@ public sealed class MonitorHostTests
     }
 
     [Fact]
+    public async Task Host_ShutdownWaitsForProbeRegisteredByDispatchInProgress()
+    {
+        var probe = new BlockingStartProbe();
+        var kernel = new MonitorKernel(new MonitorConfiguration { Endpoints = TestPools.Independent() }, TimeProvider.System);
+        var host = new MonitorHost(kernel, probe, TimeProvider.System);
+        Task? shutdown = null;
+        try
+        {
+            host.Start();
+            Assert.True(probe.Started.Wait(TimeSpan.FromSeconds(3)), "probe did not start");
+
+            shutdown = host.DisposeAsync().AsTask();
+            await Task.Delay(100);
+            Assert.False(shutdown.IsCompleted, "shutdown completed while Dispatch was still creating an attempt");
+
+            probe.AllowStartToReturn.Set();
+            Assert.True(probe.WaitingForCompletion.Wait(TimeSpan.FromSeconds(2)), "probe task was not registered");
+            await Task.Delay(100);
+            Assert.False(shutdown.IsCompleted, "shutdown did not await the registered probe task");
+
+            probe.Complete();
+            await shutdown.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            probe.AllowStartToReturn.Set();
+            probe.Complete();
+            try { await host.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (Exception) { }
+            probe.Dispose();
+        }
+    }
+
+    [Fact]
     public async Task Host_Pause_DrainsInflight()
     {
         var probe = new ScriptedProbe { Delay = TimeSpan.FromSeconds(8) };
@@ -165,6 +199,62 @@ public sealed class MonitorHostTests
                 ProbeOutcome.Reachable,
                 TimeSpan.FromMilliseconds(1),
                 200);
+        }
+    }
+
+    private sealed class BlockingStartProbe : IProbe, IDisposable
+    {
+        private readonly TaskCompletionSource<EndpointObservation> _completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private EndpointDefinition? _endpoint;
+        private long _epoch;
+        private long _attemptId;
+        private long _startedTimestamp;
+
+        public ManualResetEventSlim Started { get; } = new();
+        public ManualResetEventSlim AllowStartToReturn { get; } = new();
+        public ManualResetEventSlim WaitingForCompletion { get; } = new();
+
+        public Task<EndpointObservation> ProbeAsync(
+            EndpointDefinition endpoint,
+            long networkEpoch,
+            long attemptId,
+            TimeSpan deadline,
+            CancellationToken cancellationToken)
+        {
+            _endpoint = endpoint;
+            _epoch = networkEpoch;
+            _attemptId = attemptId;
+            _startedTimestamp = TimeProvider.System.GetTimestamp();
+            Started.Set();
+            if (!AllowStartToReturn.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("test did not release probe start");
+            WaitingForCompletion.Set();
+            return _completion.Task;
+        }
+
+        public void Complete()
+        {
+            EndpointDefinition? endpoint = _endpoint;
+            if (endpoint is null)
+                return;
+            long completed = TimeProvider.System.GetTimestamp();
+            _completion.TrySetResult(ObservationFactory.Create(
+                endpoint,
+                _epoch,
+                _attemptId,
+                _startedTimestamp,
+                completed,
+                ProbeOutcome.Reachable,
+                TimeProvider.System.GetElapsedTime(_startedTimestamp, completed),
+                200));
+        }
+
+        public void Dispose()
+        {
+            Started.Dispose();
+            AllowStartToReturn.Dispose();
+            WaitingForCompletion.Dispose();
         }
     }
 }

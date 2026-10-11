@@ -3,27 +3,30 @@ using NetLights.Core;
 
 namespace NetLights.App;
 
+internal sealed record LocationChartEventLabel(
+    string Text,
+    int CenterPx,
+    int WidthPx,
+    string? CountryIso,
+    IReadOnlyList<LocationChartEvent> Events);
+
 internal sealed class LocationSpanChart : Control
 {
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(30);
     private const int LogicalHeight = 126;
     private const int AxisHeight = 20;
     private const int TrackHeight = 32;
-    private readonly ToolTip _tip = new()
-    {
-        ShowAlways = true,
-        AutoPopDelay = 8000,
-        InitialDelay = 400,
-        ReshowDelay = 0,
-        UseAnimation = false,
-        UseFading = false
-    };
+    private readonly ChartToolTip _tip = new(initialDelay: 400, autoPopDelay: 8000);
     private IReadOnlyList<LocationStay> _stays = [];
     private DateTimeOffset _now;
     private DateTimeOffset? _windowStart;
     private TimeSpan? _windowDuration;
     private LocationChartModel _model = new(default, default, []);
+    private IReadOnlyList<LocationChartEventLabel> _eventLabels = [];
     private string _tipText = "";
+    private LocationChartSegment? _hovered;
+    private LocationChartEvent? _hoveredEvent;
+    private Point? _hoverPoint;
     private DateTimeOffset _lastLayoutAt;
     private TimeSpan? _laidOutWindow;
     private int _laidOutWidth = -1;
@@ -107,17 +110,23 @@ internal sealed class LocationSpanChart : Control
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        LocationChartSegment? hit = Hit(e.X, e.Y);
-        string text = hit is LocationChartSegment segment && segment.Iso is not null
-            ? TipFor(segment)
-            : "";
+        _hoverPoint = e.Location;
+        LocationChartEventLabel? hitLabel = HitEventLabel(e.X, e.Y);
+        Rectangle track = TrackBounds();
+        LocationChartEvent? hitEvent = EventAt(e.X, e.Y, track);
+        LocationChartSegment? hit = hitEvent is null ? Hit(e.X, e.Y) : null;
+        SetHoveredEvent(hitEvent);
+        SetHovered(hit);
+        string text = hitLabel is LocationChartEventLabel label ? TipFor(label)
+            : hitEvent is LocationChartEvent marker ? TipFor(marker)
+            : hit is LocationChartSegment segment && segment.Iso is not null ? TipFor(segment) : "";
         if (text == _tipText)
         {
             return;
         }
 
         _tipText = text;
-        _tip.SetToolTip(this, text);
+        _tip.ShowFor(this, text, e.Location);
     }
 
     protected override void OnMouseLeave(EventArgs e)
@@ -129,7 +138,10 @@ internal sealed class LocationSpanChart : Control
         }
 
         _tipText = "";
-        _tip.SetToolTip(this, "");
+        _tip.Clear(this);
+        _hoverPoint = null;
+        SetHoveredEvent(null);
+        SetHovered(null);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -137,7 +149,7 @@ internal sealed class LocationSpanChart : Control
         Graphics g = e.Graphics;
         g.Clear(Parent?.BackColor ?? UiTheme.Surface);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        LocationChartCardChrome.Paint(g, this, "История смен страны");
+        LocationChartCardChrome.Paint(g, this, "История страны");
 
         Rectangle track = TrackBounds();
         if (track.Width <= 0 || track.Height <= 0)
@@ -168,15 +180,55 @@ internal sealed class LocationSpanChart : Control
                 g.DrawLine(live, box.Right - 1, box.Top, box.Right - 1, box.Bottom);
             }
 
-            if (box.Width >= 28)
+        }
+
+        DrawCountryLabels(g, track);
+
+        foreach (LocationChartEvent marker in _model.Events)
+        {
+            int x = track.Left + marker.XPx;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using Pen stem = new(LocationChartPalette.Fill(marker.Iso), 3);
+            using SolidBrush dot = new(LocationChartPalette.Fill(marker.Iso));
+            using Pen dotEdge = new(Color.White, 1.5f);
+            g.DrawLine(stem, x, track.Top, x, track.Bottom - 1);
+            int markerRadius = LocationChartCardChrome.Scale(this, 5);
+            g.FillEllipse(dot, x - markerRadius, track.Top - markerRadius - 2, markerRadius * 2, markerRadius * 2);
+            g.DrawEllipse(dotEdge, x - markerRadius, track.Top - markerRadius - 2, markerRadius * 2, markerRadius * 2);
+        }
+
+        foreach (LocationChartEventLabel label in _eventLabels)
+        {
+            Rectangle bounds = EventLabelBounds(label, track);
+            Color color = label.CountryIso is null ? UiTheme.Ink : LocationChartPalette.Fill(label.CountryIso);
+            TextRenderer.DrawText(g, label.Text, UiTheme.BodyBold, bounds, color,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding
+                | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+        }
+
+        if (_hoveredEvent is LocationChartEvent selectedEvent)
+        {
+            int x = track.Left + selectedEvent.XPx;
+            using Pen halo = new(Color.FromArgb(90, UiTheme.Brand800), 8);
+            using Pen edge = new(UiTheme.Brand800, 3);
+            g.DrawEllipse(halo, x - 7, track.Top - 9, 14, 14);
+            g.DrawEllipse(edge, x - 7, track.Top - 9, 14, 14);
+        }
+
+        if (_hovered is LocationChartSegment hovered && hovered.Iso is not null)
+        {
+            Rectangle highlight = SegmentBounds(hovered, track);
+            if (highlight.Width > 0)
             {
-                TextRenderer.DrawText(
-                    g,
-                    segment.Iso,
-                    UiTheme.IsoMono,
-                    box,
-                    LocationChartPalette.Ink(segment.Iso),
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+                Rectangle outer = Rectangle.Inflate(highlight, 4, 4);
+                outer.Width = Math.Max(1, outer.Width - 1);
+                outer.Height = Math.Max(1, outer.Height - 1);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using GraphicsPath path = UiDrawing.RoundedRect(outer, 6);
+                using Pen glow = new(Color.FromArgb(75, UiTheme.Brand800), 8) { LineJoin = LineJoin.Round };
+                using Pen outline = new(UiTheme.Brand800, 4) { LineJoin = LineJoin.Round };
+                g.DrawPath(glow, path);
+                g.DrawPath(outline, path);
             }
         }
 
@@ -197,6 +249,13 @@ internal sealed class LocationSpanChart : Control
     {
         Rectangle track = TrackBounds();
         _model = LocationChartLayout.Build(_stays, _now, Math.Max(0, track.Width), windowStart: _windowStart);
+        _eventLabels = BuildEventLabels(
+            _model.Events,
+            track.Width,
+            LocationChartCardChrome.Scale(this, 120),
+            LocationChartCardChrome.Scale(this, 36));
+        _hoveredEvent = _hoverPoint is Point hoverEvent ? EventAt(hoverEvent.X, hoverEvent.Y, track) : null;
+        _hovered = _hoveredEvent is null && _hoverPoint is Point hover ? Hit(hover.X, hover.Y) : null;
         _lastLayoutAt = _now;
         _laidOutWindow = _windowStart is DateTimeOffset start ? _now - start : null;
         _laidOutWidth = track.Width;
@@ -277,6 +336,205 @@ internal sealed class LocationSpanChart : Control
         return best;
     }
 
+    private LocationChartEvent? HitEvent(int x, int y)
+    {
+        Rectangle track = TrackBounds();
+        if (y < track.Top - 9 || y >= track.Bottom || x < track.Left - 7 || x >= track.Right + 7)
+            return null;
+        LocationChartEvent? nearest = null;
+        int distance = 7;
+        foreach (LocationChartEvent marker in _model.Events)
+        {
+            int next = Math.Abs(x - (track.Left + marker.XPx));
+            if (next < distance)
+            {
+                nearest = marker;
+                distance = next;
+            }
+        }
+        return nearest;
+    }
+
+    private LocationChartEventLabel? HitEventLabel(int x, int y)
+    {
+        Rectangle track = TrackBounds();
+        foreach (LocationChartEventLabel label in _eventLabels)
+        {
+            if (EventLabelBounds(label, track).Contains(x, y))
+                return label;
+        }
+
+        return null;
+    }
+
+    private LocationChartEvent? EventAt(int x, int y, Rectangle track)
+    {
+        LocationChartEventLabel? label = HitEventLabel(x, y);
+        return label is null
+            ? HitEvent(x, y)
+            : label.Events.OrderBy(marker => Math.Abs(x - (track.Left + marker.XPx))).FirstOrDefault();
+    }
+
+    internal static IReadOnlyList<LocationChartEventLabel> BuildEventLabels(
+        IReadOnlyList<LocationChartEvent> events,
+        int trackWidth,
+        int maximumLabelWidth,
+        int minimumLabelSpacing)
+    {
+        if (events.Count == 0 || trackWidth <= 0 || maximumLabelWidth <= 0)
+            return [];
+
+        maximumLabelWidth = Math.Min(trackWidth, maximumLabelWidth);
+        minimumLabelSpacing = Math.Max(1, Math.Min(maximumLabelWidth, minimumLabelSpacing));
+        var groups = new List<List<LocationChartEvent>>();
+        foreach (LocationChartEvent marker in events.OrderBy(item => item.XPx).ThenBy(item => item.StartUtc))
+        {
+            if (groups.Count == 0 || marker.XPx - groups[^1][^1].XPx >= minimumLabelSpacing)
+                groups.Add([marker]);
+            else
+                groups[^1].Add(marker);
+        }
+
+        while (groups.Count > 1)
+        {
+            bool merged = false;
+            for (int i = 0; i < groups.Count - 1; i++)
+            {
+                LocationChartEventLabel left = CreateEventLabel(groups[i], maximumLabelWidth);
+                LocationChartEventLabel right = CreateEventLabel(groups[i + 1], maximumLabelWidth);
+                int leftStart = ClampedLabelLeft(left, trackWidth);
+                int rightStart = ClampedLabelLeft(right, trackWidth);
+                int gap = Math.Max(1, maximumLabelWidth * 4 / 120);
+                if (rightStart >= leftStart + left.WidthPx + gap)
+                    continue;
+
+                groups[i].AddRange(groups[i + 1]);
+                groups[i].Sort(static (a, b) => a.XPx != b.XPx
+                    ? a.XPx.CompareTo(b.XPx)
+                    : a.StartUtc.CompareTo(b.StartUtc));
+                groups.RemoveAt(i + 1);
+                merged = true;
+                break;
+            }
+
+            if (!merged)
+                break;
+        }
+
+        return groups.Select(group => CreateEventLabel(group, maximumLabelWidth)).ToArray();
+    }
+
+    private static LocationChartEventLabel CreateEventLabel(List<LocationChartEvent> events, int maximumWidth)
+    {
+        var countries = new List<(string Iso, int Count)>();
+        foreach (LocationChartEvent marker in events)
+        {
+            int index = countries.FindIndex(country => string.Equals(country.Iso, marker.Iso, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+                countries.Add((marker.Iso, 1));
+            else
+                countries[index] = (countries[index].Iso, countries[index].Count + 1);
+        }
+
+        string Format((string Iso, int Count) country)
+            => country.Count > 1 ? $"{country.Iso}×{country.Count}" : country.Iso;
+
+        string text = string.Join(" · ", countries.Select(Format));
+        if (MeasureEventLabel(text) > maximumWidth)
+        {
+            text = "";
+            for (int keep = Math.Min(2, countries.Count); keep > 0; keep--)
+            {
+                int represented = countries.Take(keep).Sum(country => country.Count);
+                string prefix = string.Join(" · ", countries.Take(keep).Select(Format));
+                string candidate = represented == events.Count ? prefix : $"{prefix} · +{events.Count - represented}";
+                if (MeasureEventLabel(candidate) <= maximumWidth)
+                {
+                    text = candidate;
+                    break;
+                }
+            }
+
+            if (text.Length == 0)
+                text = $"{events.Count} событий";
+        }
+
+        int padding = Math.Max(1, maximumWidth * 8 / 120);
+        int minimumWidth = Math.Min(maximumWidth, Math.Max(1, maximumWidth * 36 / 120));
+        int width = Math.Clamp(MeasureEventLabel(text) + padding, minimumWidth, maximumWidth);
+        int center = (int)Math.Round(events.Average(marker => marker.XPx));
+        string? singleCountry = countries.Count == 1 ? countries[0].Iso : null;
+        return new LocationChartEventLabel(text, center, width, singleCountry, events.ToArray());
+    }
+
+    private static int MeasureEventLabel(string text)
+        => TextRenderer.MeasureText(text, UiTheme.BodyBold, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+
+    private static int ClampedLabelLeft(LocationChartEventLabel label, int trackWidth)
+        => Math.Clamp(label.CenterPx - label.WidthPx / 2, 0, Math.Max(0, trackWidth - label.WidthPx));
+
+    private Rectangle EventLabelBounds(LocationChartEventLabel label, Rectangle track)
+        => new(track.Left + ClampedLabelLeft(label, track.Width),
+            track.Top - LocationChartCardChrome.Scale(this, 29),
+            label.WidthPx,
+            LocationChartCardChrome.Scale(this, 20));
+
+    private void SetHoveredEvent(LocationChartEvent? marker)
+    {
+        if (Equals(_hoveredEvent, marker)) return;
+        Rectangle track = TrackBounds();
+        if (_hoveredEvent is LocationChartEvent previous)
+            Invalidate(EventBounds(previous, track));
+        _hoveredEvent = marker;
+        if (marker is LocationChartEvent current)
+            Invalidate(EventBounds(current, track));
+    }
+
+    private static Rectangle EventBounds(LocationChartEvent marker, Rectangle track)
+        => new(track.Left + marker.XPx - 20, track.Top - 27, 40, track.Height + 33);
+
+    private void SetHovered(LocationChartSegment? segment)
+    {
+        if (Equals(_hovered, segment))
+            return;
+
+        Rectangle track = TrackBounds();
+        if (_hovered is LocationChartSegment previous)
+            Invalidate(Rectangle.Inflate(SegmentBounds(previous, track), 10, 10));
+        _hovered = segment;
+        if (segment is LocationChartSegment current)
+            Invalidate(Rectangle.Inflate(SegmentBounds(current, track), 10, 10));
+    }
+
+    private static Rectangle SegmentBounds(LocationChartSegment segment, Rectangle track)
+    {
+        int left = Math.Clamp(track.X + segment.StartPx, track.Left, track.Right);
+        int width = Math.Min(Math.Max(1, segment.WidthPx), track.Right - left);
+        return new Rectangle(left, track.Y, Math.Max(0, width), track.Height);
+    }
+
+    private void DrawCountryLabels(Graphics graphics, Rectangle track)
+    {
+        int compactWidth = TextRenderer.MeasureText("RU", UiTheme.IsoMonoCompact, Size.Empty, TextFormatFlags.NoPadding).Width + 2;
+        foreach (LocationChartSegment segment in CountryLabelCandidates(_model, compactWidth))
+        {
+            string country = segment.Iso!;
+            Rectangle box = SegmentBounds(segment, track);
+            int fullWidth = TextRenderer.MeasureText(country, UiTheme.IsoMono, Size.Empty, TextFormatFlags.NoPadding).Width;
+            Font font = box.Width >= fullWidth + 4 ? UiTheme.IsoMono : UiTheme.IsoMonoCompact;
+            int labelWidth = TextRenderer.MeasureText(country, font, Size.Empty, TextFormatFlags.NoPadding).Width;
+            if (box.Width < labelWidth + 2)
+                continue;
+
+            TextRenderer.DrawText(graphics, country, font, box,
+                LocationChartPalette.Ink(country), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+                | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+        }
+    }
+
+    internal static IReadOnlyList<LocationChartSegment> CountryLabelCandidates(LocationChartModel model, int minimumWidth)
+        => model.Segments.Where(segment => segment.Iso is not null && segment.WidthPx >= minimumWidth).ToArray();
+
     private string TipFor(LocationChartSegment segment)
     {
         string iso = segment.Iso ?? "";
@@ -287,7 +545,33 @@ internal sealed class LocationSpanChart : Control
             elapsed = TimeSpan.Zero;
         }
 
-        return name + ": " + LocationCopy.Duration(elapsed);
+        return name + ": " + LocationCopy.Duration(elapsed)
+            + "\nВремя на графике соответствует проверкам; фактическое переключение могло произойти между ними.";
+    }
+
+    private static string TipFor(LocationChartEvent marker)
+    {
+        string name = GeoCountryNames.Russian(marker.Iso) + " · " + marker.Iso;
+        if (marker.StartUtc == marker.EndUtc)
+            return $"{name}\nОдна подтвержденная проверка: {marker.StartUtc.ToLocalTime():dd.MM HH:mm:ss}\nДлительность неизвестна; ширина метки не означает продолжительность.";
+        return $"{name}\nПроверки: {marker.StartUtc.ToLocalTime():dd.MM HH:mm:ss} – {marker.EndUtc.ToLocalTime():dd.MM HH:mm:ss}\nУчасток уже одного пикселя в выбранном периоде.";
+    }
+
+    private static string TipFor(LocationChartEventLabel label)
+    {
+        if (label.Events.Count == 1)
+            return TipFor(label.Events[0]);
+
+        IEnumerable<string> rows = label.Events.Take(8).Select(marker =>
+        {
+            string country = GeoCountryNames.Russian(marker.Iso) + " · " + marker.Iso;
+            string start = marker.StartUtc.ToLocalTime().ToString("dd.MM HH:mm:ss");
+            return marker.StartUtc == marker.EndUtc
+                ? country + " · " + start + " · длительность неизвестна"
+                : country + " · " + start + " – " + marker.EndUtc.ToLocalTime().ToString("HH:mm:ss") + " · участок уже одного пикселя";
+        });
+        string more = label.Events.Count > 8 ? $"\nЕщё {label.Events.Count - 8}" : "";
+        return $"Короткие участки: {label.Events.Count}\n{string.Join("\n", rows)}{more}";
     }
 
     private string Describe()
@@ -301,10 +585,19 @@ internal sealed class LocationSpanChart : Control
             }
         }
 
+        foreach (LocationChartEvent marker in _model.Events)
+            parts.Add(marker.Iso + " (короткое событие)");
+
         return string.Join(", ", parts);
     }
 
     internal DateTimeOffset LastModelBuiltAt => _lastLayoutAt;
+    internal LocationChartSegment? HoveredSegmentForTests => _hovered;
+    internal LocationChartEvent? HoveredEventForTests => _hoveredEvent;
+    internal string HoverTipForTests => _tip.GetToolTip(this) ?? string.Empty;
+    internal void DispatchMouseMoveForTests(Point point)
+        => OnMouseMove(new MouseEventArgs(MouseButtons.None, 0, point.X, point.Y, 0));
+    internal void DispatchMouseLeaveForTests() => OnMouseLeave(EventArgs.Empty);
 
 }
 

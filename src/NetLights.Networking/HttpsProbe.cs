@@ -78,6 +78,11 @@ public sealed class HttpsProbe : IProbe, IDisposable
             Version = HttpVersion.Version11,
             VersionPolicy = HttpVersionPolicy.RequestVersionExact
         };
+        if (!string.IsNullOrWhiteSpace(_testSsl?.TargetHost))
+        {
+            request.Headers.Host = _testSsl.TargetHost;
+        }
+
         request.Headers.UserAgent.ParseAdd(_userAgent);
         request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true, NoStore = true };
 
@@ -240,7 +245,9 @@ public sealed class HttpsProbe : IProbe, IDisposable
         {
             if (cursor is AuthenticationException)
             {
-                return (ProbeOutcome.Indeterminate, new StructuredFailure(StructuredFailureKind.CertificateTrust, "tls-auth"));
+                return (ProbeOutcome.Indeterminate, new StructuredFailure(
+                    StructuredFailureKind.CertificateTrust,
+                    TlsFailureCodes(ex)));
             }
 
             if (cursor is SocketException socket)
@@ -277,5 +284,21 @@ public sealed class HttpsProbe : IProbe, IDisposable
         }
 
         return (ProbeOutcome.Indeterminate, new StructuredFailure(StructuredFailureKind.LocalResource, ex.GetType().Name));
+    }
+
+    private static string TlsFailureCodes(Exception exception)
+    {
+        var codes = new List<string>();
+        for (Exception? cursor = exception; cursor is not null; cursor = cursor.InnerException)
+        {
+            string code = cursor.GetType().Name + " 0x" + cursor.HResult.ToString("X8", System.Globalization.CultureInfo.InvariantCulture);
+            if (cursor is System.ComponentModel.Win32Exception native)
+            {
+                code += " native=" + native.NativeErrorCode.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+            codes.Add(code);
+        }
+
+        return "tls-auth " + string.Join(" -> ", codes);
     }
 }

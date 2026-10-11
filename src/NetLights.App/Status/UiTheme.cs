@@ -33,10 +33,12 @@ internal static class UiTheme
 
     public static readonly Font Title = new("Segoe UI", 16F, FontStyle.Bold, GraphicsUnit.Point);
     public static readonly Font IsoMono = CreateIsoMono();
+    public static readonly Font IsoMonoCompact = CreateCompactIsoMono();
     public static readonly Font Body = new("Segoe UI", 10F, GraphicsUnit.Point);
     public static readonly Font BodyBold = new("Segoe UI", 10F, FontStyle.Bold, GraphicsUnit.Point);
     public static readonly Font Caption = new("Segoe UI", 9F, GraphicsUnit.Point);
     public static readonly Font Button = new("Segoe UI", 9.5F, FontStyle.Bold, GraphicsUnit.Point);
+    public static readonly Font ToolTip = new("Segoe UI Semibold", 10F, FontStyle.Regular, GraphicsUnit.Point);
 
     private static Font CreateIsoMono()
     {
@@ -47,6 +49,18 @@ internal static class UiTheme
         catch (ArgumentException)
         {
             return new Font(FontFamily.GenericMonospace, 11F, FontStyle.Bold, GraphicsUnit.Point);
+        }
+    }
+
+    private static Font CreateCompactIsoMono()
+    {
+        try
+        {
+            return new Font("Consolas", 8F, FontStyle.Bold, GraphicsUnit.Point);
+        }
+        catch (ArgumentException)
+        {
+            return new Font(FontFamily.GenericMonospace, 8F, FontStyle.Bold, GraphicsUnit.Point);
         }
     }
 }

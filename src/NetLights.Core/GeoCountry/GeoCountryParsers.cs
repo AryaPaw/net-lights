@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Net;
 using System.Text.Json;
 
 namespace NetLights.Core;
@@ -7,8 +8,12 @@ namespace NetLights.Core;
 public static class GeoCountryParsers
 {
     public static bool TryParseIpWhoCurrent(ReadOnlySpan<byte> utf8, out string country)
+        => TryParseIpWhoCurrent(utf8, out country, out _);
+
+    public static bool TryParseIpWhoCurrent(ReadOnlySpan<byte> utf8, out string country, out string publicIp)
     {
         country = "";
+        publicIp = "";
         if (!TryReadObject(utf8, out JsonDocument doc))
         {
             return false;
@@ -20,6 +25,7 @@ public static class GeoCountryParsers
             if (!root.TryGetProperty("success", out JsonElement success)
                 || success.ValueKind != JsonValueKind.True
                 || !TryReadString(root, "country_code", out string? code)
+                || !TryReadPublicIp(root, out publicIp)
                 || !TryNormalizeIso3166Alpha2(code, out string? iso))
             {
                 return false;
@@ -28,6 +34,31 @@ public static class GeoCountryParsers
             country = iso;
             return true;
         }
+    }
+
+    public static bool TryParseCountryIsCurrent(ReadOnlySpan<byte> utf8, out string country, out string publicIp)
+    {
+        country = "";
+        publicIp = "";
+        if (!TryReadObject(utf8, out JsonDocument doc)) return false;
+        using (doc)
+        {
+            JsonElement root = doc.RootElement;
+            if (!TryReadString(root, "country", out string? code)
+                || !TryReadPublicIp(root, out publicIp)
+                || !TryNormalizeIso3166Alpha2(code, out string? iso)) return false;
+            country = iso;
+            return true;
+        }
+    }
+
+    private static bool TryReadPublicIp(JsonElement root, out string ip)
+    {
+        ip = "";
+        if (!TryReadString(root, "ip", out string? value) || !IPAddress.TryParse(value, out IPAddress? parsed))
+            return false;
+        ip = parsed.ToString();
+        return true;
     }
 
     public static bool TryNormalizeIso3166Alpha2(string? value, [NotNullWhen(true)] out string? iso)

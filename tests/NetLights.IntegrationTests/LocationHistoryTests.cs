@@ -34,6 +34,33 @@ public sealed class LocationHistoryTests
     }
 
     [Fact]
+    public void AvailabilityChart_TracksAreSixteenLogicalPixelsHigh()
+    {
+        using var chart = new AvailabilityHistoryChart { Width = 640, Height = 160 };
+        int expected = (16 * chart.DeviceDpi + 48) / 96;
+        Assert.Equal(expected, chart.TrackFor(EndpointGroup.Ru).Height);
+        Assert.Equal(expected, chart.TrackFor(EndpointGroup.World).Height);
+    }
+
+    [Fact]
+    public void LocationDebugCharts_AreNotCreatedUntilExpanded()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        var history = new LocationHistory();
+        history.NoteIso("DE", now);
+        history.NoteObservation(new LocationObservation(now, new string('a', 64), "DE", "DE", "DE", null,
+            "v2fly-r1", false, false, false, true, "203.0.113.8", ResolutionSource: "country.is"));
+        using var panel = new LocationTimelinePanel(TimeProvider.System) { Width = 800, Height = 600 };
+
+        panel.Bind(history, GeoCountryDisplay.Confirmed("DE"));
+        Assert.Equal(0, panel.DebugSourceChartCount);
+        panel.ApplyDebugSourceCharts(true);
+        Assert.Equal(3, panel.DebugSourceChartCount);
+        panel.ApplyDebugSourceCharts(false);
+        Assert.Equal(0, panel.DebugSourceChartCount);
+    }
+
+    [Fact]
     public void AvailabilityChart_HoverUsesCachedStatusMapForTheCorrectRow()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -119,6 +146,24 @@ public sealed class LocationHistoryTests
     }
 
     [Fact]
+    public void FrequencyChart_ClockRefreshKeepsTooltipUnderStationaryPointer()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        using var form = new Form { Width = 640, Height = 260, ShowInTaskbar = false };
+        var chart = new LocationFrequencyChart { Dock = DockStyle.Fill };
+        form.Controls.Add(chart);
+        form.Show();
+        chart.Bind([new LocationStay("DE", now.AddMinutes(-20), null)], 1, now, TimeSpan.FromHours(3));
+        Rectangle plot = chart.PlotBounds();
+        chart.DispatchMouseMoveForTests(new Point(plot.Left + plot.Width * 95 / 100, plot.Top + plot.Height / 2));
+        Assert.StartsWith("0 смен", chart.HoverTipForTests, StringComparison.Ordinal);
+
+        chart.Tick(now.AddSeconds(31));
+
+        Assert.StartsWith("0 смен", chart.HoverTipForTests, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void LocationsPanel_ChangingWindowUpdatesBothChartPeriods()
     {
         using var form = new Form { Width = 620, Height = 500, ShowInTaskbar = false };
@@ -137,18 +182,353 @@ public sealed class LocationHistoryTests
     }
 
     [Fact]
+    public void LocationsPanel_NewObservationReusesExistingChartControls()
+    {
+        using var form = new Form { Width = 700, Height = 600, ShowInTaskbar = false };
+        var panel = new LocationTimelinePanel(TimeProvider.System) { Dock = DockStyle.Fill };
+        form.Controls.Add(panel);
+        form.Show();
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        var history = new LocationHistory();
+        history.NoteObservation(new LocationObservation(now.AddMinutes(-2), null, "DE", "DE", "DE", null,
+            "test", false, false, false, true, "203.0.113.10", now.AddMinutes(-2)));
+        panel.Bind(history, GeoCountryDisplay.Confirmed("DE"));
+        int structureBuilds = panel.StructureBuildCount;
+        LocationFrequencyChart frequency = FindNamed<LocationFrequencyChart>(panel, "Частота смен страны");
+
+        history.NoteObservation(new LocationObservation(now, null, "DE", "DE", "DE", null,
+            "test", false, false, false, true, "203.0.113.10", now));
+        panel.Bind(history, GeoCountryDisplay.Confirmed("DE"));
+
+        Assert.Equal(structureBuilds, panel.StructureBuildCount);
+        Assert.Same(frequency, FindNamed<LocationFrequencyChart>(panel, "Частота смен страны"));
+    }
+
+    [Fact]
+    public void LocationsPanel_RendersVirtualRowsAndDebugToggleUsesVisibleState()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        var stays = new List<LocationStay>(151);
+        for (int i = 0; i < 148; i++)
+        {
+            DateTimeOffset start = now.AddMinutes(-650 + i * 2);
+            stays.Add(new LocationStay(i % 2 == 0 ? "DE" : "FR", start, start.AddMinutes(1)));
+        }
+        stays.Add(new LocationStay("DE", now.AddHours(-2), now.AddHours(-1)));
+        stays.Add(new LocationStay("DE", now.AddHours(-1).AddSeconds(30), now.AddMinutes(-30)));
+        stays.Add(new LocationStay("PL", now.AddMinutes(-10), null));
+        var history = new LocationHistory(stays, now);
+        history.NoteObservation(new LocationObservation(now.AddMinutes(-90), null, "DE", "DE", "DE", null,
+            "test", false, false, false, true, "203.0.113.8", now.AddMinutes(-90)));
+        history.NoteObservation(new LocationObservation(now.AddMinutes(-45), null, "DE", "DE", "DE", null,
+            "test", false, false, false, true, "203.0.113.9", now.AddMinutes(-45)));
+        history.NoteObservation(new LocationObservation(now.AddMinutes(-5), null, "PL", "PL", "PL", null,
+            "test", false, false, false, true, "203.0.113.10", now.AddMinutes(-5)));
+
+        using var form = new Form { Width = 800, Height = 520, ShowInTaskbar = false };
+        using var panel = new LocationTimelinePanel(TimeProvider.System) { Dock = DockStyle.Fill };
+        form.Controls.Add(panel);
+        form.Show();
+        var debugChanges = new List<bool>();
+        panel.DebugSourceChartsChanged = debugChanges.Add;
+        panel.Bind(history, GeoCountryDisplay.Confirmed("RU"));
+
+        Assert.Equal(151, panel.VisibleHistoryRowCount);
+        Assert.True(panel.AutoScrollMinSize.Height > panel.ClientSize.Height);
+        Assert.Contains("Россия · RU", panel.HistoryRowTipForTests(0), StringComparison.Ordinal);
+        Assert.Contains("Последний публичный IP: 203.0.113.10", panel.HistoryRowTipForTests(1), StringComparison.Ordinal);
+        Assert.Contains("Кратких перерывов без подтверждения: 1", panel.HistoryRowTipForTests(2), StringComparison.Ordinal);
+        Assert.Contains("203.0.113.9", panel.HistoryRowTipForTests(2), StringComparison.Ordinal);
+        using var visibleRows = new Bitmap(panel.Width, panel.Height);
+        panel.DrawToBitmap(visibleRows, new Rectangle(Point.Empty, panel.Size));
+
+        ThemedButton toggle = FindNamed<ThemedButton>(panel, "toggleLocationDebugSources")!;
+        toggle.PerformClick();
+        Assert.Equal(new[] { true }, debugChanges);
+        Assert.Equal(3, panel.DebugSourceChartCount);
+        using var debugView = new Bitmap(panel.Width, panel.Height);
+        panel.DrawToBitmap(debugView, new Rectangle(Point.Empty, panel.Size));
+        toggle.PerformClick();
+        Assert.Equal(new[] { true, false }, debugChanges);
+        Assert.Equal(0, panel.DebugSourceChartCount);
+        Assert.False(panel.HorizontalScroll.Visible);
+
+        panel.AutoScrollPosition = new Point(0, panel.AutoScrollMinSize.Height);
+        Rectangle last = panel.HistoryRowBounds(panel.VisibleHistoryRowCount - 1);
+        Assert.True(panel.ClientRectangle.IntersectsWith(last), $"Last virtual row is not reachable: {last}");
+        using var scrolledRows = new Bitmap(panel.Width, panel.Height);
+        panel.DrawToBitmap(scrolledRows, new Rectangle(Point.Empty, panel.Size));
+    }
+
+    [Fact]
     public void LocationSpanChart_UsesCardInsetWhileFrequencyPlotReservesYAxisSpace()
     {
         using var span = new LocationSpanChart();
         using var frequency = new LocationFrequencyChart();
+        using var local = new LocationSourceHistoryChart(LocationSourceKind.LocalDatabase);
+        using var online = new LocationSourceHistoryChart(LocationSourceKind.Online);
+        using var iplocate = new LocationSourceHistoryChart(LocationSourceKind.IplocateDatabase);
         span.Width = 600;
         frequency.Width = 600;
+        local.Width = online.Width = 600;
+        iplocate.Width = 600;
 
         Rectangle spanPlot = span.TrackBounds();
         Rectangle frequencyPlot = frequency.PlotBounds();
         Assert.Equal(14, spanPlot.Left);
+        Assert.Equal(spanPlot.Left, local.TrackBounds().Left);
+        Assert.Equal(spanPlot.Left, online.TrackBounds().Left);
+        Assert.Equal(spanPlot.Right, local.TrackBounds().Right);
+        Assert.Equal(spanPlot.Right, online.TrackBounds().Right);
+        Assert.Equal(spanPlot.Left, iplocate.TrackBounds().Left);
+        Assert.Equal(spanPlot.Right, iplocate.TrackBounds().Right);
         Assert.True(frequencyPlot.Left > spanPlot.Left);
         Assert.Equal(spanPlot.Right, frequencyPlot.Right);
+    }
+
+    [Fact]
+    public void SourceChart_HitTestPrioritizesVisibleShortConflictMarker()
+    {
+        DateTimeOffset now = DateTimeOffset.Parse("2026-09-30T12:00:00Z");
+        DateTimeOffset conflictAt = now.AddMinutes(-15);
+        LocationObservation[] observations =
+        [
+            new(now.AddMinutes(-30), null, "DE", "DE", "DE", null, "test",
+                false, false, false, true, null, conflictAt),
+            new(conflictAt, null, null, "TR", "DE", null, "test",
+                false, false, false, false, null, conflictAt),
+            new(conflictAt.AddSeconds(5), null, "DE", "DE", "DE", null, "test",
+                false, false, false, true, null, conflictAt.AddSeconds(5))
+        ];
+        using var chart = new LocationSourceHistoryChart(LocationSourceKind.LocalDatabase)
+        {
+            Width = 600,
+            Height = 112
+        };
+        chart.Bind(observations, [], now, TimeSpan.FromHours(1));
+        Rectangle track = chart.TrackBounds();
+        int x = track.Left + track.Width * 3 / 4;
+
+        Assert.True(chart.HitTest(new Point(x, track.Top + track.Height / 2))?.Conflict);
+    }
+
+    [Fact]
+    public void SourceCharts_RenderCountryGapsAndConflictsAndDescribeTheSameIntervals()
+    {
+        DateTimeOffset now = DateTimeOffset.Parse("2026-09-30T12:00:00Z");
+        DateTimeOffset conflictAt = now.AddMinutes(-20);
+        DateTimeOffset agreedAt = now.AddMinutes(-8);
+        LocationObservation[] observations =
+        [
+            new(conflictAt, new string('a', 64), "DE", "FR", "DE", "FR", "v2fly-test",
+                true, false, false, true, "203.0.113.8", now.AddMinutes(-8), "JP", "iplocate-test", "country.is"),
+            new(agreedAt, new string('b', 64), "DE", "DE", "DE", null, "v2fly-test",
+                false, false, false, true, "203.0.113.9", now.AddMinutes(-4), "DE", "iplocate-test", "country.is"),
+            new(now.AddMinutes(-1), null, null, null, null, null, null,
+                false, false, false, false)
+        ];
+        LocationStay[] stays = [new("DE", conflictAt, null)];
+        using var local = new LocationSourceHistoryChart(LocationSourceKind.LocalDatabase) { Width = 600, Height = 112 };
+        using var online = new LocationSourceHistoryChart(LocationSourceKind.Online) { Width = 600, Height = 112 };
+        using var iplocate = new LocationSourceHistoryChart(LocationSourceKind.IplocateDatabase) { Width = 600, Height = 112 };
+        local.Bind(observations, stays, now, TimeSpan.FromHours(1));
+        online.Bind(observations, stays, now, TimeSpan.FromHours(1));
+        iplocate.Bind(observations, stays, now, TimeSpan.FromHours(1));
+
+        using var localImage = new Bitmap(local.Width, local.Height);
+        using var onlineImage = new Bitmap(online.Width, online.Height);
+        using var iplocateImage = new Bitmap(iplocate.Width, iplocate.Height);
+        local.DrawToBitmap(localImage, new Rectangle(Point.Empty, local.Size));
+        online.DrawToBitmap(onlineImage, new Rectangle(Point.Empty, online.Size));
+        iplocate.DrawToBitmap(iplocateImage, new Rectangle(Point.Empty, iplocate.Size));
+
+        Rectangle track = local.TrackBounds();
+        int conflictX = track.Left + (track.Width * 2 / 3) + track.Width / 12;
+        Point conflictPoint = new(conflictX, track.Top + track.Height / 2);
+        LocationSourceSpan localSpan = Assert.IsType<LocationSourceSpan>(local.HitTest(conflictPoint));
+        LocationSourceSpan onlineSpan = Assert.IsType<LocationSourceSpan>(online.HitTest(conflictPoint));
+        LocationSourceSpan iplocateSpan = Assert.IsType<LocationSourceSpan>(iplocate.HitTest(conflictPoint));
+        Assert.True(localSpan.Conflict);
+        Assert.Equal("FR", localSpan.LocalCountry);
+        Assert.Equal("DE", onlineSpan.OnlineCountry);
+        Assert.Equal("JP", iplocateSpan.IplocateCountry);
+        Assert.Contains("КОНФЛИКТ", local.BuildTipForTests(localSpan), StringComparison.Ordinal);
+        Assert.Contains("Публичный IP: 203.0.113.8", online.BuildTipForTests(onlineSpan), StringComparison.Ordinal);
+        Assert.Contains("IPLocate.io · CC BY-SA 4.0", iplocate.BuildTipForTests(iplocateSpan), StringComparison.Ordinal);
+        Assert.NotEqual(local.BackColor.ToArgb(), localImage.GetPixel(conflictX, track.Top + 1).ToArgb());
+        Assert.NotEqual(online.BackColor.ToArgb(), onlineImage.GetPixel(conflictX, track.Top + 1).ToArgb());
+        Assert.NotEqual(iplocate.BackColor.ToArgb(), iplocateImage.GetPixel(conflictX, track.Top + 1).ToArgb());
+
+        local.Tick(now.AddSeconds(31));
+        Assert.True(local.SegmentCount > 0);
+    }
+
+    [Fact]
+    public void SourceChart_DistinguishesNoChecksFromARecordedNoResult()
+    {
+        DateTimeOffset now = DateTimeOffset.Parse("2026-09-30T12:00:30Z");
+        using var chart = new LocationSourceHistoryChart(LocationSourceKind.Online) { Width = 600, Height = 112 };
+        using var image = new Bitmap(chart.Width, chart.Height);
+        chart.Bind([], [], now, TimeSpan.FromHours(1));
+        chart.DrawToBitmap(image, new Rectangle(Point.Empty, chart.Size));
+        LocationSourceSpan noChecks = Assert.IsType<LocationSourceSpan>(chart.HitTest(new Point(100, chart.TrackBounds().Top + 4)));
+        Assert.Null(noChecks.FirstObservedUtc);
+        Assert.Contains("Проверок в этом промежутке нет", chart.BuildTipForTests(noChecks), StringComparison.Ordinal);
+
+        DateTimeOffset observed = now.AddMinutes(-1);
+        LocationObservation[] unknown =
+        [new(observed, null, null, null, null, null, null, false, false, false, false)];
+        chart.Bind(unknown, [], now, TimeSpan.FromMinutes(1));
+        using var noResultImage = new Bitmap(chart.Width, chart.Height);
+        chart.DrawToBitmap(noResultImage, new Rectangle(Point.Empty, chart.Size));
+        LocationSourceSpan noResult = Assert.IsType<LocationSourceSpan>(chart.HitTest(new Point(100, chart.TrackBounds().Top + 4)));
+        Assert.Equal(observed, noResult.FirstObservedUtc);
+        Assert.Contains("нет результата", chart.BuildTipForTests(noResult), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("не означает потерю интернета", chart.BuildTipForTests(noResult), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LocationSpanChart_OutlinesOnlyHoveredCountrySegment()
+    {
+        DateTimeOffset now = DateTimeOffset.Parse("2026-09-30T12:00:00Z");
+        LocationStay[] stays =
+        [
+            new("DE", now.AddHours(-2), now.AddHours(-1)),
+            new("PL", now.AddHours(-1), null)
+        ];
+        using var chart = new LocationSpanChart { Width = 600, Height = 126 };
+        chart.Bind(stays, now, now.AddHours(-3));
+        Rectangle track = chart.TrackBounds();
+        Point german = new(track.Left + track.Width / 2, track.Top + track.Height / 2);
+        Point polish = new(track.Left + track.Width * 5 / 6, track.Top + track.Height / 2);
+
+        using var before = new Bitmap(chart.Width, chart.Height);
+        chart.DrawToBitmap(before, new Rectangle(Point.Empty, chart.Size));
+
+        chart.DispatchMouseMoveForTests(german);
+        Assert.Equal("DE", chart.HoveredSegmentForTests?.Iso);
+        using var highlighted = new Bitmap(chart.Width, chart.Height);
+        chart.DrawToBitmap(highlighted, new Rectangle(Point.Empty, chart.Size));
+        Assert.NotEqual(before.GetPixel(german.X, track.Top - 3).ToArgb(),
+            highlighted.GetPixel(german.X, track.Top - 3).ToArgb());
+        chart.DispatchMouseMoveForTests(polish);
+        Assert.Equal("PL", chart.HoveredSegmentForTests?.Iso);
+        chart.DispatchMouseMoveForTests(new Point(track.Left, track.Top - 1));
+        Assert.Null(chart.HoveredSegmentForTests);
+    }
+
+    [Fact]
+    public void LocationSpanChart_LabelsEachRepeatedCountrySegmentThatFits()
+    {
+        var model = new LocationChartModel(DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow,
+        [
+            new("PL", 0, 100, false, 0.4, DateTimeOffset.UtcNow.AddMinutes(-60), DateTimeOffset.UtcNow.AddMinutes(-36)),
+            new(null, 100, 10, false, 0.04, DateTimeOffset.UtcNow.AddMinutes(-36), DateTimeOffset.UtcNow.AddMinutes(-33.6)),
+            new("PL", 110, 120, true, 0.56, DateTimeOffset.UtcNow.AddMinutes(-33.6), DateTimeOffset.UtcNow)
+        ]);
+
+        IReadOnlyList<LocationChartSegment> labels = LocationSpanChart.CountryLabelCandidates(model, minimumWidth: 20);
+
+        Assert.Equal(2, labels.Count);
+        Assert.All(labels, segment => Assert.Equal("PL", segment.Iso));
+    }
+
+    [Fact]
+    public void LocationSpanChart_GroupsCrowdedShortEventLabelsWithoutOverlap()
+    {
+        DateTimeOffset now = DateTimeOffset.Parse("2026-09-30T12:00:00Z");
+        LocationChartEvent[] events =
+        [
+            new("DE", now, now, 50),
+            new("PL", now.AddSeconds(1), now.AddSeconds(1), 60),
+            new("RU", now.AddSeconds(2), now.AddSeconds(2), 70),
+            new("FR", now.AddMinutes(1), now.AddMinutes(1), 190),
+            new("PL", now.AddMinutes(2), now.AddMinutes(2), 198),
+            new("FI", now.AddMinutes(3), now.AddMinutes(3), 500)
+        ];
+
+        IReadOnlyList<LocationChartEventLabel> labels = LocationSpanChart.BuildEventLabels(events, trackWidth: 600, maximumLabelWidth: 120, minimumLabelSpacing: 36);
+
+        Assert.Equal(3, labels.Count);
+        Assert.Equal("DE · PL · RU", labels[0].Text);
+        Assert.Equal("FR · PL", labels[1].Text);
+        Assert.Equal("FI", labels[2].Text);
+        Assert.Equal(new[] { 3, 2, 1 }, labels.Select(label => label.Events.Count));
+        for (int i = 1; i < labels.Count; i++)
+        {
+            int previousRight = labels[i - 1].CenterPx + labels[i - 1].WidthPx / 2;
+            int nextLeft = labels[i].CenterPx - labels[i].WidthPx / 2;
+            Assert.True(nextLeft >= previousRight + 4, $"Labels overlap: {labels[i - 1].Text} / {labels[i].Text}");
+        }
+
+        LocationChartEvent[] dense = Enumerable.Range(0, 10)
+            .Select(index => new LocationChartEvent($"C{index}", now.AddSeconds(index), now.AddSeconds(index), 100 + index))
+            .ToArray();
+        LocationChartEventLabel compact = Assert.Single(LocationSpanChart.BuildEventLabels(dense, 600, 120, 36));
+        Assert.Equal(10, compact.Events.Count);
+        Assert.InRange(compact.WidthPx, 1, 120);
+        Assert.Contains("+", compact.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LocationHistoryRows_CombineSameCountryAcrossBriefUnconfirmedGaps()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        LocationStay[] stays =
+        [
+            new("PL", now.AddMinutes(-30), now.AddMinutes(-20)),
+            new("PL", now.AddMinutes(-20).AddSeconds(2), now.AddMinutes(-10)),
+            new("PL", now.AddMinutes(-10).AddSeconds(2), null)
+        ];
+        var history = new LocationHistory(stays, now);
+        using var panel = new LocationTimelinePanel(TimeProvider.System) { Width = 700, Height = 600 };
+        panel.ApplyChartWindowHours(3);
+        panel.Bind(history, GeoCountryDisplay.Confirmed("PL"));
+
+        Assert.Equal(1, panel.VisibleHistoryRowCount);
+        Assert.Contains("Кратких перерывов без подтверждения: 2", panel.HistoryRowTipForTests(0), StringComparison.Ordinal);
+
+        LocationStay[] longGap =
+        [
+            new("PL", now.AddMinutes(-30), now.AddMinutes(-20)),
+            new("PL", now.AddMinutes(-16), null)
+        ];
+        panel.Bind(new LocationHistory(longGap, now), GeoCountryDisplay.Confirmed("PL"));
+        Assert.Equal(2, panel.VisibleHistoryRowCount);
+    }
+
+    [Fact]
+    public void ZeroDurationRussianObservation_IsVisibleAsEventAndHasUnknownDuration()
+    {
+        DateTimeOffset now = DateTimeOffset.Parse("2026-09-30T13:00:00Z");
+        DateTimeOffset start = now.AddHours(-1);
+        DateTimeOffset at = start.AddMinutes(34);
+        LocationStay[] stays =
+        [
+            new("PL", start, at),
+            new("RU", at, at),
+            new("PL", start.AddMinutes(50), null)
+        ];
+        using var chart = new LocationSpanChart { Width = 600, Height = 126 };
+        chart.Bind(stays, now, start);
+        Rectangle track = chart.TrackBounds();
+        int x = track.Left + (int)Math.Round(track.Width * 34d / 60d);
+        chart.DispatchMouseMoveForTests(new Point(x, track.Top - 15));
+        Assert.Equal("RU", chart.HoveredEventForTests?.Iso);
+        Assert.Contains("Длительность неизвестна", chart.HoverTipForTests, StringComparison.Ordinal);
+
+        using var panel = new LocationTimelinePanel(TimeProvider.System) { Width = 700, Height = 600 };
+        DateTimeOffset recent = DateTimeOffset.UtcNow;
+        LocationStay[] recentStays =
+        [
+            new("PL", recent.AddMinutes(-50), recent.AddMinutes(-26)),
+            new("RU", recent.AddMinutes(-26), recent.AddMinutes(-26)),
+            new("PL", recent.AddMinutes(-10), null)
+        ];
+        panel.ApplyChartWindowHours(3);
+        panel.Bind(new LocationHistory(recentStays, recent), GeoCountryDisplay.Confirmed("PL"));
+        Assert.Equal(3, panel.VisibleHistoryRowCount);
+        Assert.Contains("Длительность неизвестна", panel.HistoryRowTipForTests(1), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -246,6 +626,44 @@ public sealed class LocationHistoryTests
             catch (IOException)
             {
             }
+        }
+    }
+
+    [Fact]
+    public void Store_RoundtripsGeoIpObservationsWithPublicIp()
+    {
+        string previous = SettingsStore.RootDirectory;
+        string temp = Path.Combine(Path.GetTempPath(), "net-lights-geo-observations-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            SettingsStore.RootDirectory = temp;
+            DateTimeOffset observed = DateTimeOffset.UtcNow;
+            var log = new LocationHistory();
+            log.NoteIso("DE", observed);
+            log.NoteObservation(new LocationObservation(observed, new string('a', 64), "DE", "DE", "DE", null,
+                "v2fly-r1", false, false, false, true, "203.0.113.8", IplocateCountry: "FR",
+                IplocateDatabaseVersion: "mirror · 2026-09-29", ResolutionSource: "country.is"));
+
+            LocationHistoryStore.Save(log);
+            LocationHistory loaded = LocationHistoryStore.Load();
+
+            LocationObservation saved = Assert.Single(loaded.Observations);
+            Assert.Equal(new string('a', 64), saved.PublicIpHash);
+            Assert.Equal("v2fly-r1", saved.DatabaseVersion);
+            Assert.Equal("DE", saved.CountryCode);
+            Assert.Equal("203.0.113.8", saved.PublicIp);
+            Assert.Equal("FR", saved.IplocateCountry);
+            Assert.Equal("mirror · 2026-09-29", saved.IplocateDatabaseVersion);
+            Assert.Equal("country.is", saved.ResolutionSource);
+            Assert.Contains("203.0.113.8", File.ReadAllText(LocationHistoryStore.FilePath), StringComparison.Ordinal);
+        }
+        finally
+        {
+            SettingsStore.RootDirectory = previous;
+            try { Directory.Delete(temp, true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
 
@@ -473,8 +891,10 @@ public sealed class LocationHistoryTests
 
         ThemedButton fiveDays = FindNamed<ThemedButton>(form, "availabilityChartWindow120");
         ThemedButton sevenDays = FindNamed<ThemedButton>(form, "availabilityChartWindow168");
+        ThemedButton oneHour = FindNamed<ThemedButton>(form, "availabilityChartWindow1");
         Assert.Equal("5 д", fiveDays.Text);
         Assert.Equal("7 д", sevenDays.Text);
+        Assert.Equal("1 ч", oneHour.Text);
 
         Assert.True(fiveDays.Visible && fiveDays.Enabled, "the five-day status period button must be interactive");
         fiveDays.Focus();
@@ -485,6 +905,13 @@ public sealed class LocationHistoryTests
         Assert.True(FindNamed<ThemedButton>(form, "locationChartWindow120").Primary);
         Assert.True(fiveDays.Primary);
         Assert.False(sevenDays.Primary);
+
+        oneHour.PerformClick();
+        Application.DoEvents();
+
+        Assert.Equal(1, selectedHours);
+        Assert.True(FindNamed<ThemedButton>(form, "locationChartWindow1").Primary);
+        Assert.True(oneHour.Primary);
     }
 
     [Fact]
@@ -766,6 +1193,18 @@ public sealed class LocationHistoryTests
 
         Assert.Equal(1, opened);
         Assert.Equal(1, reset);
+    }
+
+    [Fact]
+    public void SettingsPage_KeepsDataCreditsInSeparateDialog()
+    {
+        using var form = new StatusForm();
+        using var credits = new DataSourcesDialog();
+
+        Assert.NotNull(FindNamed<LinkLabel>(form, "dataSourcesLink"));
+        Assert.NotNull(FindNamed<LinkLabel>(credits, "dbIpGeoIpAttribution"));
+        Assert.NotNull(FindNamed<LinkLabel>(credits, "v2FlyGeoIpAttribution"));
+        Assert.Null(FindNamedOrNull<LinkLabel>(form, "dbIpGeoIpAttribution"));
     }
 
     [Fact]

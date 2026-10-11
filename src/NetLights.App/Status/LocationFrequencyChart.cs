@@ -6,7 +6,7 @@ namespace NetLights.App;
 internal sealed class LocationFrequencyChart : Control
 {
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(30);
-    private readonly ToolTip _tip = new() { ShowAlways = true, InitialDelay = 250, ReshowDelay = 100, AutoPopDelay = 4000, UseAnimation = false, UseFading = false };
+    private readonly ChartToolTip _tip = new(autoPopDelay: 4000);
     private IReadOnlyList<LocationStay> _stays = [];
     private long _revision = -1;
     private LocationFrequencyModel _model = new(default, default, [], 0, 0, 0, []);
@@ -16,6 +16,7 @@ internal sealed class LocationFrequencyChart : Control
     private TimeSpan _window = LocationChartWindows.Default;
     private int _calculatedWidth = -1;
     private int _hoverIndex = -1;
+    private Point? _lastHoverPoint;
     private string _summary = "";
     private PointF[] _seriesPoints = [];
 
@@ -81,6 +82,7 @@ internal sealed class LocationFrequencyChart : Control
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
+        _lastHoverPoint = e.Location;
         Rectangle plot = PlotBounds();
         if (!plot.Contains(e.Location) || _model.ChangesPerInterval.Count == 0)
         {
@@ -98,13 +100,14 @@ internal sealed class LocationFrequencyChart : Control
             ? ChangesLabel(_model.ChangesPerInterval[_hoverIndex])
             : "Нет данных";
         string tip = $"{value}\n{from.ToLocalTime():dd.MM HH:mm} – {to.ToLocalTime():dd.MM HH:mm}";
-        _tip.SetToolTip(this, tip);
+        _tip.ShowFor(this, tip, e.Location);
         InvalidateHoverColumn(plot, previousIndex, _hoverIndex);
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
+        _lastHoverPoint = null;
         ClearHover();
     }
 
@@ -186,8 +189,14 @@ internal sealed class LocationFrequencyChart : Control
         _seriesPoints = BuildLinePoints(_model.ChangesPerInterval, plot);
         _summary = $"{ChangesLabel(_model.ChangeCount)} · {CountriesLabel(_model.CountryCount)}";
         AccessibleDescription = $"{_summary}. Значения показывают смены по интервалам выбранного периода.";
-        _hoverIndex = -1;
-        _tip.SetToolTip(this, "");
+        if (_hoverIndex >= 0)
+        {
+            _hoverIndex = -1;
+            if (_lastHoverPoint is Point point && IsHandleCreated)
+                OnMouseMove(new MouseEventArgs(MouseButtons.None, 0, point.X, point.Y, 0));
+            else
+                _tip.Clear(this);
+        }
     }
 
     private (DateTimeOffset Start, DateTimeOffset End) SampleRange(int index)

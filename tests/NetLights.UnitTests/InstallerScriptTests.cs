@@ -1,4 +1,5 @@
 using Xunit;
+using System.Xml.Linq;
 
 namespace NetLights.UnitTests;
 
@@ -22,6 +23,21 @@ public sealed class InstallerScriptTests
         string script = File.ReadAllText(FindInstallerScript());
         Assert.Contains("Flags: nowait postinstall skipifsilent", script, StringComparison.Ordinal);
         Assert.Contains("Flags: nowait skipifnotsilent", script, StringComparison.Ordinal);
+        Assert.Contains("Check: not IsUpdateAgentInstall", script, StringComparison.Ordinal);
+        Assert.Contains("'/NETLIGHTSUPDATE'", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InstallerFallbackVersionMatchesProjectVersion()
+    {
+        string installerPath = FindInstallerScript();
+        string root = Directory.GetParent(Path.GetDirectoryName(installerPath)!)!.FullName;
+        string projectVersion = XDocument.Load(Path.Combine(root, "Directory.Build.props"))
+            .Root?.Element("PropertyGroup")?.Element("Version")?.Value
+            ?? throw new InvalidOperationException("Project version was not found.");
+        string script = File.ReadAllText(installerPath);
+
+        Assert.Contains($"#define MyAppVersion \"{projectVersion}\"", script, StringComparison.Ordinal);
     }
 
     private static string FindInstallerScript()

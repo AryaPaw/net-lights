@@ -9,6 +9,7 @@ public enum NetworkAvailabilitySignal
 
 public sealed class NetworkAvailabilityGate
 {
+    private readonly object _gate = new();
     private readonly TimeSpan _debounce;
     private DateTimeOffset _lastEvent = DateTimeOffset.MinValue;
     private DateTimeOffset _pendingRestoreAt = DateTimeOffset.MinValue;
@@ -21,39 +22,46 @@ public sealed class NetworkAvailabilityGate
 
     public NetworkAvailabilitySignal OnChange(bool available, DateTimeOffset now)
     {
-        if (!available)
+        lock (_gate)
         {
-            return MarkUnavailable(now);
-        }
+            if (IsOutOfOrder(now))
+                return NetworkAvailabilitySignal.None;
 
-        if (_lastEvent != DateTimeOffset.MinValue && now - _lastEvent < _debounce)
-        {
-            _pendingRestoreAt = _lastEvent + _debounce;
-            return NetworkAvailabilitySignal.None;
-        }
+            if (!available)
+                return MarkUnavailable(now);
 
-        return CommitAvailable(now);
+            if (_lastEvent != DateTimeOffset.MinValue && now - _lastEvent < _debounce)
+            {
+                _pendingRestoreAt = _lastEvent + _debounce;
+                return NetworkAvailabilitySignal.None;
+            }
+
+            return CommitAvailable(now);
+        }
     }
 
     public NetworkAvailabilitySignal OnHeartbeat(bool available, DateTimeOffset now)
     {
-        if (!available)
+        lock (_gate)
         {
-            return MarkUnavailable(now);
-        }
+            if (IsOutOfOrder(now))
+                return NetworkAvailabilitySignal.None;
 
-        if (_lastKnown == true)
-        {
-            return NetworkAvailabilitySignal.None;
-        }
+            if (!available)
+                return MarkUnavailable(now);
 
-        if (_pendingRestoreAt != DateTimeOffset.MinValue && now < _pendingRestoreAt)
-        {
-            return NetworkAvailabilitySignal.None;
-        }
+            if (_lastKnown == true)
+                return NetworkAvailabilitySignal.None;
 
-        return CommitAvailable(now);
+            if (_pendingRestoreAt != DateTimeOffset.MinValue && now < _pendingRestoreAt)
+                return NetworkAvailabilitySignal.None;
+
+            return CommitAvailable(now);
+        }
     }
+
+    private bool IsOutOfOrder(DateTimeOffset now)
+        => _lastEvent != DateTimeOffset.MinValue && now < _lastEvent;
 
     private NetworkAvailabilitySignal MarkUnavailable(DateTimeOffset now)
     {

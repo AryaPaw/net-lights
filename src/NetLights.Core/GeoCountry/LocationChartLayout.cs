@@ -9,10 +9,15 @@ public sealed record LocationChartSegment(
     DateTimeOffset StartUtc,
     DateTimeOffset EndUtc);
 
+public sealed record LocationChartEvent(string Iso, DateTimeOffset StartUtc, DateTimeOffset EndUtc, int XPx);
+
 public sealed record LocationChartModel(
     DateTimeOffset OriginUtc,
     DateTimeOffset HorizonUtc,
-    IReadOnlyList<LocationChartSegment> Segments);
+    IReadOnlyList<LocationChartSegment> Segments)
+{
+    public IReadOnlyList<LocationChartEvent> Events { get; init; } = [];
+}
 
 public static class LocationChartLayout
 {
@@ -28,6 +33,8 @@ public static class LocationChartLayout
         }
 
         List<RawSpan> raw = Collect(stays, now);
+        RawSpan[] points = raw.Where(span => span.Iso is not null && span.End == span.Start).ToArray();
+        raw.RemoveAll(span => span.Iso is not null && span.End == span.Start);
         DateTimeOffset horizon = now;
         DateTimeOffset origin;
         if (windowStart is DateTimeOffset window && window < horizon)
@@ -35,13 +42,15 @@ public static class LocationChartLayout
             origin = window;
             raw = Clip(raw, origin, horizon);
         }
-        else if (raw.Count == 0)
+        else if (raw.Count == 0 && points.Length == 0)
         {
             return new LocationChartModel(default, default, []);
         }
         else
         {
-            origin = raw[0].Start;
+            origin = raw.Count == 0 ? points[0].Start : raw[0].Start;
+            if (points.Length > 0 && points[0].Start < origin)
+                origin = points[0].Start;
         }
 
         if (horizon <= origin)
@@ -50,9 +59,7 @@ public static class LocationChartLayout
         }
 
         if (raw.Count == 0)
-        {
-            return new LocationChartModel(origin, horizon, []);
-        }
+            raw.Add(new RawSpan(null, origin, horizon, false));
 
         if (raw[0].Start > origin)
         {
@@ -76,6 +83,11 @@ public static class LocationChartLayout
 
         int[] pixels = ToPixels(fractions, widthPx);
         var segments = new LocationChartSegment[raw.Count];
+        var events = new List<LocationChartEvent>(points.Length + raw.Count);
+        foreach (RawSpan point in points)
+            if (point.Start >= origin && point.Start <= horizon)
+                events.Add(new LocationChartEvent(point.Iso!, point.Start, point.End,
+                    EventX(point.Start, origin, horizon, widthPx)));
         int x = 0;
         for (int i = 0; i < raw.Count; i++)
         {
@@ -87,10 +99,22 @@ public static class LocationChartLayout
                 fractions[i],
                 raw[i].Start,
                 raw[i].End);
+            if (raw[i].Iso is not null && pixels[i] == 0)
+            {
+                DateTimeOffset middle = raw[i].Start + TimeSpan.FromTicks((raw[i].End - raw[i].Start).Ticks / 2);
+                events.Add(new LocationChartEvent(raw[i].Iso!, raw[i].Start, raw[i].End,
+                    EventX(middle, origin, horizon, widthPx)));
+            }
             x += pixels[i];
         }
 
-        return new LocationChartModel(origin, horizon, segments);
+        return new LocationChartModel(origin, horizon, segments) { Events = events };
+    }
+
+    private static int EventX(DateTimeOffset at, DateTimeOffset origin, DateTimeOffset horizon, int widthPx)
+    {
+        double fraction = (at - origin).Ticks / (double)(horizon - origin).Ticks;
+        return Math.Clamp((int)Math.Round(fraction * widthPx), 0, widthPx - 1);
     }
 
     private static List<RawSpan> Clip(List<RawSpan> raw, DateTimeOffset origin, DateTimeOffset horizon)

@@ -95,9 +95,13 @@ internal static class SilentUpdateRuntime
 
                 if (exitRequested)
                 {
+                    RuntimeJournal.Write("update-agent-ready-exit-requested");
                     requestExit();
                     return;
                 }
+
+                if (outcome is SilentUpdateOutcome.Failed or SilentUpdateOutcome.Offline)
+                    RuntimeJournal.Write("update-" + outcome.ToString().ToLowerInvariant());
 
                 if (outcome == SilentUpdateOutcome.NoUpdate)
                 {
@@ -122,9 +126,11 @@ internal static class SilentUpdateRuntime
             {
                 return;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                await Task.Delay(SilentUpdatePolicy.FailedRetry, cancellationToken).ConfigureAwait(false);
+                RuntimeJournal.Write("update-loop-failed", ex);
+                try { await Task.Delay(SilentUpdatePolicy.FailedRetry, cancellationToken).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
             }
         }
     }

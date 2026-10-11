@@ -199,13 +199,13 @@ public sealed class StateHistoryAndExportTests
         try
         {
             var endpoint = new EndpointView(
-                "ru-secret",
+                "ru-REVIEW_FAKE_SECRET",
                 EndpointGroup.Ru,
                 "infra",
-                new Uri("https://example.test/path?token=REVIEW_FAKE_SECRET"),
+                new Uri("https://example.test/REVIEW_FAKE_SECRET?token=REVIEW_FAKE_SECRET"),
                 ProbeOutcome.Reachable,
                 200,
-                null,
+                new StructuredFailure(StructuredFailureKind.MonitorError, "REVIEW_FAKE_SECRET"),
                 TimeSpan.FromMilliseconds(10),
                 DateTimeOffset.UtcNow,
                 true,
@@ -217,21 +217,44 @@ public sealed class StateHistoryAndExportTests
                 1,
                 DateTimeOffset.UtcNow,
                 1,
-                new GroupSnapshot(EndpointGroup.Ru, GroupAvailability.Online, "", null, false, [endpoint]),
+                new GroupSnapshot(EndpointGroup.Ru, GroupAvailability.Online, "REVIEW_FAKE_SECRET", null, false, [endpoint]),
                 new GroupSnapshot(EndpointGroup.World, GroupAvailability.Unknown, "", null, false, []),
                 false,
-                null,
+                "REVIEW_FAKE_SECRET",
                 false,
                 null,
                 false);
-            string zip = DiagnosticExport.Export(snapshot, new BoundedEventLog(), null, dest);
+            string zip = DiagnosticExport.Export(snapshot, new BoundedEventLog(), "REVIEW_FAKE_SECRET", dest);
             using ZipArchive archive = ZipFile.OpenRead(zip);
-            ZipArchiveEntry json = Assert.Single(archive.Entries, e => e.Name == "snapshot.json");
-            using Stream stream = json.Open();
-            using var reader = new StreamReader(stream);
-            string text = reader.ReadToEnd();
-            Assert.DoesNotContain("REVIEW_FAKE_SECRET", text, StringComparison.Ordinal);
-            Assert.DoesNotContain("token=", text, StringComparison.OrdinalIgnoreCase);
+            foreach (ZipArchiveEntry json in archive.Entries)
+            {
+                using StreamReader reader = new(json.Open());
+                string text = reader.ReadToEnd();
+                Assert.DoesNotContain("REVIEW_FAKE_SECRET", text, StringComparison.Ordinal);
+                Assert.DoesNotContain("token=", text, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        finally
+        {
+            Directory.Delete(dest, true);
+        }
+    }
+
+    [Fact]
+    public void Export_DoesNotIncludeUntrustedEventMessages()
+    {
+        string dest = Path.Combine(Path.GetTempPath(), "nl-event-sec-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dest);
+        try
+        {
+            var log = new BoundedEventLog();
+            log.Add(DateTimeOffset.UtcNow, "network", "request failed: https://example.test/?token=REVIEW_FAKE_SECRET");
+            string zip = DiagnosticExport.Export(EmptySnapshot(), log, null, dest);
+            using ZipArchive archive = ZipFile.OpenRead(zip);
+            using StreamReader reader = new(archive.GetEntry("events.json")!.Open());
+            string json = reader.ReadToEnd();
+            Assert.DoesNotContain("REVIEW_FAKE_SECRET", json, StringComparison.Ordinal);
+            Assert.Contains("network", json, StringComparison.Ordinal);
         }
         finally
         {

@@ -116,6 +116,44 @@ public sealed class LocationChartLayoutTests
     }
 
     [Fact]
+    public void ZeroDurationConfirmedStay_BecomesPointEventWithoutInventedDuration()
+    {
+        DateTimeOffset start = DateTimeOffset.Parse("2026-09-30T12:00:00Z");
+        DateTimeOffset at = start.AddMinutes(34);
+        DateTimeOffset now = start.AddHours(1);
+        LocationStay[] stays =
+        [
+            new("PL", start, at),
+            new("RU", at, at),
+            new("PL", start.AddMinutes(50), null)
+        ];
+
+        LocationChartModel model = LocationChartLayout.Build(stays, now, 600, start);
+
+        LocationChartEvent marker = Assert.Single(model.Events);
+        Assert.Equal("RU", marker.Iso);
+        Assert.Equal(at, marker.StartUtc);
+        Assert.Equal(at, marker.EndUtc);
+        Assert.Equal(340, marker.XPx);
+        Assert.DoesNotContain(model.Segments, segment => segment.Iso == "RU" && segment.WidthPx > 0);
+        Assert.Equal(600, model.Segments.Sum(segment => segment.WidthPx));
+    }
+
+    [Fact]
+    public void SubpixelCountryPeriod_BecomesPointEventAndKeepsItsRealTimes()
+    {
+        DateTimeOffset start = DateTimeOffset.Parse("2026-09-30T12:00:00Z");
+        LocationChartModel model = LocationChartLayout.Build(
+            [new LocationStay("RU", start.AddMinutes(1), start.AddMinutes(2))],
+            start.AddDays(7), 100, start);
+
+        LocationChartEvent marker = Assert.Single(model.Events);
+        Assert.Equal(start.AddMinutes(1), marker.StartUtc);
+        Assert.Equal(start.AddMinutes(2), marker.EndUtc);
+        Assert.DoesNotContain(model.Segments, segment => segment.Iso == "RU" && segment.WidthPx > 0);
+    }
+
+    [Fact]
     public void WindowStart_PadsLeadingGapAndFixesHorizon()
     {
         DateTimeOffset now = DateTimeOffset.Parse("2026-09-20T12:00:00Z");
@@ -148,16 +186,20 @@ public sealed class LocationChartLayoutTests
     [Fact]
     public void ParseHours_MapsKnownWindowsAndFallsBackToTwelve()
     {
+        Assert.Equal(LocationChartWindows.Hour1, LocationChartWindows.ParseHours(1));
         Assert.Equal(LocationChartWindows.Hours3, LocationChartWindows.ParseHours(3));
         Assert.Equal(LocationChartWindows.Hours12, LocationChartWindows.ParseHours(12));
         Assert.Equal(LocationChartWindows.Days3, LocationChartWindows.ParseHours(72));
         Assert.Equal(LocationChartWindows.Days5, LocationChartWindows.ParseHours(120));
         Assert.Equal(LocationChartWindows.Days7, LocationChartWindows.ParseHours(168));
         Assert.Equal(LocationChartWindows.Default, LocationChartWindows.ParseHours(9));
+        Assert.Equal(1, LocationChartWindows.ToHours(LocationChartWindows.Hour1));
         Assert.Equal(12, LocationChartWindows.ToHours(LocationChartWindows.Hours12));
         Assert.Equal(72, LocationChartWindows.ToHours(LocationChartWindows.Days3));
         Assert.Equal(120, LocationChartWindows.ToHours(LocationChartWindows.Days5));
         Assert.Equal(168, LocationChartWindows.ToHours(LocationChartWindows.Days7));
+        Assert.Equal(60, LocationChartWindows.FrequencyIntervalCount(LocationChartWindows.Hour1));
+        Assert.Equal("1 ч", LocationChartWindows.Label(LocationChartWindows.Hour1));
         Assert.Equal("5 дней", LocationChartWindows.Label(LocationChartWindows.Days5));
         Assert.Equal("7 дней", LocationChartWindows.Label(LocationChartWindows.Days7));
     }

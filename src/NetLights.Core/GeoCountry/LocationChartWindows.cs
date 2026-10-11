@@ -2,6 +2,7 @@ namespace NetLights.Core;
 
 public static class LocationChartWindows
 {
+    public static readonly TimeSpan Hour1 = TimeSpan.FromHours(1);
     public static readonly TimeSpan Hours3 = TimeSpan.FromHours(3);
     public static readonly TimeSpan Hours6 = TimeSpan.FromHours(6);
     public static readonly TimeSpan Hours12 = TimeSpan.FromHours(12);
@@ -12,13 +13,14 @@ public static class LocationChartWindows
 
     public static readonly TimeSpan Default = Hours12;
 
-    public static readonly TimeSpan[] All = [Hours3, Hours6, Hours12, Hours24, Days3, Days5, Days7];
+    public static readonly TimeSpan[] All = [Hour1, Hours3, Hours6, Hours12, Hours24, Days3, Days5, Days7];
 
-    public static readonly string[] Captions = ["3 ч", "6 ч", "12 ч", "24 ч", "3 д", "5 д", "7 д"];
+    public static readonly string[] Captions = ["1 ч", "3 ч", "6 ч", "12 ч", "24 ч", "3 д", "5 д", "7 д"];
 
     // Fixed samples represent time intervals, never screen pixels.
     public static int FrequencyIntervalCount(TimeSpan window) => ToHours(window) switch
     {
+        1 => 60,    // 1 minute
         3 => 90,    // 2 minutes
         6 => 90,    // 4 minutes
         12 => 72,   // 10 minutes
@@ -32,6 +34,7 @@ public static class LocationChartWindows
     public static TimeSpan ParseHours(int hours)
         => hours switch
         {
+            1 => Hour1,
             3 => Hours3,
             6 => Hours6,
             12 => Hours12,
@@ -47,6 +50,11 @@ public static class LocationChartWindows
         if (window == Hours3)
         {
             return 3;
+        }
+
+        if (window == Hour1)
+        {
+            return 1;
         }
 
         if (window == Hours6)

@@ -7,13 +7,33 @@ public sealed record LocationStay(
     DateTimeOffset StartedUtc,
     DateTimeOffset? EndedUtc);
 
+public sealed record LocationObservation(
+    DateTimeOffset ObservedUtc,
+    string? PublicIpHash,
+    string? CountryCode,
+    string? LocalCountry,
+    string? OnlineCountry,
+    string? ThirdCountry,
+    string? DatabaseVersion,
+    bool PublicIpChanged,
+    bool CountryChanged,
+    bool ClassificationChanged,
+    bool Confirmed,
+    string? PublicIp = null,
+    DateTimeOffset? ObservedUntilUtc = null,
+    string? IplocateCountry = null,
+    string? IplocateDatabaseVersion = null,
+    string? ResolutionSource = null);
+
 public sealed class LocationHistory
 {
+    private const int MaximumObservations = 70_000;
     public static readonly TimeSpan ResumeMergeWindow = TimeSpan.FromMinutes(2);
     public static readonly TimeSpan OfflineGap = TimeSpan.FromMinutes(2);
     public static readonly TimeSpan Retention = TimeSpan.FromDays(7);
 
     private readonly List<LocationStay> _stays;
+    private readonly List<LocationObservation> _observations = [];
 
     public LocationHistory(IEnumerable<LocationStay>? stays = null, DateTimeOffset? lastObservedUtc = null)
     {
@@ -26,6 +46,8 @@ public sealed class LocationHistory
     public long Revision { get; private set; }
 
     public IReadOnlyList<LocationStay> Stays => _stays;
+
+    public IReadOnlyList<LocationObservation> Observations => _observations;
 
     public LocationStay? Current
         => _stays.Count > 0 && _stays[^1].EndedUtc is null ? _stays[^1] : null;
@@ -55,7 +77,7 @@ public sealed class LocationHistory
         }
     }
 
-    public bool NoteIso(string? iso, DateTimeOffset utcNow)
+    public bool NoteIso(string? iso, DateTimeOffset utcNow, bool mergeShortGap = true)
     {
         if (!GeoCountryParsers.TryNormalizeIso3166Alpha2(iso, out string? code))
         {
@@ -77,7 +99,7 @@ public sealed class LocationHistory
             return false;
         }
 
-        if (last.EndedUtc is DateTimeOffset ended
+        if (mergeShortGap && last.EndedUtc is DateTimeOffset ended
             && last.Iso == code
             && utcNow - ended <= ResumeMergeWindow)
         {
@@ -100,7 +122,8 @@ public sealed class LocationHistory
     public void Prune(DateTimeOffset now)
     {
         DateTimeOffset cutoff = now - Retention;
-        bool changed = false;
+        bool changed = _observations.RemoveAll(observation
+            => (observation.ObservedUntilUtc ?? observation.ObservedUtc) < cutoff) > 0;
         int transitionAnchor = -1;
         for (int i = 0; i < _stays.Count; i++)
         {
@@ -130,6 +153,66 @@ public sealed class LocationHistory
 
         if (changed) Revision++;
     }
+
+    public bool NoteObservation(LocationObservation observation)
+    {
+        if (observation.ObservedUtc == default) return false;
+        DateTimeOffset observedUntil = observation.ObservedUntilUtc ?? observation.ObservedUtc;
+        if (observedUntil < observation.ObservedUtc) return false;
+        if (observation.PublicIpHash is { } hash
+            && (hash.Length != 64 || !hash.All(Uri.IsHexDigit))) return false;
+        if (observation.PublicIp is { } publicIp
+            && (!System.Net.IPAddress.TryParse(publicIp, out System.Net.IPAddress? address)
+                || !string.Equals(publicIp, address.ToString(), StringComparison.OrdinalIgnoreCase))) return false;
+        if (observation.DatabaseVersion?.Length > 64) return false;
+        if (observation.CountryCode is not null
+            && !GeoCountryParsers.TryNormalizeIso3166Alpha2(observation.CountryCode, out _)) return false;
+        if (observation.LocalCountry is not null
+            && !GeoCountryParsers.TryNormalizeIso3166Alpha2(observation.LocalCountry, out _)) return false;
+        if (observation.OnlineCountry is not null
+            && !GeoCountryParsers.TryNormalizeIso3166Alpha2(observation.OnlineCountry, out _)) return false;
+        if (observation.ThirdCountry is not null
+            && !GeoCountryParsers.TryNormalizeIso3166Alpha2(observation.ThirdCountry, out _)) return false;
+        if (observation.IplocateCountry is not null
+            && !GeoCountryParsers.TryNormalizeIso3166Alpha2(observation.IplocateCountry, out _)) return false;
+        if (observation.IplocateDatabaseVersion?.Length > 64) return false;
+        if (_observations.Count > 0)
+        {
+            LocationObservation last = _observations[^1];
+            DateTimeOffset lastUntil = last.ObservedUntilUtc ?? last.ObservedUtc;
+            if (observation.ObservedUtc >= lastUntil
+                && observation.ObservedUtc - lastUntil <= OfflineGap
+                && SameSourceState(last, observation))
+            {
+                if (observedUntil > lastUntil)
+                {
+                    _observations[^1] = last with { ObservedUntilUtc = observedUntil };
+                    Revision++;
+                }
+                Prune(observation.ObservedUtc);
+                return false;
+            }
+            if (last == observation) return false;
+        }
+        _observations.Add(observation);
+        if (_observations.Count > MaximumObservations) _observations.RemoveAt(0);
+        Prune(observation.ObservedUtc);
+        Revision++;
+        return true;
+    }
+
+    private static bool SameSourceState(LocationObservation left, LocationObservation right)
+        => string.Equals(left.PublicIpHash, right.PublicIpHash, StringComparison.Ordinal)
+            && string.Equals(left.PublicIp, right.PublicIp, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(left.CountryCode, right.CountryCode, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(left.LocalCountry, right.LocalCountry, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(left.OnlineCountry, right.OnlineCountry, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(left.ThirdCountry, right.ThirdCountry, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(left.DatabaseVersion, right.DatabaseVersion, StringComparison.Ordinal)
+            && string.Equals(left.IplocateCountry, right.IplocateCountry, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(left.IplocateDatabaseVersion, right.IplocateDatabaseVersion, StringComparison.Ordinal)
+            && string.Equals(left.ResolutionSource, right.ResolutionSource, StringComparison.Ordinal)
+            && left.Confirmed == right.Confirmed;
 
     public void Touch(DateTimeOffset utcNow)
         => LastObservedUtc = utcNow;

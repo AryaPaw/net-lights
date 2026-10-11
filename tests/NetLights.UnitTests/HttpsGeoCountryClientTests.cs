@@ -13,16 +13,17 @@ public sealed class HttpsGeoCountryClientTests
     public async Task CurrentLookup_UsesOneIpWhoRequestWithoutPuttingIpInUrl()
     {
         var handler = new ScriptedHandler()
-            .On(GeoCountryPolicy.IpWhoUri.AbsoluteUri, """{"success":true,"country_code":"AE"}""");
+            .On(GeoCountryPolicy.IpWhoUri.AbsoluteUri, """{"success":true,"country_code":"AE","ip":"203.0.113.7"}""");
         using var client = new HttpsGeoCountryClient("1.1.1", handler);
         GeoCountryLookupResult lookup = await client.GetCurrentAsync(CancellationToken.None);
         Assert.True(lookup.Ok);
         Assert.Equal("AE", lookup.CountryCode);
+        Assert.Equal("203.0.113.7", lookup.PublicIp);
         Assert.Equal(1, handler.Hits);
         Assert.Equal(HttpMethod.Get, handler.Methods.Single());
         Assert.Equal(GeoCountryPolicy.IpWhoUri, handler.Uris.Single());
         Assert.DoesNotContain("8.8.8.8", handler.Uris.Single().AbsoluteUri, StringComparison.Ordinal);
-        Assert.Contains("fields=success,country_code", handler.Uris.Single().Query, StringComparison.Ordinal);
+        Assert.Contains("fields=success,country_code,ip", handler.Uris.Single().Query, StringComparison.Ordinal);
         Assert.Equal(HttpVersion.Version11, handler.Versions[0]);
     }
 
@@ -30,11 +31,23 @@ public sealed class HttpsGeoCountryClientTests
     public async Task EndpointCanBeOverriddenForTests()
     {
         var endpoint = new Uri("https://geo.test/current?fields=success,country_code");
-        var handler = new ScriptedHandler().On(endpoint.AbsoluteUri, """{"success":true,"country_code":"DE"}""");
+        var handler = new ScriptedHandler().On(endpoint.AbsoluteUri, """{"success":true,"country_code":"DE","ip":"203.0.113.7"}""");
         using var client = new HttpsGeoCountryClient("1.1.1", handler, endpoint);
         GeoCountryLookupResult lookup = await client.GetCurrentAsync(CancellationToken.None);
         Assert.True(lookup.Ok);
         Assert.Equal(endpoint, handler.Uris.Single());
+    }
+
+    [Fact]
+    public async Task CountryIsLookup_ParsesCountryAndPublicIp()
+    {
+        var handler = new ScriptedHandler()
+            .On(GeoCountryPolicy.CountryIsUri.AbsoluteUri, """{"country":"DE","ip":"203.0.113.7"}""");
+        using var client = new HttpsGeoCountryClient("1.1.1", handler, GeoCountryPolicy.CountryIsUri, countryIs: true);
+        GeoCountryLookupResult lookup = await client.GetCurrentAsync(CancellationToken.None);
+        Assert.True(lookup.Ok);
+        Assert.Equal("DE", lookup.CountryCode);
+        Assert.Equal("203.0.113.7", lookup.PublicIp);
     }
 
     [Fact]

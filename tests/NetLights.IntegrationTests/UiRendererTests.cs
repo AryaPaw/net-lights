@@ -75,6 +75,91 @@ public sealed class UiRendererTests
     }
 
     [Fact]
+    public void DiagnosticLabels_CoverAvailabilityAndEveryStructuredFailure()
+    {
+        Assert.Equal("доступно", DiagnosticExport.Label(GroupAvailability.Online));
+        Assert.Equal("ограничено", DiagnosticExport.Label(GroupAvailability.Limited));
+        Assert.Equal("нет ответа", DiagnosticExport.Label(GroupAvailability.Offline));
+        Assert.Equal("нет свежих данных", DiagnosticExport.Label(GroupAvailability.Unknown));
+        Assert.Throws<InvalidOperationException>(() => DiagnosticExport.Label((GroupAvailability)999));
+
+        var expected = new Dictionary<StructuredFailureKind, string>
+        {
+            [StructuredFailureKind.None] = "",
+            [StructuredFailureKind.DnsFailure] = "DNS",
+            [StructuredFailureKind.TcpRefused] = "TCP отказ",
+            [StructuredFailureKind.TcpReset] = "TCP сброс",
+            [StructuredFailureKind.TransportTimeout] = "таймаут",
+            [StructuredFailureKind.TlsProtocol] = "ошибка TLS",
+            [StructuredFailureKind.TlsHandshake] = "TLS handshake",
+            [StructuredFailureKind.CertificateTrust] = "сертификат: доверие",
+            [StructuredFailureKind.CertificateName] = "сертификат: имя",
+            [StructuredFailureKind.CertificateExpired] = "сертификат: срок",
+            [StructuredFailureKind.InvalidHeaders] = "некорректные заголовки",
+            [StructuredFailureKind.OversizedHeaders] = "слишком большие заголовки",
+            [StructuredFailureKind.LocalResource] = "локальная ошибка",
+            [StructuredFailureKind.Cancelled] = "отмена",
+            [StructuredFailureKind.DeadlineExceeded] = "таймаут",
+            [StructuredFailureKind.MonitorError] = "ошибка монитора",
+            [StructuredFailureKind.NetworkUnavailable] = "нет сетевого подключения"
+        };
+
+        foreach ((StructuredFailureKind kind, string label) in expected)
+        {
+            Assert.Equal(label, DiagnosticExport.FailureLabel(new StructuredFailure(kind, "safe detail")));
+        }
+
+        Assert.Equal("safe detail", DiagnosticExport.FailureLabel(new StructuredFailure((StructuredFailureKind)999, "safe detail")));
+    }
+
+    [Fact]
+    public void StatusProjection_ExplainsEndpointStateAndSnapshotSummary()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        var endpoints = new[]
+        {
+            Endpoint("checking", null, inFlight: true),
+            Endpoint("empty", null),
+            Endpoint("ok", ProbeOutcome.Reachable, fresh: true),
+            Endpoint("stale", ProbeOutcome.Unreachable),
+            Endpoint("paused", ProbeOutcome.Unreachable, paused: true),
+            Endpoint("failed", ProbeOutcome.Unreachable, fresh: true,
+                failure: new StructuredFailure(StructuredFailureKind.DnsFailure, "DNS detail")),
+            Endpoint("unclear", ProbeOutcome.Indeterminate, fresh: true),
+            Endpoint("cancelled", ProbeOutcome.Cancelled, fresh: true)
+        };
+        var provider = new GroupSnapshot(EndpointGroup.Ru, GroupAvailability.Limited, "", null, true, endpoints);
+        var world = new GroupSnapshot(EndpointGroup.World, GroupAvailability.Offline, "", null, false, []);
+        var snapshot = new MonitorSnapshot(1, now, 1, provider, world, true, null, false, null, false);
+
+        IReadOnlyList<EndpointRow> rows = StatusSnapshotProjector.Rows(snapshot);
+        Assert.Equal("проверка", rows[0].Result);
+        Assert.Equal("нет данных", rows[1].Result);
+        Assert.Equal("доступен", rows[2].Result);
+        Assert.Equal("нет ответа", rows[3].Result);
+        Assert.Equal("нет свежих данных", rows[3].Reason);
+        Assert.Equal("пауза сервера", rows[4].Reason);
+        Assert.Equal("DNS", rows[5].Reason);
+        Assert.Equal("неясно", rows[6].Result);
+        Assert.Equal("отмена", rows[7].Result);
+        Assert.Contains("идёт дополнительная проверка", StatusSnapshotProjector.Summary(snapshot), StringComparison.Ordinal);
+        Assert.NotEqual(StatusSnapshotProjector.Fingerprint(snapshot), StatusSnapshotProjector.Fingerprint(snapshot with { Paused = true }));
+
+        MonitorSnapshot paused = snapshot with { Paused = true };
+        Assert.Contains("пауза", StatusSnapshotProjector.Summary(paused), StringComparison.Ordinal);
+    }
+
+    private static EndpointView Endpoint(
+        string id,
+        ProbeOutcome? outcome,
+        bool fresh = false,
+        bool paused = false,
+        bool inFlight = false,
+        StructuredFailure? failure = null)
+        => new(id, EndpointGroup.Ru, id, new Uri("https://" + id + ".example.test/"), outcome,
+            null, failure, null, null, fresh, paused, null, inFlight, EndpointStats.Empty);
+
+    [Fact]
     public void RowStyle_UsesCoolBlueForRuAndWarmAmberForWorld()
     {
         (Color ruOkBack, Color ruOkFore) = StatusForm.RowStyle(EndpointGroup.Ru, ProbeOutcome.Reachable);
@@ -116,10 +201,13 @@ public sealed class UiRendererTests
     public void StatusForm_UserCloseHidesWithoutRecreatingTaskbarWindow()
     {
         using var form = new StatusForm();
+        int hiddenNotifications = 0;
+        form.HiddenToTray = () => hiddenNotifications++;
         form.Reveal();
         Assert.True(form.Visible);
         Assert.True(form.ShowInTaskbar);
         Assert.True(form.HideToTrayIfUserClosing(CloseReason.UserClosing));
+        Assert.Equal(1, hiddenNotifications);
         Assert.False(form.Visible);
         Assert.True(form.ShowInTaskbar);
         Assert.False(form.HideToTrayIfUserClosing(CloseReason.ApplicationExitCall));

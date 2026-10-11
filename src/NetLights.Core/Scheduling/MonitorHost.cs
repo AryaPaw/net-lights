@@ -14,6 +14,7 @@ public sealed class MonitorHost : IAsyncDisposable
     private readonly Dictionary<long, AttemptRuntime> _attempts = new();
     private readonly List<EpochGeneration> _generations = [];
     private readonly object _gate = new();
+    private readonly object _disposeGate = new();
     private CancellationTokenSource _epochCts = new();
     private Task? _loop;
     private ITimer? _timer;
@@ -21,6 +22,7 @@ public sealed class MonitorHost : IAsyncDisposable
     private int _tickQueued;
     private int _uiQueued;
     private int _recyclePending;
+    private Task? _disposeTask;
 
     public MonitorHost(
         MonitorKernel kernel,
@@ -69,51 +71,69 @@ public sealed class MonitorHost : IAsyncDisposable
 
     public void NotifyInternalError(string message) => PostCritical(() => Dispatch(_kernel.NotifyInternalError(message)));
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
+    {
+        lock (_disposeGate)
+        {
+            _disposeTask ??= BeginDisposeAsync();
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    private async Task BeginDisposeAsync()
     {
         _timer?.Dispose();
         _shutdown.Cancel();
-        PostCritical(static () => { });
         _events.Writer.TryComplete();
-        if (_loop is not null)
+
+        Task shutdown = StopLoopAndAttemptsAsync();
+        try
         {
-            try
-            {
-                await _loop.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-            }
-            catch (OperationCanceledException)
-            {
-            }
+            await shutdown.WaitAsync(TimeSpan.FromSeconds(4)).ConfigureAwait(false);
         }
-
-        List<AttemptRuntime> running;
-        lock (_gate)
+        catch (TimeoutException)
         {
-            running = _attempts.Values.ToList();
-            _attempts.Clear();
+            _ = shutdown.ContinueWith(
+                static task => _ = task.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            throw;
         }
+    }
 
-        foreach (AttemptRuntime attempt in running)
+    private async Task StopLoopAndAttemptsAsync()
+    {
+        List<AttemptRuntime> running = [];
+        try
         {
-            attempt.Cts.Cancel();
+            // The loop owns dispatch and attempt registration. Stop it before taking
+            // the attempt snapshot so an in-progress Dispatch cannot escape shutdown.
+            if (_loop is not null)
+                await _loop.ConfigureAwait(false);
+
+            lock (_gate)
+            {
+                running = _attempts.Values.ToList();
+                _attempts.Clear();
+            }
+
+            foreach (AttemptRuntime attempt in running)
+                attempt.Cts.Cancel();
+
+            await Task.WhenAll(running.Select(attempt => attempt.Task)).ConfigureAwait(false);
         }
-
-        foreach (AttemptRuntime attempt in running)
+        finally
         {
-            try
-            {
-                await attempt.Task.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-            }
-            catch (Exception)
-            {
-                // Shutdown bounds wait; remaining probes are abandoned after timeout
-            }
+            if (running.Count > 0 || _loop is null || _loop.IsCompleted)
+                ReleaseShutdownResources(running);
+        }
+    }
 
+    private void ReleaseShutdownResources(IEnumerable<AttemptRuntime> attempts)
+    {
+        foreach (AttemptRuntime attempt in attempts)
             attempt.Cts.Dispose();
-        }
 
         lock (_gate)
         {

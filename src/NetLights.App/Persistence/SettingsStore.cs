@@ -9,6 +9,7 @@ internal sealed class AppSettings
     public bool AutoStart { get; set; } = true;
     public bool AutoUpdateEnabled { get; set; } = true;
     public bool EmphasizeShortStatuses { get; set; } = true;
+    public bool ShowLocationDebugSources { get; set; }
     public bool GeoCountryDetectionEnabled { get; set; }
     public bool GeoCountryIconEnabled { get; set; }
     public int GeoCountryLetterSize { get; set; } = (int)GeoCountryLetterScale.Regular;
@@ -23,6 +24,7 @@ internal sealed class AppSettings
 internal enum SettingsLoadStatus
 {
     Loaded,
+    Recovered,
     Absent,
     Corrupt,
     IoError
@@ -30,6 +32,10 @@ internal enum SettingsLoadStatus
 
 internal static class SettingsStore
 {
+    private const long MaxSettingsBytes = 1024 * 1024;
+    private const long MaxEndpointPoolBytes = 1024 * 1024;
+    private static string? _recoveredPath;
+    private static string? _blockedPath;
     public static bool MigrateToSettingsVersion4(AppSettings settings)
     {
         if (settings.SettingsVersion >= 4)
@@ -99,6 +105,16 @@ internal static class SettingsStore
         return true;
     }
 
+    public static bool MigrateToSettingsVersion8(AppSettings settings)
+    {
+        if (settings.SettingsVersion >= 8)
+            return false;
+
+        settings.ShowLocationDebugSources = false;
+        settings.SettingsVersion = 8;
+        return true;
+    }
+
     private static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = true,
@@ -125,50 +141,108 @@ internal static class SettingsStore
         {
             if (!File.Exists(SettingsPath))
             {
-                return (new AppSettings(), SettingsLoadStatus.Absent);
+                return LoadBackupOrDefault(SettingsLoadStatus.Absent);
             }
 
-            AppSettings? settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath), Options);
+            AppSettings? settings = ReadSettings(SettingsPath);
             if (settings is null)
             {
-                return (new AppSettings(), SettingsLoadStatus.Corrupt);
+                return LoadBackupOrDefault(SettingsLoadStatus.Corrupt);
             }
 
-            if (settings.WindowWidth < UiTheme.WindowMinWidth)
-            {
-                settings.WindowWidth = UiTheme.WindowDefaultWidth;
-            }
+            _blockedPath = null;
+            _recoveredPath = null;
 
-            if (settings.WindowHeight < UiTheme.WindowMinHeight)
-            {
-                settings.WindowHeight = UiTheme.WindowDefaultHeight;
-            }
-
-            settings.GeoCountryLetterSize = (int)GeoCountryLetterScales.Parse(settings.GeoCountryLetterSize);
-            settings.LocationChartWindowHours = LocationChartWindows.ToHours(
-                LocationChartWindows.ParseHours(settings.LocationChartWindowHours));
+            Normalize(settings);
             return (settings, SettingsLoadStatus.Loaded);
         }
         catch (JsonException)
         {
-            return (new AppSettings(), SettingsLoadStatus.Corrupt);
+            return LoadBackupOrDefault(SettingsLoadStatus.Corrupt);
         }
         catch (IOException)
         {
-            return (new AppSettings(), SettingsLoadStatus.IoError);
+            return LoadBackupOrDefault(SettingsLoadStatus.IoError);
         }
         catch (UnauthorizedAccessException)
         {
-            return (new AppSettings(), SettingsLoadStatus.IoError);
+            return LoadBackupOrDefault(SettingsLoadStatus.IoError);
         }
+    }
+
+    private static void Normalize(AppSettings settings)
+    {
+        if (settings.WindowWidth < UiTheme.WindowMinWidth)
+            settings.WindowWidth = UiTheme.WindowDefaultWidth;
+        if (settings.WindowHeight < UiTheme.WindowMinHeight)
+            settings.WindowHeight = UiTheme.WindowDefaultHeight;
+        settings.GeoCountryLetterSize = (int)GeoCountryLetterScales.Parse(settings.GeoCountryLetterSize);
+        settings.LocationChartWindowHours = LocationChartWindows.ToHours(
+            LocationChartWindows.ParseHours(settings.LocationChartWindowHours));
+    }
+
+    private static AppSettings? ReadSettings(string path)
+    {
+        if (!File.Exists(path)) return null;
+        if (new FileInfo(path).Length > MaxSettingsBytes)
+            throw new JsonException("Settings file is too large.");
+        string json = File.ReadAllText(path);
+        using JsonDocument document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind != JsonValueKind.Object
+            || (!document.RootElement.TryGetProperty("settingsVersion", out _)
+                && !document.RootElement.TryGetProperty("autoStart", out _)
+                && !document.RootElement.TryGetProperty("windowWidth", out _)))
+            throw new JsonException("Settings file has no recognized fields.");
+        return JsonSerializer.Deserialize<AppSettings>(json, Options);
+    }
+
+    private static (AppSettings Settings, SettingsLoadStatus Status) LoadBackupOrDefault(SettingsLoadStatus failure)
+    {
+        string path = SettingsPath;
+        try
+        {
+            AppSettings? backup = ReadSettings(path + ".bak");
+            if (backup is not null)
+            {
+                Normalize(backup);
+                _blockedPath = null;
+                _recoveredPath = File.Exists(path) ? path : null;
+                return (backup, SettingsLoadStatus.Recovered);
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+        }
+
+        _recoveredPath = null;
+        _blockedPath = failure == SettingsLoadStatus.Absent ? null : path;
+        return (new AppSettings(), failure);
     }
 
     public static void Save(AppSettings settings)
     {
+        string path = SettingsPath;
+        if (string.Equals(_blockedPath, path, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Settings are unreadable and no valid backup exists; original file was preserved.");
         Directory.CreateDirectory(RootDirectory);
-        string tmp = SettingsPath + ".tmp";
+        string tmp = path + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(settings, Options));
-        File.Move(tmp, SettingsPath, true);
+        if (File.Exists(path))
+        {
+            if (string.Equals(_recoveredPath, path, StringComparison.OrdinalIgnoreCase))
+            {
+                string preserved = path + ".corrupt-" + DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmssfff") + ".json";
+                File.Copy(path, preserved);
+            }
+            else
+            {
+                string backupTemp = path + ".bak.tmp";
+                File.Copy(path, backupTemp, true);
+                File.Move(backupTemp, path + ".bak", true);
+            }
+        }
+        File.Move(tmp, path, true);
+        _recoveredPath = null;
     }
 
     public static (MonitorConfiguration Config, string? Warning) LoadPool()
@@ -180,6 +254,12 @@ internal static class SettingsStore
 
         try
         {
+            if (new FileInfo(EndpointsPath).Length > MaxEndpointPoolBytes)
+            {
+                return (WarnBuiltin("Файл адресов превышает допустимый размер."),
+                    "Файл адресов превышает 1 МиБ, используется встроенный набор.");
+            }
+
             string json = File.ReadAllText(EndpointsPath);
             List<StoredEndpoint>? stored = JsonSerializer.Deserialize<List<StoredEndpoint>>(json, Options);
             if (stored is null)

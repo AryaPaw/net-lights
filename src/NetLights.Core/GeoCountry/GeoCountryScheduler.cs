@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace NetLights.Core;
 
 public sealed class GeoCountryScheduler : IDisposable
@@ -14,6 +17,11 @@ public sealed class GeoCountryScheduler : IDisposable
     private bool _enabled;
     private string? _lastSuccessfulCountry;
     private DateTimeOffset _lastSuccessfulAt;
+    private string? _lastPublicIpHash;
+    private string? _lastLocalCountry;
+    private string? _lastOnlineCountry;
+    private string? _lastDatabaseVersion;
+    private string? _lastObservedCountry;
     private GeoCountryDisplay _current = GeoCountryDisplay.Unconfirmed;
 
     public GeoCountryScheduler(IGeoCountrySource source, TimeProvider time, Action<GeoCountryDisplay>? onChanged = null)
@@ -131,7 +139,7 @@ public sealed class GeoCountryScheduler : IDisposable
         catch (Exception)
         {
             delay = NextBackoff();
-            KeepLastKnown();
+            KeepLastKnown(gen);
         }
         finally
         {
@@ -156,7 +164,17 @@ public sealed class GeoCountryScheduler : IDisposable
 
         if (!lookup.Ok || !GeoCountryParsers.IsIso3166Alpha2(lookup.CountryCode))
         {
-            KeepLastKnown();
+            if (lookup.ResolutionSource is null && !lookup.Conflicted && !lookup.DifferentIp)
+            {
+                KeepLastKnown(gen);
+                return lookup.RetryAfter ?? NextBackoff();
+            }
+            lock (_gate)
+            {
+                if (IsStale(gen) || !_enabled) return TimeSpan.Zero;
+                GeoCountryDisplay display = BuildDisplayLocked(lookup, country: null, confirmed: false);
+                PublishIfChangedLocked(display);
+            }
             return lookup.RetryAfter ?? NextBackoff();
         }
 
@@ -168,23 +186,21 @@ public sealed class GeoCountryScheduler : IDisposable
                 return TimeSpan.Zero;
             }
 
-            _lastSuccessfulCountry = country;
             _lastSuccessfulAt = _time.GetUtcNow();
             _failStreak = 0;
-            GeoCountryDisplay display = GeoCountryDisplay.Confirmed(country);
-            if (_current != display)
-            {
-                PublishLocked(display);
-            }
+            GeoCountryDisplay display = BuildDisplayLocked(lookup, country, confirmed: true);
+            _lastSuccessfulCountry = country;
+            PublishIfChangedLocked(display);
         }
 
         return GeoCountryPolicy.RefreshInterval;
     }
 
-    private void KeepLastKnown()
+    private void KeepLastKnown(int gen)
     {
         lock (_gate)
         {
+            if (IsStale(gen) || !_enabled) return;
             string? iso = GeoCountryParsers.IsIso3166Alpha2(_current.Letters)
                 ? _current.Letters
                 : GeoCountryParsers.IsIso3166Alpha2(_lastSuccessfulCountry) ? _lastSuccessfulCountry : null;
@@ -194,13 +210,17 @@ public sealed class GeoCountryScheduler : IDisposable
                 return;
             }
 
-            if (_lastSuccessfulAt == default || _time.GetUtcNow() - _lastSuccessfulAt > GeoCountryPolicy.StaleAfter)
+            if (_lastSuccessfulAt != default && _time.GetUtcNow() - _lastSuccessfulAt <= GeoCountryPolicy.StaleAfter)
             {
                 GeoCountryDisplay stale = GeoCountryDisplay.LastKnown(iso);
                 if (_current != stale)
                 {
                     PublishLocked(stale);
                 }
+            }
+            else if (_current != GeoCountryDisplay.Unconfirmed)
+            {
+                PublishLocked(GeoCountryDisplay.Unconfirmed);
             }
         }
     }
@@ -241,5 +261,60 @@ public sealed class GeoCountryScheduler : IDisposable
     {
         _current = display;
         _onChanged(display);
+    }
+
+    private GeoCountryDisplay BuildDisplayLocked(GeoCountryLookupResult lookup, string? country, bool confirmed)
+    {
+        string? publicIp = System.Net.IPAddress.TryParse(lookup.PublicIp, out System.Net.IPAddress? address)
+            ? address.ToString() : null;
+        string? ipHash = HashIp(publicIp);
+        bool publicIpChanged = ipHash is not null && _lastPublicIpHash is not null
+            && !string.Equals(ipHash, _lastPublicIpHash, StringComparison.Ordinal);
+        bool sameIp = ipHash is not null && string.Equals(ipHash, _lastPublicIpHash, StringComparison.Ordinal);
+        bool countryChanged = confirmed && _lastObservedCountry is not null
+            && !string.Equals(_lastObservedCountry, country, StringComparison.OrdinalIgnoreCase);
+        bool classificationChanged = sameIp && (
+            Changed(lookup.LocalCountry, _lastLocalCountry)
+            || Changed(lookup.OnlineCountry, _lastOnlineCountry)
+            || Changed(lookup.DatabaseVersion, _lastDatabaseVersion));
+        DateTimeOffset observedAt = _time.GetUtcNow();
+        DateTimeOffset? confirmedThrough = confirmed ? null : _lastSuccessfulAt == default ? null : _lastSuccessfulAt;
+        LocationObservation observation = new(observedAt, ipHash, country, lookup.LocalCountry,
+            lookup.OnlineCountry, lookup.ThirdCountry, lookup.DatabaseVersion,
+            publicIpChanged, countryChanged, classificationChanged, confirmed, publicIp, observedAt,
+            lookup.IplocateCountry, lookup.IplocateDatabaseVersion, lookup.ResolutionSource ?? "legacy");
+
+        if (ipHash is not null) _lastPublicIpHash = ipHash;
+        _lastLocalCountry = lookup.LocalCountry;
+        _lastOnlineCountry = lookup.OnlineCountry;
+        _lastDatabaseVersion = lookup.DatabaseVersion;
+        if (confirmed) _lastObservedCountry = country;
+
+        GeoCountryDisplay display = confirmed
+            ? GeoCountryDisplay.FromConfirmedLookup(lookup, observation)
+            : lookup.ResolutionSource == "local-estimate"
+                ? GeoCountryDisplay.FromLocalEstimate(lookup, observation, confirmedThrough)
+                : GeoCountryDisplay.FromUnconfirmedLookup(lookup, observation) with { ConfirmedThroughUtc = confirmedThrough };
+        return display with { PublicIpHash = ipHash };
+    }
+
+    private void PublishIfChangedLocked(GeoCountryDisplay display)
+    {
+        if (_current with { Observation = null } == display with { Observation = null })
+        {
+            if (display.Observation is not null) _onChanged(display);
+            return;
+        }
+        PublishLocked(display);
+    }
+
+    private static bool Changed(string? value, string? previous)
+        => !string.Equals(value, previous, StringComparison.OrdinalIgnoreCase);
+
+    private static string? HashIp(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || !System.Net.IPAddress.TryParse(value, out System.Net.IPAddress? ip))
+            return null;
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ip.ToString()))).ToLowerInvariant();
     }
 }

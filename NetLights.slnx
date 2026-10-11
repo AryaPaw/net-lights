@@ -9,6 +9,8 @@
   <Folder Name="/tests/">
     <Project Path="tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj" />
     <Project Path="tests/NetLights.SoakTests/NetLights.SoakTests.csproj" />
+    <Project Path="tests/NetLights.TestApp/NetLights.TestApp.csproj" />
+    <Project Path="tests/NetLights.TestInstaller/NetLights.TestInstaller.csproj" />
     <Project Path="tests/NetLights.TestSupport/NetLights.TestSupport.csproj" />
     <Project Path="tests/NetLights.UnitTests/NetLights.UnitTests.csproj" />
   </Folder>

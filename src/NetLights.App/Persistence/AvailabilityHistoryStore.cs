@@ -6,6 +6,7 @@ namespace NetLights.App;
 
 internal static class AvailabilityHistoryStore
 {
+    private const long MaxHistoryFileBytes = 16L * 1024 * 1024;
     private const long MaxLegacyFileBytes = 512 * 1024;
     private static readonly SemaphoreSlim SaveGate = new(1, 1);
     private static long _snapshotRevision;
@@ -14,15 +15,16 @@ internal static class AvailabilityHistoryStore
     private static string? _recoveredPath;
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase, Converters = { new JsonStringEnumConverter() } };
     public static string FilePath => Path.Combine(SettingsStore.RootDirectory, "availability-history.json");
+    public static HistoryLoadStatus LastLoadStatus { get; private set; } = HistoryLoadStatus.Absent;
     public static AvailabilityHistory Load()
     {
         string path = FilePath;
         try
         {
             if (!File.Exists(path))
-                return Recover(path);
+                return Recover(path, HistoryLoadStatus.Absent);
 
-            var file = JsonSerializer.Deserialize<HistoryFile>(File.ReadAllText(path), Options);
+            var file = ReadHistory(path);
             if (file?.Spans is null)
                 throw new JsonException("Availability history has no spans collection.");
             var rows = file.Spans.Where(s => s is not null && Enum.IsDefined(s.Group) && Enum.IsDefined(s.State) && s.StartedUtc != default && (s.EndedUtc is null || s.EndedUtc >= s.StartedUtc)).Select(s => new AvailabilitySpan(s!.Group, s.State, s.Paused, s.StartedUtc, s.EndedUtc)).TakeLast(AvailabilityHistory.MaxSpans).ToArray();
@@ -31,16 +33,17 @@ internal static class AvailabilityHistoryStore
             history.SealStale(now);
             history.Prune(now);
             _recoveredPath = null;
+            LastLoadStatus = HistoryLoadStatus.Loaded;
             return history;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
         {
             _recoveredPath = path;
-            return Recover(path);
+            return Recover(path, HistoryLoadStatus.Corrupt);
         }
     }
 
-    private static AvailabilityHistory Recover(string path)
+    private static AvailabilityHistory Recover(string path, HistoryLoadStatus fallbackStatus)
     {
         _recoveredPath = path;
         string backupPath = path + ".bak";
@@ -48,10 +51,11 @@ internal static class AvailabilityHistoryStore
         {
             if (File.Exists(backupPath))
             {
-                var backup = JsonSerializer.Deserialize<HistoryFile>(File.ReadAllText(backupPath), Options);
+                var backup = ReadHistory(backupPath);
                 if (backup?.Spans is not null)
                 {
                     AvailabilityHistory restored = BuildHistory(backup, DateTimeOffset.UtcNow);
+                    LastLoadStatus = HistoryLoadStatus.Recovered;
                     _recoveredPath = path;
                     try { Save(restored); }
                     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
@@ -59,12 +63,14 @@ internal static class AvailabilityHistoryStore
                 }
             }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
         {
             // Leave the backup untouched and try the legacy recovery source below.
         }
 
-        return LoadLegacyStateHistory(saveCanonical: !File.Exists(path));
+        AvailabilityHistory legacy = LoadLegacyStateHistory(saveCanonical: !File.Exists(path));
+        LastLoadStatus = legacy.Spans.Count > 0 ? HistoryLoadStatus.Recovered : fallbackStatus;
+        return legacy;
     }
 
     private static AvailabilityHistory BuildHistory(HistoryFile file, DateTimeOffset now)
@@ -78,6 +84,22 @@ internal static class AvailabilityHistoryStore
         history.SealStale(now);
         history.Prune(now);
         return history;
+    }
+
+    private static HistoryFile? ReadHistory(string path)
+    {
+        if (new FileInfo(path).Length > MaxHistoryFileBytes)
+            throw new InvalidDataException("Availability history exceeds the supported file size.");
+        using FileStream stream = File.OpenRead(path);
+        using JsonDocument document = JsonDocument.Parse(stream);
+        JsonElement root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new JsonException("Availability history must be an object.");
+        if (root.TryGetProperty("spans", out JsonElement spans)
+            && spans.ValueKind == JsonValueKind.Array
+            && spans.GetArrayLength() > AvailabilityHistory.MaxSpans * 2)
+            throw new InvalidDataException("Availability history exceeds the supported number of records.");
+        return root.Deserialize<HistoryFile>(Options);
     }
 
     private static AvailabilityHistory LoadLegacyStateHistory(bool saveCanonical)
@@ -177,15 +199,27 @@ internal static class AvailabilityHistoryStore
     public static void Save(AvailabilityHistory history) => Save(Snapshot(history));
 
     public static void Save(AvailabilityHistorySnapshot snapshot)
+        => Save(snapshot, Timeout.InfiniteTimeSpan);
+
+    public static void Save(AvailabilityHistorySnapshot snapshot, TimeSpan timeout)
     {
-        SaveGate.Wait();
+        if (timeout == Timeout.InfiniteTimeSpan)
+            SaveGate.Wait();
+        else if (!SaveGate.Wait(timeout))
+            throw new TimeoutException("Timed out waiting to save availability history.");
         try { Write(snapshot); }
         finally { SaveGate.Release(); }
     }
 
-    public static async Task SaveAsync(AvailabilityHistorySnapshot snapshot)
+    public static Task SaveAsync(AvailabilityHistorySnapshot snapshot)
+        => SaveAsync(snapshot, Timeout.InfiniteTimeSpan);
+
+    public static async Task SaveAsync(AvailabilityHistorySnapshot snapshot, TimeSpan timeout)
     {
-        await SaveGate.WaitAsync().ConfigureAwait(false);
+        if (timeout == Timeout.InfiniteTimeSpan)
+            await SaveGate.WaitAsync().ConfigureAwait(false);
+        else if (!await SaveGate.WaitAsync(timeout).ConfigureAwait(false))
+            throw new TimeoutException("Timed out waiting to save availability history.");
         try { await Task.Run(() => Write(snapshot)).ConfigureAwait(false); }
         finally { SaveGate.Release(); }
     }
@@ -197,7 +231,10 @@ internal static class AvailabilityHistoryStore
             return;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         string temp = path + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(new HistoryFile { LastObservedUtc = snapshot.LastObservedUtc, Spans = snapshot.Spans.ToList() }, Options));
+        using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            JsonSerializer.Serialize(stream, new HistoryWriteFile { LastObservedUtc = snapshot.LastObservedUtc, Spans = snapshot.Spans }, Options);
+        }
         bool recoveredCurrent = string.Equals(path, _recoveredPath, StringComparison.OrdinalIgnoreCase);
         if (File.Exists(path))
         {
@@ -221,6 +258,7 @@ internal static class AvailabilityHistoryStore
         _writtenRevision = snapshot.Revision;
     }
     private sealed class HistoryFile { public DateTimeOffset? LastObservedUtc { get; set; } public List<AvailabilitySpan> Spans { get; set; } = []; }
+    private sealed class HistoryWriteFile { public DateTimeOffset? LastObservedUtc { get; init; } public IEnumerable<AvailabilitySpan> Spans { get; init; } = []; }
     private sealed record LegacyStateRecord(DateTimeOffset Utc, string Ru, string World);
 }
 

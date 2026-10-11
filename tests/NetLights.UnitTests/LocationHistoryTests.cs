@@ -6,6 +6,66 @@ namespace NetLights.UnitTests;
 public sealed class LocationHistoryTests
 {
     [Fact]
+    public void DifferentResolutionSources_AreNotCompactedIntoOneObservation()
+    {
+        DateTimeOffset observed = DateTimeOffset.Parse("2026-09-30T10:00:00Z");
+        var history = new LocationHistory();
+        history.NoteIso("JP", observed);
+        LocationObservation first = new(observed, new string('a', 64), "JP", "FR", "JP", null,
+            "v2fly", false, false, false, true, "203.0.113.7", ResolutionSource: "country.is");
+        Assert.True(history.NoteObservation(first));
+        Assert.True(history.NoteObservation(first with
+        {
+            ObservedUtc = observed.AddSeconds(10),
+            ObservedUntilUtc = observed.AddSeconds(10),
+            ResolutionSource = "ipwho.is"
+        }));
+        Assert.Equal("JP", history.Current!.Iso);
+        Assert.Equal(new[] { "country.is", "ipwho.is" }, history.Observations.Select(item => item.ResolutionSource));
+    }
+
+    [Fact]
+    public void RepeatedSuccessfulPollsExtendOneSourceObservationAndKeepOfflineGap()
+    {
+        DateTimeOffset start = DateTimeOffset.Parse("2026-09-30T10:00:00Z");
+        var history = new LocationHistory();
+        LocationObservation first = new(start, null, "PL", "PL", "PL", null, "v1",
+            false, false, false, true, "203.0.113.8", start);
+
+        Assert.True(history.NoteObservation(first));
+        Assert.False(history.NoteObservation(first with
+        {
+            ObservedUtc = start.AddSeconds(10),
+            ObservedUntilUtc = start.AddSeconds(10)
+        }));
+        Assert.Single(history.Observations);
+        Assert.Equal(start.AddSeconds(10), history.Observations[0].ObservedUntilUtc);
+
+        Assert.True(history.NoteObservation(first with
+        {
+            ObservedUtc = start.AddMinutes(10),
+            ObservedUntilUtc = start.AddMinutes(10)
+        }));
+        Assert.Equal(2, history.Observations.Count);
+    }
+
+    [Fact]
+    public void MergedPollCoverageStillRespectsSevenDayRetention()
+    {
+        DateTimeOffset now = DateTimeOffset.Parse("2026-09-30T10:00:00Z");
+        var history = new LocationHistory();
+        LocationObservation prior = new(now.AddDays(-8), null, "PL", "PL", "PL", null, "v1",
+            false, false, false, true, "203.0.113.8", now.AddSeconds(-10));
+        history.NoteObservation(prior);
+
+        Assert.False(history.NoteObservation(prior with { ObservedUtc = now, ObservedUntilUtc = now }));
+
+        LocationObservation retained = Assert.Single(history.Observations);
+        Assert.Equal(prior.ObservedUtc, retained.ObservedUtc);
+        Assert.Equal(now, retained.ObservedUntilUtc);
+    }
+
+    [Fact]
     public void NoteIso_StartsOpenStay()
     {
         var log = new LocationHistory();

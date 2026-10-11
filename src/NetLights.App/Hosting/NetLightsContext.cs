@@ -12,7 +12,7 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly NotifyIcon _icon;
     private readonly ContextMenuStrip _menu;
     private readonly TrayIconRenderer _renderer = new();
-    private readonly StatusForm _status = new();
+    private StatusForm? _status;
     private readonly GeoCountryTrayHost _countryTray;
     private readonly LocationHistory _locations;
     private readonly AvailabilityHistory _availabilityHistory;
@@ -32,21 +32,52 @@ internal sealed class NetLightsContext : ApplicationContext
     private readonly SynchronizationContext _ui;
     private readonly SemaphoreSlim _updateGate = new(1, 1);
     private readonly CancellationTokenSource _diagnosticsCts = new();
+    private readonly int _uiThreadId;
     private readonly ToolStripMenuItem _pauseItem;
-    private readonly NetworkAvailabilityGate _network = new(MonitorConstants.NetworkDebounce);
+    private readonly NetworkAvailabilityProcessor _network;
     private MonitorSnapshot _snapshot;
     private bool _exiting;
+    private bool _shutdownStarted;
+    private bool _shutdownReady;
+    private bool _resourcesDisposed;
     private bool _syncingToggles;
     private bool _windowWasShown;
+    private bool _locationGapOpen;
     private string? _updateNotice;
+    private string? _persistenceWarning;
+    private readonly string? _updateHealthEvent;
+    private int _updateHealthSignaled;
 
-    public NetLightsContext()
+    public NetLightsContext(string? updateHealthEvent = null)
     {
+        _updateHealthEvent = updateHealthEvent;
+        _uiThreadId = Environment.CurrentManagedThreadId;
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         (AppSettings loadedSettings, SettingsLoadStatus loadStatus) = SettingsStore.LoadDetailed();
         _settings = loadedSettings;
+        if (loadStatus is SettingsLoadStatus.Corrupt or SettingsLoadStatus.IoError)
+            _persistenceWarning = "Настройки не читаются. Исходный файл сохранен; изменения настроек пока не записываются.";
+        else if (loadStatus == SettingsLoadStatus.Recovered)
+            _persistenceWarning = "Настройки восстановлены из резервной копии.";
         _locations = LocationHistoryStore.Load();
         _availabilityHistory = AvailabilityHistoryStore.Load();
+        if (LocationHistoryStore.LastLoadStatus is HistoryLoadStatus.Corrupt or HistoryLoadStatus.Recovered)
+        {
+            RuntimeJournal.Write("locations-load-" + LocationHistoryStore.LastLoadStatus.ToString().ToLowerInvariant());
+            _persistenceWarning = LocationHistoryStore.LastLoadStatus == HistoryLoadStatus.Corrupt
+                ? "История стран повреждена; исходный файл сохранен."
+                : "История стран восстановлена из резервной копии.";
+        }
+        if (AvailabilityHistoryStore.LastLoadStatus is HistoryLoadStatus.Corrupt or HistoryLoadStatus.Recovered)
+        {
+            RuntimeJournal.Write("availability-load-" + AvailabilityHistoryStore.LastLoadStatus.ToString().ToLowerInvariant());
+            string availabilityWarning = AvailabilityHistoryStore.LastLoadStatus == HistoryLoadStatus.Corrupt
+                ? "История доступности повреждена; исходный файл сохранен."
+                : "История доступности восстановлена из резервной копии.";
+            _persistenceWarning = _persistenceWarning is null
+                ? availabilityWarning
+                : _persistenceWarning + " " + availabilityWarning;
+        }
         if (loadStatus is not SettingsLoadStatus.Corrupt and not SettingsLoadStatus.IoError
             && _settings.SettingsVersion < 2)
         {
@@ -92,13 +123,22 @@ internal sealed class NetLightsContext : ApplicationContext
             TrySaveSettings();
         }
 
+        if (loadStatus is not SettingsLoadStatus.Corrupt and not SettingsLoadStatus.IoError
+            && SettingsStore.MigrateToSettingsVersion8(_settings))
+        {
+            TrySaveSettings();
+        }
+
         if (_settings.GeoCountryIconEnabled && !_settings.GeoCountryDetectionEnabled)
         {
             _settings.GeoCountryIconEnabled = false;
             TrySaveSettings();
         }
 
-        AutoStartStore.Set(_settings.AutoStart, Application.ExecutablePath);
+        if (loadStatus is not SettingsLoadStatus.Corrupt and not SettingsLoadStatus.IoError
+            && SilentUpdatePolicy.HasInnoUninstaller(Path.GetDirectoryName(Application.ExecutablePath) ?? "")
+            && !AutoStartStore.HasForeignEntry(Application.ExecutablePath))
+            AutoStartStore.Set(_settings.AutoStart, Application.ExecutablePath);
         (MonitorConfiguration config, string? warning) = SettingsStore.LoadPool();
         _probe = HttpsProbeFactory.CreateProduction(TimeProvider.System, ProductInfo.Version);
         var kernel = new MonitorKernel(config, TimeProvider.System);
@@ -110,28 +150,6 @@ internal sealed class NetLightsContext : ApplicationContext
         }
 
         _host.SnapshotChanged += OnSnapshot;
-        _status.AutoStartChanged = OnAutoStartFromWindow;
-        _status.AutoUpdateChanged = OnAutoUpdateFromWindow;
-        _status.GeoCountryIconChanged = OnGeoCountryIconFromWindow;
-        _status.GeoCountryDetectionChanged = OnGeoCountryDetectionFromWindow;
-        _status.EmphasizeShortStatusesChanged = OnEmphasizeShortStatusesFromWindow;
-        _status.GeoCountryLetterScaleChanged = OnGeoCountryLetterScaleFromWindow;
-        _status.LocationChartWindowHoursChanged = OnLocationChartWindowFromWindow;
-        _status.DiagnoseRequested = DiagnoseAsync;
-        _status.ExportRequested = Export;
-        _status.CheckUpdatesRequested = () => _ = CheckUpdatesManualAsync();
-        _status.OpenSettingsFolderRequested = OpenSettingsFolder;
-        _status.ResetWindowSizeRequested = ResetWindowSize;
-        _status.WindowGeometryChanged = SaveWindowGeometry;
-        _status.BindSettings(
-            AutoStartStore.IsEnabled(),
-            _settings.AutoUpdateEnabled,
-            _settings.GeoCountryIconEnabled,
-            GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize),
-            _updateNotice,
-            _settings.LocationChartWindowHours,
-            _settings.GeoCountryDetectionEnabled,
-            _settings.EmphasizeShortStatuses);
         _menu = new ContextMenuStrip();
         _menu.Items.Add("Открыть окно", null, (_, _) => ShowStatus());
         _pauseItem = new ToolStripMenuItem("Пауза")
@@ -148,7 +166,11 @@ internal sealed class NetLightsContext : ApplicationContext
             _host.SetPaused(_pauseItem.Checked);
         };
         _menu.Items.Add(_pauseItem);
-        _menu.Items.Add("Выход", null, (_, _) => ExitThread());
+        _menu.Items.Add("Выход", null, (_, _) =>
+        {
+            RuntimeJournal.Write("tray-exit-requested");
+            BeginGracefulExit();
+        });
         int iconSize = _renderer.SystemSmallIconSize();
         _icon = new NotifyIcon
         {
@@ -164,21 +186,27 @@ internal sealed class NetLightsContext : ApplicationContext
                 ShowStatus(0);
             }
         };
-        _countryTray = new GeoCountryTrayHost(() => ShowStatus(1), ProductInfo.Version, TimeProvider.System, _ui);
+        _countryTray = new GeoCountryTrayHost(() => ShowStatus(1), ProductInfo.Version, SettingsStore.RootDirectory, TimeProvider.System, _ui);
         _countryTray.DisplayChanged = OnCountryDisplay;
-        _status.BindLocations(
-            _locations,
-            _settings.GeoCountryDetectionEnabled ? _countryTray.Current : GeoCountryDisplay.Disabled);
+        _network = new NetworkAvailabilityProcessor(
+            _ui,
+            _uiThreadId,
+            MonitorConstants.NetworkDebounce,
+            ApplyNetworkSignal,
+            () => _exiting,
+            ex => RuntimeJournal.Write("network-signal-failed", ex));
         _availabilityHistory.Observe(_snapshot, _snapshot.GeneratedUtc);
-        _status.BindAvailabilityHistory(_availabilityHistory, LocationChartWindows.ParseHours(_settings.LocationChartWindowHours));
         _heartbeat = new System.Windows.Forms.Timer { Interval = 1000 };
         _heartbeat.Tick += (_, _) =>
         {
             DateTimeOffset now = DateTimeOffset.UtcNow;
-            ApplyNetworkSignal(_network.OnHeartbeat(NetworkInterface.GetIsNetworkAvailable(), now));
-            if (_locations.Current is not null)
+            _network.ObserveHeartbeat(NetworkInterface.GetIsNetworkAvailable(), now);
+            long locationRevision = _locations.Revision;
+            _locations.SplitIfStale(now);
+            if (_locations.Revision != locationRevision)
             {
-                _locations.Touch(now);
+                TrySaveLocations();
+                _status?.BindLocations(_locations, GeoCountryDisplay.Unconfirmed);
             }
             if (now.UtcTicks >= Interlocked.Read(ref _locationRetryAfterTicks)
                 && SaveDue(_locationsSavedAtTicks, now)) TrySaveLocations();
@@ -209,7 +237,7 @@ internal sealed class NetLightsContext : ApplicationContext
             () => _settings.AutoUpdateEnabled,
             ProductInfo.Version,
             Application.ExecutablePath,
-            () => _ui.Post(_ => ExitThread(), null),
+            () => _ui.Post(_ => BeginGracefulExit(), null),
             _updateGate,
             _diagnosticsCts.Token);
         if (!string.IsNullOrEmpty(warning))
@@ -226,7 +254,20 @@ internal sealed class NetLightsContext : ApplicationContext
         }
     }
 
-    private void OnSnapshot(MonitorSnapshot snapshot) => ApplySnapshot(snapshot);
+    private void OnSnapshot(MonitorSnapshot snapshot)
+    {
+        if (_exiting)
+            return;
+
+        ApplySnapshot(snapshot);
+        bool probed = snapshot.Ru.Endpoints.Concat(snapshot.World.Endpoints)
+            .Any(endpoint => endpoint.LastCompletedUtc is not null);
+        if (probed && _icon.Visible && Interlocked.Exchange(ref _updateHealthSignaled, 1) == 0)
+        {
+            RuntimeJournal.Write("monitor-ready");
+            UpdateHealthSignal.Signal(_updateHealthEvent);
+        }
+    }
 
     private void ApplySnapshot(MonitorSnapshot snapshot)
     {
@@ -256,12 +297,12 @@ internal sealed class NetLightsContext : ApplicationContext
             _syncingToggles = false;
         }
 
-        if (_status.Visible)
+        if (_status is { Visible: true } status)
         {
-            _status.BindAvailabilityHistory(_availabilityHistory, LocationChartWindows.ParseHours(_settings.LocationChartWindowHours));
-            if (_status.NeedsBind(snapshot))
+            status.BindAvailabilityHistory(_availabilityHistory, LocationChartWindows.ParseHours(_settings.LocationChartWindowHours));
+            if (status.NeedsBind(snapshot))
             {
-                _status.Bind(snapshot);
+                status.Bind(snapshot);
             }
         }
     }
@@ -279,9 +320,9 @@ internal sealed class NetLightsContext : ApplicationContext
             }
 
             _icon.Text = $"{GroupLabels.Provider}: нет свежих данных | {GroupLabels.World}: нет свежих данных";
-            if (_status.Visible)
+            if (_status is { Visible: true } status)
             {
-                _status.Bind(_snapshot with
+                status.Bind(_snapshot with
                 {
                     MonitorError = "монитор не отвечает",
                     Ru = _snapshot.Ru with { Availability = GroupAvailability.Unknown },
@@ -293,34 +334,84 @@ internal sealed class NetLightsContext : ApplicationContext
 
     private void ShowStatus(int page = 0)
     {
-        if (!_status.Visible)
+        StatusForm status = _status ??= CreateStatusForm();
+        if (!status.Visible)
         {
-            _status.RestoreWindowBounds(new Rectangle(
+            status.RestoreWindowBounds(new Rectangle(
                 _settings.WindowX,
                 _settings.WindowY,
                 _settings.WindowWidth,
                 _settings.WindowHeight));
         }
 
-        _status.Bind(_snapshot);
-        _status.BindSettings(
-            AutoStartStore.IsEnabled(),
+        status.Bind(_snapshot);
+        status.BindSettings(
+            AutoStartStore.IsEnabled(Application.ExecutablePath),
             _settings.AutoUpdateEnabled,
             _settings.GeoCountryIconEnabled,
             GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize),
             _updateNotice,
             _settings.LocationChartWindowHours,
             _settings.GeoCountryDetectionEnabled,
-            _settings.EmphasizeShortStatuses);
-        _status.BindLocations(
+            _settings.EmphasizeShortStatuses,
+            _settings.ShowLocationDebugSources);
+        status.BindLocations(
             _locations,
-            _settings.GeoCountryDetectionEnabled ? _countryTray.Current : GeoCountryDisplay.Disabled);
-        _status.ShowPageAndReveal(page);
+            _settings.GeoCountryDetectionEnabled
+                ? _locations.Current is null ? GeoCountryDisplay.Unconfirmed : _countryTray.Current
+                : GeoCountryDisplay.Disabled);
+        status.BindAvailabilityHistory(_availabilityHistory, LocationChartWindows.ParseHours(_settings.LocationChartWindowHours));
+        status.SetPersistenceWarning(_persistenceWarning);
+        status.ShowPageAndReveal(page);
         _windowWasShown = true;
     }
 
+    private StatusForm CreateStatusForm()
+    {
+        var status = new StatusForm
+        {
+            AutoStartChanged = OnAutoStartFromWindow,
+            AutoUpdateChanged = OnAutoUpdateFromWindow,
+            GeoCountryIconChanged = OnGeoCountryIconFromWindow,
+            GeoCountryDetectionChanged = OnGeoCountryDetectionFromWindow,
+            EmphasizeShortStatusesChanged = OnEmphasizeShortStatusesFromWindow,
+            LocationDebugSourcesChanged = OnLocationDebugSourcesFromWindow,
+            GeoCountryLetterScaleChanged = OnGeoCountryLetterScaleFromWindow,
+            LocationChartWindowHoursChanged = OnLocationChartWindowFromWindow,
+            DiagnoseRequested = DiagnoseAsync,
+            ExportRequested = Export,
+            CheckUpdatesRequested = () => _ = CheckUpdatesManualAsync(),
+            OpenSettingsFolderRequested = OpenSettingsFolder,
+            ResetWindowSizeRequested = ResetWindowSize,
+            WindowGeometryChanged = SaveWindowGeometry,
+            HiddenToTray = () => _ui.Post(_ => DisposeHiddenStatusForm(), null)
+        };
+        return status;
+    }
+
+    private void DisposeHiddenStatusForm()
+    {
+        if (_status is not { Visible: false } status || _exiting) return;
+        SaveWindowGeometry();
+        _status = null;
+        status.Dispose();
+    }
+
+    internal void ShowLocalWindowOnStart() => ShowStatus(1);
+
     private void OnAutoStartFromWindow(bool enabled)
     {
+        if (!SilentUpdatePolicy.HasInnoUninstaller(Path.GetDirectoryName(Application.ExecutablePath) ?? ""))
+        {
+            RuntimeJournal.Write("autostart-portable-ignored");
+            MessageBox.Show("Автозапуск можно изменить в установленной версии Net Lights.",
+                ProductInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            _status?.BindSettings(AutoStartStore.IsEnabled(Application.ExecutablePath), _settings.AutoUpdateEnabled,
+                _settings.GeoCountryIconEnabled, GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize),
+                _updateNotice, _settings.LocationChartWindowHours, _settings.GeoCountryDetectionEnabled,
+                _settings.EmphasizeShortStatuses, _settings.ShowLocationDebugSources);
+            return;
+        }
         AutoStartStore.Set(enabled, Application.ExecutablePath);
         _settings.AutoStart = enabled;
         TrySaveSettings();
@@ -357,6 +448,7 @@ internal sealed class NetLightsContext : ApplicationContext
         }
         catch (Exception ex)
         {
+            RuntimeJournal.Write("location-save-failed", ex);
             _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
             Interlocked.Exchange(ref _locationRetryAfterTicks, DateTimeOffset.UtcNow.AddSeconds(10).UtcTicks);
             NotifySaveFailure(ref _locationSaveFailed, "Не удалось сохранить историю стран. Программа повторит попытку.");
@@ -387,6 +479,7 @@ internal sealed class NetLightsContext : ApplicationContext
         }
         catch (Exception ex)
         {
+            RuntimeJournal.Write("availability-save-failed", ex);
             _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "availability-history", ex.Message);
             Interlocked.Exchange(ref _availabilityRetryAfterTicks, DateTimeOffset.UtcNow.AddSeconds(10).UtcTicks);
             NotifySaveFailure(ref _availabilitySaveFailed, "Не удалось сохранить историю состояния. Программа повторит попытку.");
@@ -406,7 +499,8 @@ internal sealed class NetLightsContext : ApplicationContext
             _icon.BalloonTipTitle = ProductInfo.Name;
             _icon.BalloonTipText = message;
             _icon.ShowBalloonTip(5000);
-            _status.SetPersistenceWarning(message);
+            _persistenceWarning = message;
+            _status?.SetPersistenceWarning(message);
         }, null);
     }
 
@@ -416,7 +510,10 @@ internal sealed class NetLightsContext : ApplicationContext
         {
             if (!_exiting && Volatile.Read(ref _locationSaveFailed) == 0
                 && Volatile.Read(ref _availabilitySaveFailed) == 0)
-                _status.SetPersistenceWarning(null);
+            {
+                _persistenceWarning = null;
+                _status?.SetPersistenceWarning(null);
+            }
         }, null);
     }
 
@@ -428,6 +525,7 @@ internal sealed class NetLightsContext : ApplicationContext
         }
         catch (Exception ex)
         {
+            RuntimeJournal.Write("settings-save-failed", ex);
             if (_host is null)
             {
                 Debug.WriteLine("settings: " + ex.Message);
@@ -454,30 +552,31 @@ internal sealed class NetLightsContext : ApplicationContext
 
     private void ResetWindowSize()
     {
-        _status.ResetWindowSize();
-        _settings.WindowX = _status.Location.X;
-        _settings.WindowY = _status.Location.Y;
-        _settings.WindowWidth = _status.Width;
-        _settings.WindowHeight = _status.Height;
+        if (_status is not { } status) return;
+        status.ResetWindowSize();
+        _settings.WindowX = status.Location.X;
+        _settings.WindowY = status.Location.Y;
+        _settings.WindowWidth = status.Width;
+        _settings.WindowHeight = status.Height;
         TrySaveSettings();
     }
 
     private void SaveWindowGeometry()
     {
-        if (!_windowWasShown || _status.WindowState != FormWindowState.Normal)
+        if (!_windowWasShown || _status is not { WindowState: FormWindowState.Normal } status)
             return;
 
-        _settings.WindowX = _status.Left;
-        _settings.WindowY = _status.Top;
-        _settings.WindowWidth = _status.Width;
-        _settings.WindowHeight = _status.Height;
+        _settings.WindowX = status.Left;
+        _settings.WindowY = status.Top;
+        _settings.WindowWidth = status.Width;
+        _settings.WindowHeight = status.Height;
         TrySaveSettings();
     }
 
     private void OnLocationChartWindowFromWindow(int hours)
     {
         _settings.LocationChartWindowHours = LocationChartWindows.ToHours(LocationChartWindows.ParseHours(hours));
-        _status.BindAvailabilityHistory(_availabilityHistory, LocationChartWindows.ParseHours(hours));
+        _status?.BindAvailabilityHistory(_availabilityHistory, LocationChartWindows.ParseHours(hours));
         TrySaveSettings();
     }
 
@@ -496,7 +595,7 @@ internal sealed class NetLightsContext : ApplicationContext
             _settings.GeoCountryIconEnabled = false;
             _locations.CloseOpen(TimeProvider.System.GetUtcNow());
             TrySaveLocations();
-            _status.BindLocations(_locations, GeoCountryDisplay.Disabled);
+            _status?.BindLocations(_locations, GeoCountryDisplay.Disabled);
         }
 
         TrySaveSettings();
@@ -513,6 +612,12 @@ internal sealed class NetLightsContext : ApplicationContext
         TrySaveSettings();
     }
 
+    private void OnLocationDebugSourcesFromWindow(bool enabled)
+    {
+        _settings.ShowLocationDebugSources = enabled;
+        TrySaveSettings();
+    }
+
     private void OnGeoCountryLetterScaleFromWindow(GeoCountryLetterScale scale)
     {
         _settings.GeoCountryLetterSize = (int)scale;
@@ -522,17 +627,32 @@ internal sealed class NetLightsContext : ApplicationContext
 
     private void OnCountryDisplay(GeoCountryDisplay display)
     {
-        if (!_settings.GeoCountryDetectionEnabled)
+        if (_exiting || !_settings.GeoCountryDetectionEnabled)
         {
             return;
         }
 
-        if (_locations.NoteIso(display.Letters, TimeProvider.System.GetUtcNow()))
+        DateTimeOffset now = display.Observation?.ObservedUtc ?? TimeProvider.System.GetUtcNow();
+        bool newObservation = false;
+        if (display.Observation is { } observation)
+            newObservation = _locations.NoteObservation(observation);
+        long afterObservation = _locations.Revision;
+        if (display.Fresh)
+        {
+            _locations.NoteIso(display.Letters, now, mergeShortGap: !_locationGapOpen);
+            _locationGapOpen = false;
+        }
+        else
+        {
+            _locations.CloseOpen(display.ConfirmedThroughUtc ?? now);
+            _locationGapOpen = true;
+        }
+        bool meaningfulChange = newObservation || _locations.Revision != afterObservation;
+        if (meaningfulChange)
         {
             TrySaveLocations();
+            _status?.BindLocations(_locations, display);
         }
-
-        _status.BindLocations(_locations, display);
     }
 
     private async Task<string> DiagnoseAsync(string endpointId)
@@ -582,7 +702,7 @@ internal sealed class NetLightsContext : ApplicationContext
     {
         if (!await _updateGate.WaitAsync(0).ConfigureAwait(true))
         {
-            _status.SetManualUpdateState(false, ManualUpdateCopy.AlreadyRunning);
+            _status?.SetManualUpdateState(false, ManualUpdateCopy.AlreadyRunning);
             return;
         }
 
@@ -591,7 +711,7 @@ internal sealed class NetLightsContext : ApplicationContext
         string? downloadDirectory = null;
         try
         {
-            _status.SetManualUpdateState(true, ManualUpdateCopy.Checking);
+            _status?.SetManualUpdateState(true, ManualUpdateCopy.Checking);
             string? applicationDirectory = Path.GetDirectoryName(Application.ExecutablePath);
             if (string.IsNullOrWhiteSpace(applicationDirectory))
             {
@@ -630,10 +750,11 @@ internal sealed class NetLightsContext : ApplicationContext
             _updateGate.Release();
         }
 
-        _status.SetManualUpdateState(false, ManualUpdateCopy.For(outcome));
+        _status?.SetManualUpdateState(false, ManualUpdateCopy.For(outcome));
         if (exitRequested)
         {
-            _ui.Post(_ => ExitThread(), null);
+            RuntimeJournal.Write("manual-update-exit-requested");
+            _ui.Post(_ => BeginGracefulExit(), null);
         }
     }
 
@@ -658,53 +779,124 @@ internal sealed class NetLightsContext : ApplicationContext
 
     private void OnNetwork(object? sender, EventArgs e)
     {
-        ApplyNetworkSignal(_network.OnChange(NetworkInterface.GetIsNetworkAvailable(), DateTimeOffset.UtcNow));
+        try
+        {
+            _network.ObserveChange(NetworkInterface.GetIsNetworkAvailable(), DateTimeOffset.UtcNow);
+        }
+        catch (Exception ex)
+        {
+            RuntimeJournal.Write("network-state-read-failed", ex);
+        }
     }
 
     private void OnPower(object sender, Microsoft.Win32.PowerModeChangedEventArgs e)
     {
-        if (e.Mode is Microsoft.Win32.PowerModes.Suspend)
+        DateTimeOffset occurredUtc = TimeProvider.System.GetUtcNow();
+        (LocationHistorySnapshot Locations, AvailabilityHistorySnapshot Availability)? snapshots = null;
+        void ApplyPowerEvent()
         {
-            _availabilityHistory.CloseOpen(TimeProvider.System.GetUtcNow());
-            SaveAvailabilityHistoryNow();
-            _locations.CloseOpen(TimeProvider.System.GetUtcNow());
-            SaveLocationHistoryNow();
-            _host.NotifyNetworkChange();
-            _countryTray.NotifyNetworkOrResume();
-            return;
+            if (_exiting)
+                return;
+
+            if (e.Mode is Microsoft.Win32.PowerModes.Suspend)
+            {
+                _availabilityHistory.CloseOpen(occurredUtc);
+                _locations.CloseOpen(occurredUtc);
+                snapshots = (
+                    LocationHistoryStore.Snapshot(_locations),
+                    AvailabilityHistoryStore.Snapshot(_availabilityHistory));
+                _host.NotifyNetworkChange();
+                _countryTray.NotifyNetworkOrResume();
+            }
+            else if (e.Mode is Microsoft.Win32.PowerModes.Resume)
+            {
+                _taskbar.RequestRecovery();
+                _host.NotifyNetworkChange();
+                _countryTray.NotifyNetworkOrResume();
+            }
         }
 
-        if (e.Mode is Microsoft.Win32.PowerModes.Resume)
-        {
-            RestoreIcon();
-            _host.NotifyNetworkChange();
-            _countryTray.NotifyNetworkOrResume();
-        }
-    }
-
-    private void SaveAvailabilityHistoryNow()
-    {
         try
         {
-            AvailabilityHistoryStore.Save(AvailabilityHistoryStore.Snapshot(_availabilityHistory));
-            Interlocked.Exchange(ref _availabilitySavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
+            if (Environment.CurrentManagedThreadId == _uiThreadId)
+            {
+                ApplyPowerEvent();
+            }
+            else
+            {
+                var dispatched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                int dispatchPending = 1;
+                _ui.Post(_ =>
+                {
+                    if (Interlocked.Exchange(ref dispatchPending, 0) == 0)
+                    {
+                        dispatched.TrySetCanceled();
+                        return;
+                    }
+
+                    try
+                    {
+                        ApplyPowerEvent();
+                        dispatched.TrySetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        dispatched.TrySetException(ex);
+                    }
+                }, null);
+                if (!dispatched.Task.Wait(TimeSpan.FromSeconds(2)))
+                {
+                    Interlocked.Exchange(ref dispatchPending, 0);
+                    RuntimeJournal.Write("power-event-ui-timeout");
+                    return;
+                }
+                dispatched.Task.GetAwaiter().GetResult();
+            }
+
+            if (snapshots is { } pending)
+            {
+                Task save = PersistPowerSnapshotsAsync(pending.Locations, pending.Availability);
+                try
+                {
+                    if (!save.Wait(TimeSpan.FromSeconds(5)))
+                    {
+                        ObserveFailure(save);
+                        RuntimeJournal.Write("power-event-save-timeout");
+                    }
+                }
+                catch (AggregateException ex)
+                {
+                    RuntimeJournal.Write("power-event-save-failed", ex.GetBaseException());
+                }
+            }
         }
         catch (Exception ex)
         {
-            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "availability-history", ex.Message);
+            RuntimeJournal.Write("power-event-failed", ex);
         }
     }
 
-    private void SaveLocationHistoryNow()
+    private async Task PersistPowerSnapshotsAsync(
+        LocationHistorySnapshot locations,
+        AvailabilityHistorySnapshot availability)
+    {
+        await Task.WhenAll(
+            SavePowerHistoryAsync("availability", () => AvailabilityHistoryStore.SaveAsync(availability, TimeSpan.FromSeconds(2)),
+                ticks => Interlocked.Exchange(ref _availabilitySavedAtTicks, ticks)),
+            SavePowerHistoryAsync("locations", () => LocationHistoryStore.SaveAsync(locations, TimeSpan.FromSeconds(2)),
+                ticks => Interlocked.Exchange(ref _locationsSavedAtTicks, ticks)));
+    }
+
+    private static async Task SavePowerHistoryAsync(string name, Func<Task> save, Action<long> onSaved)
     {
         try
         {
-            LocationHistoryStore.Save(LocationHistoryStore.Snapshot(_locations));
-            Interlocked.Exchange(ref _locationsSavedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
+            await save().ConfigureAwait(false);
+            onSaved(DateTimeOffset.UtcNow.UtcTicks);
         }
         catch (Exception ex)
         {
-            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
+            RuntimeJournal.Write("power-save-" + name + "-failed", ex);
         }
     }
 
@@ -721,68 +913,120 @@ internal sealed class NetLightsContext : ApplicationContext
         catch (Exception ex) { RuntimeJournal.Write("tray-country-restore-failed", ex); }
     }
 
-    internal void RequestExit() => _ui.Post(_ =>
-    {
-        if (!_exiting) ExitThread();
-    }, null);
+    internal void RequestExit() => _ui.Post(_ => BeginGracefulExit(), null);
 
-    protected override void ExitThreadCore()
+    private void BeginGracefulExit()
     {
-        if (_exiting)
-        {
+        if (_shutdownStarted)
             return;
-        }
 
+        _shutdownStarted = true;
         _exiting = true;
+        RuntimeJournal.Write("graceful-exit-started");
         _heartbeat.Stop();
         _diagnosticsCts.Cancel();
+        _countryTray.SetDetectionEnabled(false);
+        _countryTray.DisplayChanged = null;
+        _host.SnapshotChanged -= OnSnapshot;
         NetworkChange.NetworkAvailabilityChanged -= OnNetwork;
         NetworkChange.NetworkAddressChanged -= OnNetwork;
         Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPower;
-        if (_windowWasShown && _status.WindowState == FormWindowState.Normal)
+        if (_windowWasShown && _status is { WindowState: FormWindowState.Normal } status)
         {
-            _settings.WindowX = _status.Left;
-            _settings.WindowY = _status.Top;
-            _settings.WindowWidth = _status.Width;
-            _settings.WindowHeight = _status.Height;
+            _settings.WindowX = status.Left;
+            _settings.WindowY = status.Top;
+            _settings.WindowWidth = status.Width;
+            _settings.WindowHeight = status.Height;
         }
+
+        _ = CompleteGracefulExitAsync();
+    }
+
+    private async Task CompleteGracefulExitAsync()
+    {
         try
         {
-            SettingsStore.Save(_settings);
+            Task monitorShutdown = _host.DisposeAsync().AsTask();
+            try
+            {
+                await monitorShutdown.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch (TimeoutException ex)
+            {
+                ObserveFailure(monitorShutdown);
+                RuntimeJournal.Write("monitor-shutdown-timeout", ex);
+            }
+            catch (Exception ex)
+            {
+                RuntimeJournal.Write("monitor-shutdown-failed", ex);
+            }
+
+            DateTimeOffset now = TimeProvider.System.GetUtcNow();
+            _locations.CloseOpen(now);
+            _availabilityHistory.CloseOpen(now);
+            LocationHistorySnapshot locations = LocationHistoryStore.Snapshot(_locations);
+            AvailabilityHistorySnapshot availability = AvailabilityHistoryStore.Snapshot(_availabilityHistory);
+
+            await Task.WhenAll(
+                SaveBoundedAsync("settings", () => Task.Run(() => SettingsStore.Save(_settings))),
+                SaveBoundedAsync("location-history", () => LocationHistoryStore.SaveAsync(locations, TimeSpan.FromSeconds(5))),
+                SaveBoundedAsync("availability-history", () => AvailabilityHistoryStore.SaveAsync(availability, TimeSpan.FromSeconds(5))));
         }
         catch (Exception ex)
         {
-            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "settings", ex.Message);
+            RuntimeJournal.Write("graceful-exit-failed", ex);
         }
+        finally
+        {
+            _shutdownReady = true;
+            _ui.Post(_ => ExitThread(), null);
+        }
+    }
 
+    private static async Task SaveBoundedAsync(string name, Func<Task> save)
+    {
+        Task? operation = null;
         try
         {
-            _locations.CloseOpen(TimeProvider.System.GetUtcNow());
-            LocationHistoryStore.Save(LocationHistoryStore.Snapshot(_locations));
+            operation = save();
+            await operation.WaitAsync(TimeSpan.FromSeconds(8));
+        }
+        catch (TimeoutException ex)
+        {
+            if (operation is not null)
+                ObserveFailure(operation);
+            RuntimeJournal.Write("shutdown-" + name + "-timeout", ex);
         }
         catch (Exception ex)
         {
-            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "locations", ex.Message);
+            RuntimeJournal.Write("shutdown-" + name + "-failed", ex);
+        }
+    }
+
+    private static void ObserveFailure(Task operation)
+        => _ = operation.ContinueWith(
+            static task => _ = task.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+    protected override void ExitThreadCore()
+    {
+        if (_resourcesDisposed)
+        {
+            base.ExitThreadCore();
+            return;
         }
 
-        try
-        {
-            _availabilityHistory.CloseOpen(TimeProvider.System.GetUtcNow());
-            AvailabilityHistoryStore.Save(AvailabilityHistoryStore.Snapshot(_availabilityHistory));
-        }
-        catch (Exception ex)
-        {
-            _host.Kernel.Log.Add(DateTimeOffset.UtcNow, "availability-history", ex.Message);
-        }
-
-        try
-        {
-            _host.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
-        }
-        catch (Exception)
-        {
-        }
-
+        _resourcesDisposed = true;
+        if (!_shutdownReady)
+            RuntimeJournal.Write("exit-without-graceful-flush");
+        _heartbeat.Stop();
+        _diagnosticsCts.Cancel();
+        _countryTray.SetDetectionEnabled(false);
+        NetworkChange.NetworkAvailabilityChanged -= OnNetwork;
+        NetworkChange.NetworkAddressChanged -= OnNetwork;
+        Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPower;
         _probe.Dispose();
         _diagnosticsCts.Dispose();
         _countryTray.Dispose();
@@ -790,10 +1034,11 @@ internal sealed class NetLightsContext : ApplicationContext
         _icon.Dispose();
         _menu.Dispose();
         _renderer.Dispose();
-        _status.Dispose();
+        _status?.Dispose();
         _updateGate.Dispose();
         _taskbar.Dispose();
         base.ExitThreadCore();
+        RuntimeJournal.Write("exit-complete");
     }
 
 }

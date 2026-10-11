@@ -18,14 +18,25 @@ internal static class DiagnosticExport
         Directory.CreateDirectory(dir);
         try
         {
-            File.WriteAllText(Path.Combine(dir, "snapshot.json"), SanitizeSecrets(JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true })));
-            File.WriteAllText(Path.Combine(dir, "events.json"), JsonSerializer.Serialize(log.Snapshot(), new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(Path.Combine(dir, "snapshot.json"), JsonSerializer.Serialize(new
+            {
+                snapshot.NetworkEpoch,
+                snapshot.GeneratedUtc,
+                snapshot.Paused,
+                snapshot.UsingBuiltinPool,
+                snapshot.CapacityExhausted,
+                provider = SafeGroup(snapshot.Ru),
+                world = SafeGroup(snapshot.World)
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(Path.Combine(dir, "events.json"), JsonSerializer.Serialize(
+                log.Snapshot().Select(entry => new { entry.Utc, Code = SafeEventCode(entry.Code), Message = "[redacted]" }),
+                new JsonSerializerOptions { WriteIndented = true }));
             var versions = new
             {
                 product = ProductInfo.Version,
                 runtime = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
                 os = Environment.OSVersion.VersionString,
-                configWarning
+                configWarningPresent = !string.IsNullOrWhiteSpace(configWarning)
             };
             File.WriteAllText(Path.Combine(dir, "versions.json"), JsonSerializer.Serialize(versions, new JsonSerializerOptions { WriteIndented = true }));
 
@@ -108,12 +119,32 @@ internal static class DiagnosticExport
         };
     }
 
-    private static string SanitizeSecrets(string json)
+    private static object SafeGroup(GroupSnapshot group) => new
     {
-        json = System.Text.RegularExpressions.Regex.Replace(json, @"\?[^""\\]*", "", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-        json = System.Text.RegularExpressions.Regex.Replace(json, @"(https://)[^/\s""]+@", "$1", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-        return json;
-    }
+        group.Group,
+        group.Availability,
+        group.LastSuccessUtc,
+        group.ConfirmationActive,
+        endpoints = group.Endpoints.Select((endpoint, index) => new
+        {
+            index,
+            endpoint.Group,
+            endpoint.Outcome,
+            endpoint.HttpStatus,
+            failureKind = endpoint.Failure?.Kind,
+            elapsedMs = endpoint.Elapsed?.TotalMilliseconds,
+            endpoint.LastCompletedUtc,
+            endpoint.Fresh,
+            endpoint.Paused,
+            endpoint.PauseUntilUtc,
+            endpoint.InFlight,
+            endpoint.Stats
+        })
+    };
+
+    private static string SafeEventCode(string code)
+        => code.Length is > 0 and <= 40 && code.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '-')
+            ? code : "redacted";
 
     private static string Truncate(string text) => text.Length <= 63 ? text : text[..63];
 }

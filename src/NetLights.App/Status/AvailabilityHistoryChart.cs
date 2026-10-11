@@ -27,15 +27,7 @@ internal class AvailabilityHistoryChart : Control
         | TextFormatFlags.NoPrefix
         | TextFormatFlags.NoPadding
         | TextFormatFlags.EndEllipsis;
-    private readonly ToolTip _tip = new()
-    {
-        ShowAlways = true,
-        InitialDelay = 250,
-        ReshowDelay = 100,
-        AutoPopDelay = 5000,
-        UseAnimation = false,
-        UseFading = false
-    };
+    private readonly ChartToolTip _tip = new(autoPopDelay: 5000);
     private AvailabilityHistory _history = new();
     private AvailabilityRenderSpan[] _providerSegments = [];
     private AvailabilityRenderSpan[] _worldSegments = [];
@@ -186,13 +178,13 @@ internal class AvailabilityHistoryChart : Control
             string group = span.Group == EndpointGroup.Ru ? GroupLabels.Provider : GroupLabels.World;
             string state = span.Paused ? "Пауза" : StateLabel(span.State);
             TimeSpan duration = span.EndUtc - span.StartUtc;
-            _tip.SetToolTip(
-                this,
-                $"{group} · {state}\n{span.StartUtc.ToLocalTime():dd.MM HH:mm:ss} – {span.EndUtc.ToLocalTime():dd.MM HH:mm:ss}\n{LocationCopy.Duration(duration)}");
+            _tip.ShowFor(this,
+                $"{group} · {state}\n{span.StartUtc.ToLocalTime():dd.MM HH:mm:ss} – {span.EndUtc.ToLocalTime():dd.MM HH:mm:ss}\n{LocationCopy.Duration(duration)}",
+                e.Location);
         }
         else
         {
-            _tip.SetToolTip(this, "");
+            _tip.Clear(this);
         }
 
         InvalidateHoverColumn(oldX, next is AvailabilityRenderSpan current ? current.Left + current.Width / 2 : -1);
@@ -203,7 +195,7 @@ internal class AvailabilityHistoryChart : Control
         base.OnMouseLeave(e);
         int oldX = _hovered is AvailabilityRenderSpan old ? old.Left + old.Width / 2 : -1;
         _hovered = null;
-        _tip.SetToolTip(this, "");
+        _tip.Clear(this);
         if (oldX >= 0)
             InvalidateHoverColumn(oldX, -1);
     }
@@ -552,8 +544,8 @@ internal class AvailabilityHistoryChart : Control
     {
         int left = Scale(14 + 80);
         int right = Math.Max(left + 1, Width - Scale(14));
-        int y = Scale(group == EndpointGroup.Ru ? 39 : 61);
-        int height = Scale(9);
+        int y = Scale(group == EndpointGroup.Ru ? 36 : 58);
+        int height = Scale(16);
         return new Rectangle(left, y, right - left, height);
     }
 

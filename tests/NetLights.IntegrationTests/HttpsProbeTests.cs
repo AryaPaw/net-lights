@@ -10,18 +10,36 @@ namespace NetLights.IntegrationTests;
 public sealed class HttpsProbeTests
 {
     [Fact]
+    public async Task T28_TestServerCertificateHasValidTrustedChainAndPrivateKey()
+    {
+        using LocalCertificateChain certificates = LocalHttpsFixture.CreateCertificate(
+            "localhost",
+            DateTimeOffset.UtcNow.AddDays(-1),
+            DateTimeOffset.UtcNow.AddDays(10));
+        using var chain = new X509Chain();
+        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        chain.ChainPolicy.CustomTrustStore.Add(certificates.Authority);
+        Assert.True(certificates.Server.HasPrivateKey);
+        Assert.True(chain.Build(certificates.Server), string.Join(", ", chain.ChainStatus.Select(s => s.StatusInformation.Trim())));
+
+    }
+
+    [Fact]
     public async Task T29_Head200And204()
     {
-        await WithTrustedAsync(FixtureMode.Ok, 200, async (probe, ep) =>
+        await WithTrustedAsync(FixtureMode.Ok, 200, async (probe, ep, fx) =>
         {
             EndpointObservation obs = await probe.ProbeAsync(ep, 1, 1, TimeSpan.FromSeconds(2), CancellationToken.None);
-            Assert.Equal(ProbeOutcome.Reachable, obs.Outcome);
+            if (obs.Outcome != ProbeOutcome.Reachable) await Task.Delay(100);
+            Assert.True(obs.Outcome == ProbeOutcome.Reachable, $"Outcome={obs.Outcome}; failure={obs.Failure}; hits={fx.Hits}; fixture={fx.LastServerError}");
             Assert.Equal(200, obs.HttpStatus);
         });
-        await WithTrustedAsync(FixtureMode.Ok, 204, async (probe, ep) =>
+        await WithTrustedAsync(FixtureMode.Ok, 204, async (probe, ep, fx) =>
         {
             EndpointObservation obs = await probe.ProbeAsync(ep, 1, 1, TimeSpan.FromSeconds(2), CancellationToken.None);
-            Assert.Equal(ProbeOutcome.Reachable, obs.Outcome);
+            if (obs.Outcome != ProbeOutcome.Reachable) await Task.Delay(100);
+            Assert.True(obs.Outcome == ProbeOutcome.Reachable, $"Outcome={obs.Outcome}; failure={obs.Failure}; hits={fx.Hits}; fixture={fx.LastServerError}");
             Assert.Equal(204, obs.HttpStatus);
         });
     }
@@ -114,22 +132,22 @@ public sealed class HttpsProbeTests
     [Fact]
     public async Task T36_UntrustedAndExpiredAndWrongName()
     {
-        X509Certificate2 good = LocalHttpsFixture.CreateCertificate("localhost", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(10));
+        LocalCertificateChain good = LocalHttpsFixture.CreateCertificate("localhost", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(10));
         await using var fx = new LocalHttpsFixture(FixtureMode.Ok, good);
         using var untrusted = HttpsProbeFactory.CreateProduction(TimeProvider.System, "1.0.0");
         EndpointDefinition ep = Endpoint(fx);
         EndpointObservation obs = await untrusted.ProbeAsync(ep, 1, 1, TimeSpan.FromSeconds(2), CancellationToken.None);
         Assert.Equal(ProbeOutcome.Indeterminate, obs.Outcome);
 
-        X509Certificate2 expired = LocalHttpsFixture.CreateCertificate("localhost", DateTimeOffset.UtcNow.AddDays(-20), DateTimeOffset.UtcNow.AddDays(-1));
+        LocalCertificateChain expired = LocalHttpsFixture.CreateCertificate("localhost", DateTimeOffset.UtcNow.AddDays(-20), DateTimeOffset.UtcNow.AddDays(-1));
         await using var fx2 = new LocalHttpsFixture(FixtureMode.Ok, expired);
-        using var trustedExpired = HttpsProbeFactory.CreateWithCustomTrust(TimeProvider.System, "1.0.0", expired, "localhost");
+        using var trustedExpired = HttpsProbeFactory.CreateWithCustomTrust(TimeProvider.System, "1.0.0", expired.Authority, "localhost");
         EndpointObservation obs2 = await trustedExpired.ProbeAsync(Endpoint(fx2), 1, 1, TimeSpan.FromSeconds(2), CancellationToken.None);
         Assert.NotEqual(ProbeOutcome.Reachable, obs2.Outcome);
 
-        X509Certificate2 wrong = LocalHttpsFixture.CreateCertificate("other.test", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(10), "other.test", includeLoopback: false);
+        LocalCertificateChain wrong = LocalHttpsFixture.CreateCertificate("other.test", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(10), "other.test", includeLoopback: false);
         await using var fx3 = new LocalHttpsFixture(FixtureMode.Ok, wrong);
-        using var trustedWrong = HttpsProbeFactory.CreateWithCustomTrust(TimeProvider.System, "1.0.0", wrong, "other.test");
+        using var trustedWrong = HttpsProbeFactory.CreateWithCustomTrust(TimeProvider.System, "1.0.0", wrong.Authority, "localhost");
         EndpointObservation obs3 = await trustedWrong.ProbeAsync(Endpoint(fx3), 1, 1, TimeSpan.FromSeconds(2), CancellationToken.None);
         Assert.NotEqual(ProbeOutcome.Reachable, obs3.Outcome);
     }
@@ -238,12 +256,12 @@ public sealed class HttpsProbeTests
         string? retryAfter,
         Func<HttpsProbe, EndpointDefinition, LocalHttpsFixture, Task> body)
     {
-        X509Certificate2 cert = LocalHttpsFixture.CreateCertificate(
+        LocalCertificateChain cert = LocalHttpsFixture.CreateCertificate(
             "localhost",
             DateTimeOffset.UtcNow.AddDays(-1),
             DateTimeOffset.UtcNow.AddDays(14));
         await using var fx = new LocalHttpsFixture(mode, cert, status, retryAfter);
-        using var probe = HttpsProbeFactory.CreateWithCustomTrust(TimeProvider.System, "1.0.0", cert, "localhost");
+        using var probe = HttpsProbeFactory.CreateWithCustomTrust(TimeProvider.System, "1.0.0", cert.Authority, "localhost");
         await body(probe, Endpoint(fx), fx);
     }
 }

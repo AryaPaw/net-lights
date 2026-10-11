@@ -2,6 +2,12 @@
   "version": 2,
   "dependencies": {
     "net10.0-windows7.0": {
+      "coverlet.collector": {
+        "type": "Direct",
+        "requested": "[6.0.4, )",
+        "resolved": "6.0.4",
+        "contentHash": "lkhqpF8Pu2Y7IiN7OntbsTtdbpR1syMsm2F3IgX6ootA4ffRqWL5jF7XipHuZQTdVuWG/gVAAcf8mjk8Tz0xPg=="
+      },
       "Microsoft.NET.Test.Sdk": {
         "type": "Direct",
         "requested": "[17.14.1, )",
@@ -96,9 +102,9 @@
       "NetLights": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.2.0, )",
-          "NetLights.Networking": "[1.2.0, )",
-          "NetLights.Updates": "[1.2.0, )"
+          "NetLights.Core": "[1.5.1, )",
+          "NetLights.Networking": "[1.5.1, )",
+          "NetLights.Updates": "[1.5.1, )"
         }
       },
       "netlights.core": {
@@ -107,13 +113,25 @@
       "netlights.networking": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.2.0, )"
+          "NetLights.Core": "[1.5.1, )"
         }
+      },
+      "netlights.testapp": {
+        "type": "Project"
+      },
+      "netlights.testinstaller": {
+        "type": "Project"
       },
       "netlights.testsupport": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.2.0, )"
+          "NetLights.Core": "[1.5.1, )"
+        }
+      },
+      "netlights.updateagent": {
+        "type": "Project",
+        "dependencies": {
+          "NetLights.Updates": "[1.5.1, )"
         }
       },
       "netlights.updates": {

@@ -81,8 +81,10 @@ public static class SilentUpdateCoordinator
             return SilentUpdateOutcome.NoUpdate;
         }
 
+        string expectedName = $"NetLights-Setup-win-x64-{candidate}.exe";
         GitHubAsset? asset = latest.Assets.FirstOrDefault(item =>
-            UpdatePolicy.SafeInstallerFileName(item.Name) is not null);
+            string.Equals(UpdatePolicy.SafeInstallerFileName(item.Name), expectedName,
+                StringComparison.OrdinalIgnoreCase));
         if (asset is null
             || asset.BrowserDownloadUrl is null
             || asset.Size <= 0
@@ -95,7 +97,7 @@ public static class SilentUpdateCoordinator
 
         string? fileName = UpdatePolicy.SafeInstallerFileName(asset.Name);
         if (fileName is null
-            || !string.Equals(fileName, $"NetLights-Setup-win-x64-{candidate}.exe", StringComparison.OrdinalIgnoreCase))
+            || !string.Equals(fileName, expectedName, StringComparison.OrdinalIgnoreCase))
         {
             return SilentUpdateOutcome.Failed;
         }
@@ -130,7 +132,7 @@ public static class SilentUpdateCoordinator
             return SilentUpdateOutcome.Busy;
         }
 
-        if (!context.Installer.TryStartSilent(destination))
+        if (!context.Installer.TryStartSilent(destination, expected))
         {
             TryDelete(destination);
             return SilentUpdateOutcome.Failed;

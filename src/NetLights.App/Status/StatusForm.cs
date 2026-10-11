@@ -64,6 +64,8 @@ internal sealed class StatusForm : Form
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action<bool>? EmphasizeShortStatusesChanged { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<bool>? LocationDebugSourcesChanged { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action<GeoCountryLetterScale>? GeoCountryLetterScaleChanged { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Func<string, Task<string>>? DiagnoseRequested { get; set; }
@@ -78,6 +80,8 @@ internal sealed class StatusForm : Form
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action? WindowGeometryChanged { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action? HiddenToTray { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action<int>? LocationChartWindowHoursChanged { get; set; }
 
     public StatusForm() : this(TimeProvider.System)
@@ -89,6 +93,7 @@ internal sealed class StatusForm : Form
         _time = time;
         _locations = new LocationTimelinePanel(_time);
         _locations.ChartWindowHoursChanged = hours => LocationChartWindowHoursChanged?.Invoke(hours);
+        _locations.DebugSourceChartsChanged = enabled => LocationDebugSourcesChanged?.Invoke(enabled);
         AutoScaleMode = AutoScaleMode.None;
         Text = ProductInfo.DisplayName();
         Font = UiTheme.Body;
@@ -207,6 +212,7 @@ internal sealed class StatusForm : Form
 
         _allowShow = false;
         Hide();
+        HiddenToTray?.Invoke();
         return true;
     }
 
@@ -221,7 +227,8 @@ internal sealed class StatusForm : Form
         string? updateNotice,
         int locationChartWindowHours = 12,
         bool geoCountryDetection = false,
-        bool emphasizeShortStatuses = true)
+        bool emphasizeShortStatuses = true,
+        bool showLocationDebugSources = false)
     {
         _suppressSettings = true;
         _autoStart.Checked = autoStart;
@@ -234,6 +241,7 @@ internal sealed class StatusForm : Form
         _letterSize.SelectedIndex = (int)GeoCountryLetterScales.Parse((int)letterScale);
         SyncLetterSizeVisibility();
         _locations.ApplyChartWindowHours(locationChartWindowHours);
+        _locations.ApplyDebugSourceCharts(showLocationDebugSources);
         _availabilityWindow = _locations.ChartWindow;
         SyncAvailabilityWindowButtons();
         _updateLine.Text = string.IsNullOrWhiteSpace(updateNotice)
@@ -706,7 +714,7 @@ internal sealed class StatusForm : Form
                 AutoUpdateChanged?.Invoke(_autoUpdate.Checked);
             }
         };
-        StyleCheck(_geoCountryDetection, "Определять страну", new Padding(0, 0, 0, 8));
+        StyleCheck(_geoCountryDetection, "Определять страну внешнего IP", new Padding(0, 0, 0, 8));
         _geoCountryDetection.AccessibleName = "geoCountryDetection";
         _geoCountryDetection.CheckedChanged += (_, _) =>
         {
@@ -828,11 +836,19 @@ internal sealed class StatusForm : Form
         };
         var github = QuietLink("Исходный код", "githubLink");
         var releases = QuietLink("Releases", "releasesLink");
+        var dataSources = QuietLink("Источники и лицензии", "dataSourcesLink");
         releases.Margin = new Padding(16, 0, 0, 0);
+        dataSources.Margin = new Padding(16, 0, 0, 0);
         github.LinkClicked += (_, _) => UiDrawing.OpenHttps(AppCredits.RepositoryUrl);
         releases.LinkClicked += (_, _) => UiDrawing.OpenHttps(AppCredits.ReleasesUrl);
+        dataSources.LinkClicked += (_, _) =>
+        {
+            using var dialog = new DataSourcesDialog();
+            dialog.ShowDialog(this);
+        };
         links.Controls.Add(github);
         links.Controls.Add(releases);
+        links.Controls.Add(dataSources);
         stack.Controls.Add(SettingsBlock("Общие", _autoStart, _geoCountryDetection, _geoCountryIcon, _letterSizeLabel, _letterSize));
         stack.Controls.Add(SettingsBlock("Приложение", windowActions, _persistenceLine));
         stack.Controls.Add(SettingsBlock("Обновления", _autoUpdate, _updateLine, actions, _manualUpdateLine));

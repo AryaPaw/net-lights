@@ -24,6 +24,27 @@ public sealed class PendingUpdateStore
     public string Root => _root;
     public string PendingPath => Path.Combine(_root, "pending.json");
     public string ResultPath => Path.Combine(_root, "result.json");
+    public string PhasePath => Path.Combine(_root, "phases.jsonl");
+
+    public void WritePhase(string phase)
+    {
+        try
+        {
+            Directory.CreateDirectory(_root);
+            if (File.Exists(PhasePath) && new FileInfo(PhasePath).Length > 2 * 1024 * 1024)
+                File.Delete(PhasePath);
+            File.AppendAllText(PhasePath, JsonSerializer.Serialize(new
+            {
+                utc = DateTimeOffset.UtcNow,
+                pid = Environment.ProcessId,
+                phase
+            }) + Environment.NewLine);
+        }
+        catch (Exception)
+        {
+            // Diagnostics cannot break the recovery path.
+        }
+    }
 
     public void WritePending(PendingUpdate pending)
     {
@@ -42,6 +63,7 @@ public sealed class PendingUpdateStore
 
         try
         {
+            if (new FileInfo(PendingPath).Length > 64 * 1024) return null;
             return JsonSerializer.Deserialize<PendingUpdate>(File.ReadAllText(PendingPath), Options);
         }
         catch (Exception)
@@ -77,6 +99,7 @@ public sealed class PendingUpdateStore
 
         try
         {
+            if (new FileInfo(ResultPath).Length > 64 * 1024) return false;
             using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(ResultPath));
             JsonElement root = doc.RootElement;
             if (root.TryGetProperty("success", out JsonElement success) && success.GetBoolean())
@@ -85,6 +108,7 @@ public sealed class PendingUpdateStore
             }
 
             message = root.TryGetProperty("message", out JsonElement msg) ? msg.GetString() : "Обновление не установлено.";
+            if (message?.Length > 2048) message = "Ошибка обновления: сообщение слишком длинное.";
             return !string.IsNullOrWhiteSpace(message);
         }
         catch (Exception)

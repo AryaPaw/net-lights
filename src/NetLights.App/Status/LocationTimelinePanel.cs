@@ -14,19 +14,38 @@ internal sealed class LocationTimelinePanel : Panel
     private GeoCountryDisplay _boundLive = GeoCountryDisplay.Unconfirmed;
     private LocationSpanChart? _chart;
     private LocationFrequencyChart? _frequency;
+    private LocationSourceHistoryChart? _localSourceChart;
+    private LocationSourceHistoryChart? _onlineSourceChart;
+    private LocationSourceHistoryChart? _iplocateSourceChart;
     private SegmentTrack? _windowBar;
     private ThemedButton[] _windowButtons = [];
+    private ThemedButton? _debugToggle;
+    private bool _showDebugSourceCharts;
     private TimeSpan _chartWindow = LocationChartWindows.Default;
     private bool _layouting;
     private HistoryRow[] _historyRows = [];
     private int _historyStartY;
     private int _historyRowHeight = 44;
     private string _historyTipText = "";
-    private readonly ToolTip _historyTip = new() { ShowAlways = true, InitialDelay = 350, ReshowDelay = 100, AutoPopDelay = 5000 };
+    private readonly ChartToolTip _historyTip = new(initialDelay: 350, autoPopDelay: 5000);
     private int HistoryHeaderHeight => Scale(12);
+    internal int StructureBuildCount { get; private set; }
+    internal int DebugSourceChartCount => (_localSourceChart is null ? 0 : 1)
+        + (_onlineSourceChart is null ? 0 : 1) + (_iplocateSourceChart is null ? 0 : 1);
 
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action<int>? ChartWindowHoursChanged { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<bool>? DebugSourceChartsChanged { get; set; }
+
+    public bool ApplyDebugSourceCharts(bool enabled)
+    {
+        if (_showDebugSourceCharts == enabled) return false;
+        _showDebugSourceCharts = enabled;
+        _boundRevision = -1;
+        Rebuild();
+        return true;
+    }
 
     public LocationTimelinePanel(TimeProvider time)
     {
@@ -87,6 +106,7 @@ internal sealed class LocationTimelinePanel : Panel
     public TimeSpan ChartWindow => _chartWindow;
 
     internal int VisibleHistoryRowCount => _historyRows.Length;
+    internal string HistoryRowTipForTests(int index) => HistoryTip(_historyRows[index], _time.GetUtcNow());
     internal int HistoryRowHeight => _historyRowHeight;
     internal Rectangle HistoryRowBounds(int index)
     {
@@ -115,7 +135,37 @@ internal sealed class LocationTimelinePanel : Panel
         _boundHistory = history;
         _boundRevision = history.Revision;
         _boundLive = _live;
+        if (RefreshExistingCharts())
+            return;
         Rebuild();
+    }
+
+    private bool RefreshExistingCharts()
+    {
+        if (_live == GeoCountryDisplay.Disabled || _history.Observations.Count == 0
+            || _windowBar?.Parent != _stack || _chart?.Parent != _stack
+            || _frequency?.Parent != _stack
+            || (_showDebugSourceCharts && (_localSourceChart?.Parent != _stack
+                || _onlineSourceChart?.Parent != _stack || _iplocateSourceChart?.Parent != _stack)))
+            return false;
+
+        DateTimeOffset now = _time.GetUtcNow();
+        IReadOnlyList<LocationStay> stays = ChartStays(now);
+        if (stays.Count == 0) return false;
+        HistoryRow[] rows = BuildHistoryRows(stays, now - _chartWindow, enabled: true);
+        if ((rows.Length == 0) != (_historyRows.Length == 0)) return false;
+        if (_showDebugSourceCharts)
+        {
+            _localSourceChart!.Bind(_history.Observations, _history.Stays, now, _chartWindow);
+            _onlineSourceChart!.Bind(_history.Observations, _history.Stays, now, _chartWindow);
+            _iplocateSourceChart!.Bind(_history.Observations, _history.Stays, now, _chartWindow);
+        }
+        _chart.Bind(stays, now, now - _chartWindow);
+        _frequency.Bind(stays, _history.Revision, now, _chartWindow);
+        _historyRows = rows;
+        SyncScrollSize();
+        Invalidate();
+        return true;
     }
 
     public void Tick()
@@ -123,6 +173,12 @@ internal sealed class LocationTimelinePanel : Panel
         DateTimeOffset now = _time.GetUtcNow();
         _chart?.Tick(now);
         _frequency?.Tick(now);
+        if (_showDebugSourceCharts)
+        {
+            _localSourceChart?.Tick(now);
+            _onlineSourceChart?.Tick(now);
+            _iplocateSourceChart?.Tick(now);
+        }
         InvalidateCurrentHistoryRow();
     }
 
@@ -147,14 +203,14 @@ internal sealed class LocationTimelinePanel : Panel
             return;
 
         _historyTipText = tip;
-        _historyTip.SetToolTip(this, tip);
+        _historyTip.ShowFor(this, tip, e.Location);
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
         _historyTipText = "";
-        _historyTip.SetToolTip(this, "");
+        _historyTip.Clear(this);
     }
 
     protected override void OnScroll(ScrollEventArgs se)
@@ -180,13 +236,16 @@ internal sealed class LocationTimelinePanel : Panel
 
     private void Rebuild()
     {
+        StructureBuildCount++;
         SuspendLayout();
         _stack.SuspendLayout();
         Control[] previous = [.. _stack.Controls.Cast<Control>()];
         _stack.Controls.Clear();
         foreach (Control child in previous)
         {
-            if (!ReferenceEquals(child, _chart) && !ReferenceEquals(child, _windowBar) && !ReferenceEquals(child, _frequency))
+            if (!ReferenceEquals(child, _chart) && !ReferenceEquals(child, _windowBar) && !ReferenceEquals(child, _frequency)
+                && !ReferenceEquals(child, _localSourceChart) && !ReferenceEquals(child, _onlineSourceChart)
+                && !ReferenceEquals(child, _iplocateSourceChart) && !ReferenceEquals(child, _debugToggle))
             {
                 child.Dispose();
             }
@@ -195,7 +254,8 @@ internal sealed class LocationTimelinePanel : Panel
         DateTimeOffset now = _time.GetUtcNow();
         bool enabled = _live != GeoCountryDisplay.Disabled;
         bool hasKnownLocation = _history.Stays.Any(stay => stay.EndedUtc is not null)
-            || GeoCountryParsers.IsIso3166Alpha2(_live.Letters);
+            || GeoCountryParsers.IsIso3166Alpha2(_live.Letters)
+            || _history.Observations.Count > 0;
         if (_live == GeoCountryDisplay.Disabled)
         {
             HideChart();
@@ -211,17 +271,26 @@ internal sealed class LocationTimelinePanel : Panel
 
         IReadOnlyList<LocationStay> chartStays = ChartStays(now);
         DateTimeOffset windowStart = now - _chartWindow;
-        if (enabled && chartStays.Count > 0)
+        if (enabled && (chartStays.Count > 0 || _history.Observations.Count > 0))
         {
             EnsureWindowBar();
             AddRow(_windowBar!);
-            _chart ??= new LocationSpanChart();
-            _chart.Bind(chartStays, now, windowStart);
-            AddRow(_chart);
-            _frequency ??= new LocationFrequencyChart();
-            _frequency.Visible = true;
-            _frequency.Bind(chartStays, _history.Revision, now, _chartWindow);
-            AddRow(_frequency);
+
+            if (chartStays.Count > 0)
+            {
+                _chart ??= new LocationSpanChart();
+                _chart.Bind(chartStays, now, windowStart);
+                AddRow(_chart);
+                _frequency ??= new LocationFrequencyChart();
+                _frequency.Visible = true;
+                _frequency.Bind(chartStays, _history.Revision, now, _chartWindow);
+                AddRow(_frequency);
+            }
+            else
+            {
+                HideChart();
+                if (_frequency is not null) _frequency.Visible = false;
+            }
         }
         else
         {
@@ -233,6 +302,32 @@ internal sealed class LocationTimelinePanel : Panel
             }
         }
 
+        if (enabled && (chartStays.Count > 0 || _history.Observations.Count > 0))
+        {
+            _debugToggle ??= new ThemedButton("Debug · Источники определения", false);
+            _debugToggle.Text = "Debug · Источники определения " + (_showDebugSourceCharts ? "▾" : "▸");
+            _debugToggle.AccessibleName = "toggleLocationDebugSources";
+            _debugToggle.Margin = new Padding(0, 4, 0, 4);
+            _debugToggle.Click -= OnDebugToggleClick;
+            _debugToggle.Click += OnDebugToggleClick;
+            AddRow(_debugToggle);
+            if (_showDebugSourceCharts)
+            {
+                _localSourceChart ??= new LocationSourceHistoryChart(LocationSourceKind.LocalDatabase);
+                _onlineSourceChart ??= new LocationSourceHistoryChart(LocationSourceKind.Online);
+                _iplocateSourceChart ??= new LocationSourceHistoryChart(LocationSourceKind.IplocateDatabase);
+                _localSourceChart.Bind(_history.Observations, _history.Stays, now, _chartWindow);
+                _onlineSourceChart.Bind(_history.Observations, _history.Stays, now, _chartWindow);
+                _iplocateSourceChart.Bind(_history.Observations, _history.Stays, now, _chartWindow);
+                AddRow(_localSourceChart);
+                AddRow(_onlineSourceChart);
+                AddRow(_iplocateSourceChart);
+            }
+        }
+
+        if (!enabled || !_showDebugSourceCharts)
+            HideSourceCharts();
+
         _historyRows = BuildHistoryRows(chartStays, windowStart, enabled);
         if (_historyRows.Length > 0)
             AddRow(HistoryHeading());
@@ -243,6 +338,14 @@ internal sealed class LocationTimelinePanel : Panel
         Tick();
     }
 
+    private void OnDebugToggleClick(object? sender, EventArgs e)
+    {
+        _showDebugSourceCharts = !_showDebugSourceCharts;
+        _boundRevision = -1;
+        Rebuild();
+        DebugSourceChartsChanged?.Invoke(_showDebugSourceCharts);
+    }
+
     private void AddRow(Control child) => _stack.Controls.Add(child);
 
     private Control HistoryHeading()
@@ -250,7 +353,7 @@ internal sealed class LocationTimelinePanel : Panel
         return new Label
         {
             AutoSize = true,
-            Text = "История смен",
+            Text = "Периоды наблюдения",
             Font = UiTheme.BodyBold,
             ForeColor = UiTheme.Ink,
             BackColor = UiTheme.Surface,
@@ -274,10 +377,47 @@ internal sealed class LocationTimelinePanel : Panel
             if (stay.EndedUtc is null && !current)
                 continue;
             if (current || stay.EndedUtc is null || stay.EndedUtc > visibleSince)
-                rows.Add(new HistoryRow(stay, current));
+            {
+                string? ip = LatestPublicIp(stay);
+                if (rows.Count > 0 && stay.EndedUtc is DateTimeOffset olderEnd)
+                {
+                    HistoryRow newer = rows[^1];
+                    TimeSpan gap = newer.Stay.StartedUtc - olderEnd;
+                    if (string.Equals(stay.Iso, newer.Stay.Iso, StringComparison.OrdinalIgnoreCase)
+                        && gap >= TimeSpan.Zero && gap <= LocationHistory.ResumeMergeWindow)
+                    {
+                        rows[^1] = newer with
+                        {
+                            Stay = newer.Stay with { StartedUtc = stay.StartedUtc },
+                            PublicIp = newer.PublicIp ?? ip,
+                            GapDuration = newer.GapDuration + gap,
+                            InterruptionCount = newer.InterruptionCount + (gap > TimeSpan.Zero ? 1 : 0)
+                        };
+                        continue;
+                    }
+                }
+
+                rows.Add(new HistoryRow(stay, current, ip, TimeSpan.Zero, 0));
+            }
         }
 
         return rows.ToArray();
+    }
+
+    private string? LatestPublicIp(LocationStay stay)
+    {
+        IReadOnlyList<LocationObservation> observations = _history.Observations;
+        int lo = 0, hi = observations.Count;
+        DateTimeOffset end = stay.EndedUtc ?? DateTimeOffset.MaxValue;
+        while (lo < hi)
+        {
+            int mid = lo + (hi - lo) / 2;
+            if (observations[mid].ObservedUtc <= end) lo = mid + 1;
+            else hi = mid;
+        }
+        for (int i = lo - 1; i >= 0 && observations[i].ObservedUtc >= stay.StartedUtc; i--)
+            if (observations[i].PublicIp is { } ip) return ip;
+        return null;
     }
 
     private void DrawVirtualHistory(Graphics graphics, Rectangle clip)
@@ -340,10 +480,16 @@ internal sealed class LocationTimelinePanel : Panel
         int gap = Scale(12);
         int timeWidth = Math.Max(1, available - nameWidth - durationWidth - gap * 2);
         string country = GeoCountryNames.Russian(row.Stay.Iso);
-        string when = row.Current
-            ? (_live.Fresh ? "Сейчас" : "Последняя известная") + " · с " + LocationCopy.When(row.Stay.StartedUtc)
-            : LocationCopy.Range(row.Stay.StartedUtc, row.Stay.EndedUtc ?? now);
-        string duration = LocationCopy.Duration(LocationCopy.Elapsed(row.Stay, now));
+        bool singleCheck = !row.Current && row.InterruptionCount == 0
+            && row.Stay.EndedUtc == row.Stay.StartedUtc;
+        string when = singleCheck
+            ? "Одна проверка: " + row.Stay.StartedUtc.ToLocalTime().ToString("dd.MM HH:mm:ss")
+            : row.Current
+                ? (row.InterruptionCount > 0 ? "Проверки с " : (_live.Fresh ? "Подтверждена · " : "Последняя проверка · ")) + LocationCopy.When(row.Stay.StartedUtc)
+                : "Проверки: " + LocationCopy.Range(row.Stay.StartedUtc, row.Stay.EndedUtc ?? now);
+        if (row.InterruptionCount > 0) when += " · перерывов: " + row.InterruptionCount;
+        if (row.PublicIp is not null) when += " · IP " + row.PublicIp;
+        string duration = singleCheck ? "неизвестно" : LocationCopy.Duration(LocationCopy.Elapsed(row.Stay, now) - row.GapDuration);
         int textHeight = Scale(22);
         int textY = bounds.Top + (bounds.Height - textHeight) / 2;
         TextRenderer.DrawText(graphics, country, UiTheme.BodyBold, new Rectangle(x, textY, nameWidth, textHeight), LocationChartPalette.HistoryLabel(row.Stay.Iso), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
@@ -372,10 +518,21 @@ internal sealed class LocationTimelinePanel : Panel
     private static string HistoryTip(HistoryRow row, DateTimeOffset now)
     {
         string country = GeoCountryNames.Russian(row.Stay.Iso);
-        string when = row.Current
-            ? "Текущая страна · с " + LocationCopy.When(row.Stay.StartedUtc)
-            : LocationCopy.Range(row.Stay.StartedUtc, row.Stay.EndedUtc ?? now);
-        return $"{country} · {row.Stay.Iso}\n{when}\n{LocationCopy.Duration(LocationCopy.Elapsed(row.Stay, now))}";
+        bool singleCheck = !row.Current && row.InterruptionCount == 0
+            && row.Stay.EndedUtc == row.Stay.StartedUtc;
+        string when = singleCheck
+            ? "Одна подтвержденная проверка: " + row.Stay.StartedUtc.ToLocalTime().ToString("dd.MM HH:mm:ss")
+            : row.Current
+                ? "Наблюдается с: " + LocationCopy.When(row.Stay.StartedUtc)
+                : "Наблюдалась между проверками: " + LocationCopy.Range(row.Stay.StartedUtc, row.Stay.EndedUtc ?? now);
+        string gaps = row.InterruptionCount > 0
+            ? "\nКратких перерывов без подтверждения: " + row.InterruptionCount
+                + " (всего " + LocationCopy.Duration(row.GapDuration) + ")"
+            : "";
+        string ip = row.PublicIp is null ? "Публичный IP: не сохранен" : "Последний публичный IP: " + row.PublicIp;
+        string duration = singleCheck ? "Длительность неизвестна" : "Длительность с учетом перерывов: "
+            + LocationCopy.Duration(LocationCopy.Elapsed(row.Stay, now) - row.GapDuration);
+        return $"{country} · {row.Stay.Iso}\n{when}{gaps}\n{ip}\n{duration}\nТочное время переключения может находиться между проверками.";
     }
 
     private void InvalidateCurrentHistoryRow()
@@ -485,6 +642,25 @@ internal sealed class LocationTimelinePanel : Panel
         _chart = null;
     }
 
+    private void HideSourceCharts()
+    {
+        if (_localSourceChart is not null)
+        {
+            _localSourceChart.Dispose();
+            _localSourceChart = null;
+        }
+        if (_onlineSourceChart is not null)
+        {
+            _onlineSourceChart.Dispose();
+            _onlineSourceChart = null;
+        }
+        if (_iplocateSourceChart is not null)
+        {
+            _iplocateSourceChart.Dispose();
+            _iplocateSourceChart = null;
+        }
+    }
+
     private void HideWindowBar()
     {
         if (_windowBar is null)
@@ -541,7 +717,7 @@ internal sealed class LocationTimelinePanel : Panel
         LocationStay live = LiveStay(now);
         if (live.StartedUtc == default || !GeoCountryParsers.IsIso3166Alpha2(live.Iso))
         {
-            if (_live == GeoCountryDisplay.Unconfirmed && stays.Count > 0 && stays[^1].EndedUtc is null)
+            if (!_live.Fresh && stays.Count > 0 && stays[^1].EndedUtc is null)
                 stays.RemoveAt(stays.Count - 1);
             return stays;
         }
@@ -566,6 +742,8 @@ internal sealed class LocationTimelinePanel : Panel
 
     private LocationStay LiveStay(DateTimeOffset now)
     {
+        if (!_live.Fresh)
+            return new LocationStay("??", default, null);
         if (GeoCountryParsers.IsIso3166Alpha2(_live.Letters)
             && _history.Current is LocationStay current
             && current.Iso == _live.Letters)
@@ -583,7 +761,7 @@ internal sealed class LocationTimelinePanel : Panel
 
     private int Scale(int logical) => LocationChartCardChrome.Scale(this, logical);
 
-    private readonly record struct HistoryRow(LocationStay Stay, bool Current);
+    private readonly record struct HistoryRow(LocationStay Stay, bool Current, string? PublicIp, TimeSpan GapDuration, int InterruptionCount);
 
     private static GeoCountryDisplay LiveFromHistory(LocationHistory history)
         => history.Current is LocationStay current

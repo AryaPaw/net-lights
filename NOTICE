@@ -7,3 +7,5 @@ See LICENSE.
 Third-party notices:
 - .NET runtime and libraries are licensed by Microsoft under their respective licenses.
 - Inno Setup is used only as a build-time installer compiler.
+- IP country data is derived from DB-IP Lite (https://db-ip.com), licensed under CC BY 4.0.
+- The v2fly/geoip data package (https://github.com/v2fly/geoip) is licensed under CC BY-SA 4.0.

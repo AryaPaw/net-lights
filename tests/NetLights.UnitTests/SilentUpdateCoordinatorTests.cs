@@ -97,7 +97,27 @@ public sealed class SilentUpdateCoordinatorTests : IDisposable
         Assert.Equal(SilentUpdateOutcome.Applied, outcome);
         Assert.Contains(url, feed.DownloadedUrls);
         Assert.EndsWith("NetLights-Setup-win-x64-1.0.2.exe", installer.Started);
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData([1])).ToLowerInvariant(), installer.StartedSha256);
         Assert.Equal(1, exits);
+    }
+
+    [Fact]
+    public async Task RunOnce_SelectsAssetForReleaseVersionWhenAnotherSetupComesFirst()
+    {
+        FakeFeed feed = new()
+        {
+            Latest = new GitHubRelease
+            {
+                TagName = "v1.0.2",
+                Assets = [.. ReleaseAssets("1.0.1"), .. ReleaseAssets("1.0.2")]
+            },
+            DownloadOk = true
+        };
+        SilentUpdateOutcome outcome = await SilentUpdateCoordinator.RunOnce(
+            Context("NetLights", feed, new FakeInstaller(), currentVersion: "1.0.1"));
+        Assert.Equal(SilentUpdateOutcome.Applied, outcome);
+        Assert.Single(feed.DownloadedUrls);
+        Assert.Contains("1.0.2.exe", feed.DownloadedUrls[0], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -301,10 +321,12 @@ public sealed class SilentUpdateCoordinatorTests : IDisposable
     private sealed class FakeInstaller : ISetupInstaller
     {
         public string? Started { get; private set; }
+        public string? StartedSha256 { get; private set; }
 
-        public bool TryStartSilent(string setupPath)
+        public bool TryStartSilent(string setupPath, string verifiedSha256)
         {
             Started = setupPath;
+            StartedSha256 = verifiedSha256;
             return true;
         }
     }

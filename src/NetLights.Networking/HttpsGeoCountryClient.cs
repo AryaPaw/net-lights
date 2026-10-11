@@ -13,14 +13,17 @@ public sealed class HttpsGeoCountryClient : IGeoCountrySource, IDisposable
     private readonly Uri _endpoint;
     private readonly TimeProvider _time;
     private readonly string _userAgent;
+    private readonly bool _countryIs;
 
     public HttpsGeoCountryClient(
         string version,
         HttpMessageHandler? handler = null,
         Uri? endpoint = null,
         TimeSpan? deadline = null,
-        TimeProvider? time = null)
+        TimeProvider? time = null,
+        bool countryIs = false)
     {
+        _countryIs = countryIs;
         _userAgent = "NetLights/" + version;
         _deadline = deadline ?? GeoCountryPolicy.RequestDeadline;
         _endpoint = endpoint ?? GeoCountryPolicy.IpWhoUri;
@@ -53,14 +56,23 @@ public sealed class HttpsGeoCountryClient : IGeoCountrySource, IDisposable
 
     public static HttpsGeoCountryClient CreateProduction(string version) => new(version);
 
+    public static HttpsGeoCountryClient CreateCountryIsProduction(string version)
+        => new(version, endpoint: GeoCountryPolicy.CountryIsUri, countryIs: true);
+
     public Task<GeoCountryLookupResult> GetCurrentAsync(CancellationToken cancellationToken)
         => GetAsync(
             _endpoint,
-            static body => GeoCountryParsers.TryParseIpWhoCurrent(body, out string country)
-                ? new GeoCountryLookupResult(true, country, null)
-                : default,
+            ParseBody,
             static retry => new GeoCountryLookupResult(false, null, retry),
             cancellationToken);
+
+    private GeoCountryLookupResult ParseBody(byte[] body)
+    {
+        bool valid = _countryIs
+            ? GeoCountryParsers.TryParseCountryIsCurrent(body, out string country, out string ip)
+            : GeoCountryParsers.TryParseIpWhoCurrent(body, out country, out ip);
+        return valid ? new GeoCountryLookupResult(true, country, null, ip) : default;
+    }
 
     public void Dispose() => _client.Dispose();
 

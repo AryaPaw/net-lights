@@ -5,6 +5,19 @@ namespace NetLights.UnitTests;
 
 public sealed class GeoCountryNamesTests
 {
+    [Theory]
+    [InlineData("GS")]
+    [InlineData("IO")]
+    [InlineData("TF")]
+    public void LocalEstimate_FitsNotifyIconLimit(string country)
+    {
+        var lookup = new GeoCountryLookupResult(false, null, null, LocalCountry: country);
+        GeoCountryDisplay display = GeoCountryDisplay.FromLocalEstimate(lookup, null, null);
+        Assert.Equal(country, display.Letters);
+        Assert.Contains("Оценка", display.Tooltip);
+        Assert.True(display.Tooltip.Length <= GeoCountryNames.TrayTooltipMaxChars);
+    }
+
     [Fact]
     public void Tooltip_IsRussianSlashEnglish()
     {

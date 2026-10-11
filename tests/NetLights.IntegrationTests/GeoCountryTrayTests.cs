@@ -11,6 +11,19 @@ namespace NetLights.IntegrationTests;
 [Collection("SettingsFiles")]
 public sealed class GeoCountryTrayTests
 {
+    [Fact]
+    public void SettingsMigration_DebugSourcesDefaultToHidden_AndKeepExplicitChoice()
+    {
+        var old = new AppSettings { SettingsVersion = 7, ShowLocationDebugSources = true };
+        Assert.True(SettingsStore.MigrateToSettingsVersion8(old));
+        Assert.False(old.ShowLocationDebugSources);
+        Assert.Equal(8, old.SettingsVersion);
+
+        var current = new AppSettings { SettingsVersion = 8, ShowLocationDebugSources = true };
+        Assert.False(SettingsStore.MigrateToSettingsVersion8(current));
+        Assert.True(current.ShowLocationDebugSources);
+    }
+
     [Theory]
     [InlineData(16)]
     [InlineData(20)]

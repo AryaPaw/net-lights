@@ -111,13 +111,13 @@
       "netlights.networking": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.2.0, )"
+          "NetLights.Core": "[1.5.1, )"
         }
       },
       "netlights.testsupport": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.2.0, )"
+          "NetLights.Core": "[1.5.1, )"
         }
       },
       "netlights.updates": {

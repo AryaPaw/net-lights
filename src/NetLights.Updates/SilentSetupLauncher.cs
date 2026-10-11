@@ -5,7 +5,7 @@ namespace NetLights.Updates;
 
 public interface ISetupInstaller
 {
-    bool TryStartSilent(string setupPath);
+    bool TryStartSilent(string setupPath, string verifiedSha256);
 }
 
 public static class SilentSetupLauncher
@@ -33,11 +33,26 @@ public static class SilentSetupLauncher
 [ExcludeFromCodeCoverage]
 public sealed class CmdSilentSetupInstaller : ISetupInstaller
 {
-    public bool TryStartSilent(string setupPath)
+    public bool TryStartSilent(string setupPath, string verifiedSha256)
     {
+        if (!MatchesFileHash(setupPath, verifiedSha256))
+            return false;
         ProcessStartInfo start = CreateStartInfo(setupPath);
         using Process? process = Process.Start(start);
         return process is not null;
+    }
+
+    private static bool MatchesFileHash(string setupPath, string expectedSha256)
+    {
+        try
+        {
+            using FileStream stream = new(setupPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return IntegrityVerifier.Matches(expectedSha256, IntegrityVerifier.Sha256Hex(stream));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     internal static ProcessStartInfo CreateStartInfo(string setupPath)
@@ -59,7 +74,7 @@ public sealed class AgentSilentSetupInstaller : ISetupInstaller
 
     public AgentSilentSetupInstaller(string restartPath) => _restartPath = restartPath;
 
-    public bool TryStartSilent(string setupPath)
+    public bool TryStartSilent(string setupPath, string verifiedSha256)
     {
         if (!UpdatePolicy.IsSafeRestartPath(_restartPath))
         {
@@ -83,9 +98,12 @@ public sealed class AgentSilentSetupInstaller : ISetupInstaller
         string stagedAgent = Path.Combine(Path.GetDirectoryName(setupPath)!, "NetLights.UpdateAgent.exe");
         File.Copy(agent, stagedAgent, overwrite: true);
 
-        using FileStream stream = File.OpenRead(setupPath);
-        string hash = IntegrityVerifier.Sha256Hex(stream);
+        string? hash = IntegrityVerifier.DigestSha256("sha256:" + verifiedSha256);
+        if (hash is null || hash.Length != 64 || !hash.All(Uri.IsHexDigit))
+            return false;
         using var process = new Process();
+        string readyEventName = "Local\\NetLights.UpdateAgentReady." + Guid.NewGuid().ToString("N");
+        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, readyEventName);
         process.StartInfo.FileName = stagedAgent;
         process.StartInfo.ArgumentList.Add("--parent");
         process.StartInfo.ArgumentList.Add(Environment.ProcessId.ToString());
@@ -95,8 +113,16 @@ public sealed class AgentSilentSetupInstaller : ISetupInstaller
         process.StartInfo.ArgumentList.Add(hash);
         process.StartInfo.ArgumentList.Add("--restart");
         process.StartInfo.ArgumentList.Add(Path.GetFullPath(_restartPath));
+        process.StartInfo.ArgumentList.Add("--ready");
+        process.StartInfo.ArgumentList.Add(readyEventName);
         process.StartInfo.UseShellExecute = false;
         process.StartInfo.CreateNoWindow = true;
-        return process.Start();
+        if (!process.Start()) return false;
+        if (ready.WaitOne(TimeSpan.FromSeconds(5)) && !process.HasExited) return true;
+        try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+        catch (Exception) { }
+        try { process.WaitForExit(5000); }
+        catch (Exception) { }
+        return false;
     }
 }

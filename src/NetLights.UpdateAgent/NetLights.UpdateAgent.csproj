@@ -9,4 +9,8 @@
   <ItemGroup>
     <ProjectReference Include="..\NetLights.Updates\NetLights.Updates.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="NetLights.UnitTests" />
+    <InternalsVisibleTo Include="NetLights.IntegrationTests" />
+  </ItemGroup>
 </Project>

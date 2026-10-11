@@ -8,7 +8,8 @@ internal sealed class GeoCountryTrayHost : IDisposable
 {
     private readonly CountryTrayIconRenderer _renderer = new();
     private readonly GeoCountryScheduler _scheduler;
-    private readonly HttpsGeoCountryClient? _ownedClient;
+    private readonly IGeoCountrySource _source;
+    private readonly IDisposable? _ownedClient;
     private readonly SynchronizationContext? _ui;
     private readonly Action _showWindow;
     private GeoCountryLetterScale _letterScale = GeoCountryLetterScale.Regular;
@@ -16,8 +17,8 @@ internal sealed class GeoCountryTrayHost : IDisposable
     private bool _visible;
     private bool _detectionEnabled;
 
-    public GeoCountryTrayHost(Action showWindow, string version, TimeProvider time, SynchronizationContext? ui)
-        : this(showWindow, HttpsGeoCountryClient.CreateProduction(version), time, ui, ownsClient: true)
+    public GeoCountryTrayHost(Action showWindow, string version, string dataDirectory, TimeProvider time, SynchronizationContext? ui)
+        : this(showWindow, new LayeredGeoCountrySource(version, dataDirectory, time), time, ui, ownsClient: true)
     {
     }
 
@@ -30,7 +31,8 @@ internal sealed class GeoCountryTrayHost : IDisposable
     {
         _showWindow = showWindow;
         _ui = ui;
-        if (ownsClient && source is HttpsGeoCountryClient client)
+        _source = source;
+        if (ownsClient && source is IDisposable client)
         {
             _ownedClient = client;
         }
@@ -198,8 +200,15 @@ internal sealed class GeoCountryTrayHost : IDisposable
 
     private void NotifyAndApply(GeoCountryDisplay display)
     {
-        DisplayChanged?.Invoke(display);
-        Apply(display);
+        try
+        {
+            DisplayChanged?.Invoke(display);
+            Apply(display);
+        }
+        catch (Exception ex)
+        {
+            RuntimeJournal.Write("country-ui-failed", ex);
+        }
     }
 
     private void Apply(GeoCountryDisplay display)
