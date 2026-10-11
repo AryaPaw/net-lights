@@ -710,9 +710,15 @@ internal sealed class NetLightsContext : ApplicationContext
 
     private void RestoreIcon()
     {
-        _icon.Visible = false;
-        _icon.Visible = true;
-        _countryTray.Restore();
+        if (_exiting) return;
+        try
+        {
+            _icon.Visible = false;
+            _icon.Visible = true;
+        }
+        catch (Exception ex) { RuntimeJournal.Write("tray-main-restore-failed", ex); }
+        try { _countryTray.Restore(); }
+        catch (Exception ex) { RuntimeJournal.Write("tray-country-restore-failed", ex); }
     }
 
     internal void RequestExit() => _ui.Post(_ =>
@@ -786,33 +792,8 @@ internal sealed class NetLightsContext : ApplicationContext
         _renderer.Dispose();
         _status.Dispose();
         _updateGate.Dispose();
-        _taskbar.DestroyHandle();
+        _taskbar.Dispose();
         base.ExitThreadCore();
     }
 
-    private sealed class TaskbarRestartWindow : NativeWindow
-    {
-        private readonly Action _restore;
-        private readonly uint _taskbarCreated;
-
-        public TaskbarRestartWindow(Action restore)
-        {
-            _restore = restore;
-            _taskbarCreated = RegisterWindowMessage("TaskbarCreated");
-            CreateHandle(new CreateParams());
-        }
-
-        protected override void WndProc(ref Message m)
-        {
-            if (m.Msg == _taskbarCreated)
-            {
-                _restore();
-            }
-
-            base.WndProc(ref m);
-        }
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern uint RegisterWindowMessage(string lpString);
-    }
 }
