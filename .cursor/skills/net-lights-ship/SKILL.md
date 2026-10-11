@@ -21,7 +21,7 @@ dotnet test tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj -
 dotnet test tests/NetLights.SoakTests/NetLights.SoakTests.csproj -c Release
 ```
 
-CI (`.github/workflows/ci.yml`) also runs those three, then a 0.80 coverage gate, then `dotnet publish`. Coverage is collected on unit tests only.
+CI (`.github/workflows/ci.yml`) also runs those three, then a 0.80 coverage gate, then `dotnet publish`. Coverage is collected on unit and integration tests, then merged by source line.
 
 If any fail: fix, re-run the failing project, then re-run all three. Do not push.
 
@@ -49,7 +49,7 @@ Wait for async work (`Letters`, `Visible`), not a side counter that increments b
 
 - `TODO.md`
 - `docs/images/tray-mock.html` unless README uses it
-- `packages.lock.json` dirt from `dotnet publish -r win-x64` (ILLink / `win-x64` graphs). Restore those files. CI publish uses `-p:RestoreLockedMode=false`.
+- Unintended `packages.lock.json` churn from `dotnet publish -r win-x64` (ILLink / `win-x64` graphs). Preserve pre-existing lockfile edits; inspect the diff and remove only task-owned unintended churn. Never blindly restore user changes. Verify the current CI publish settings before relying on them.
 
 ## Local exe
 
@@ -57,25 +57,25 @@ Owner runs `artifacts/publish/NetLights.exe`. After tray/UI/updater/version chan
 
 ## Version
 
-Propose `x.y.Z` (patch / minor / major + one-line why) and **stop**. Edit `Directory.Build.props` only after the user confirms the number.
+Only when a version proposal or release is requested, propose `x.y.Z` with a brief reason if the exact version is missing and wait before editing version metadata. An already specified exact version needs no second confirmation. Don't interrupt ordinary fixes, tests, or pushes with an unsolicited version bump.
 
-Default: patch for tray/copy/CI; minor for user-visible features.
+Default: patch for tray/copy/CI; minor for user-visible features; major only when explicitly requested. The project root `AGENTS.md` owns this convention.
 
 ## Push
 
-Only if the **current** user message asks to push (`push`, запушь, `git push`, «заливай на GitHub»). Previous turns do not count. No force-push unless they asked.
+Only when the active task explicitly authorizes push to the intended target. Authorization persists for that same task/action/target unless revoked; a status question or new message doesn't reset it. No force-push without specific authorization. Follow the global publication gate.
 
 ## Release
 
-Only if the **current** message asks for a release or a tag. Pushing `main` is not a release.
+Only when the active task explicitly authorizes the release/tag action and target. Pushing `main` alone doesn't authorize a release. Keep version metadata in the final verified and reviewed candidate before tagging.
 
 1. User confirmed the version number; it is in `Directory.Build.props`.
 2. All three test projects passed locally.
-3. Commit the product/test/version files (not the junk list above).
-4. `git push origin main`
-5. `git tag vX.Y.Z` then `git push origin vX.Y.Z` (tag must match props).
-6. `.github/workflows/release.yml` on `v*.*.*` runs test, publish, Inno Setup, GitHub Release with `NetLights-Setup-win-x64-X.Y.Z.exe`. Do not `gh release create` unless the workflow failed and they still want a release.
-7. Watch both `ci` (main and/or tag) and `release`. Main CI can fail while the tag CI is green if tests race. Treat main `windows` failure as a ship blocker; fix and push (if they asked) without a new tag unless they asked for another release.
+3. Create a coherent intended commit only if authorized or necessary for the specifically requested publication workflow; preserve unrelated staging. Record its SHA/tree. Inspect commit-hook changes and rerun the affected verification/review before treating it as the final candidate.
+4. Push `main` only when that branch push is explicitly authorized or unambiguously included in the requested documented release workflow. Use `ap-deploy` with the recorded verified SHA and valid gate evidence, not an unchecked current branch tip. A local tag request alone doesn't authorize a branch push.
+5. Create `vX.Y.Z` at the recorded verified SHA only when tag creation is authorized; verify the tag resolves to that SHA and the version matches metadata. Push that exact tag only when remote tag publication is authorized. Don't replace an existing tag, implicitly use a later `HEAD`, or treat a local tag request as permission to push it.
+6. Inspect the current `.github/workflows/release.yml` before sending a tag: this repository's `v*.*.*` workflow builds and publishes a GitHub Release. Require authorization for that publication outcome; don't add `gh release create` unless the user authorizes that separate fallback after a workflow failure.
+7. Watch only the CI/release runs triggered by authorized actions. Distinguish main CI, tag CI, and release status. Investigate failures and rerun affected gates; don't push a fix or create another tag without authorization for that action/target in the active task.
 
 Release notes body is already Russian in `release.yml`. User-facing product text stays Russian.
 

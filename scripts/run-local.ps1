@@ -28,5 +28,5 @@ New-Item -ItemType Directory -Force -Path $publish | Out-Null
 Copy-Item -Path (Join-Path $staging '*') -Destination $publish -Recurse -Force
 
 if (-not $NoStart) {
-    Start-Process -FilePath $localExe -WindowStyle Hidden
+    Start-Process -FilePath $localExe -ArgumentList '--show-local'
 }

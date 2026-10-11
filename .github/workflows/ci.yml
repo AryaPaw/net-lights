@@ -25,24 +25,26 @@ jobs:
       - name: Unit tests
         run: >
           dotnet test tests/NetLights.UnitTests/NetLights.UnitTests.csproj -c Release --no-build
-          --collect:"XPlat Code Coverage" --results-directory TestResults
-          -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Exclude=[NetLights.TestSupport]*
+          --collect:"XPlat Code Coverage" --settings tests/coverlet.runsettings
+          --logger "trx;LogFileName=unit.trx"
+          --results-directory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/unit"
       - name: Integration tests
-        run: dotnet test tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj -c Release --no-build --results-directory TestResults
+        run: >
+          dotnet test tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj -c Release --no-build
+          --collect:"XPlat Code Coverage" --settings tests/coverlet.runsettings
+          --logger "trx;LogFileName=integration.trx"
+          --results-directory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/integration"
       - name: Soak smoke
-        run: dotnet test tests/NetLights.SoakTests/NetLights.SoakTests.csproj -c Release --no-build
+        run: dotnet test tests/NetLights.SoakTests/NetLights.SoakTests.csproj -c Release --no-build --logger "trx;LogFileName=soak-smoke.trx" --results-directory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/soak"
       - name: Coverage gate
         shell: pwsh
-        run: |
-          $files = Get-ChildItem TestResults -Recurse -Filter coverage.cobertura.xml | Sort-Object LastWriteTime -Descending
-          if (-not $files) { throw "coverage.cobertura.xml not found" }
-          $xml = [xml](Get-Content $files[0].FullName)
-          $line = [double]$xml.coverage.'line-rate'
-          if ($line -lt 0.80) { throw "Line coverage $line is below 0.80" }
+        run: scripts/check-coverage.ps1 -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
       - name: Publish
         run: |
           dotnet publish src/NetLights.App/NetLights.App.csproj -c Release -r win-x64 --self-contained true -p:RestoreLockedMode=false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o artifacts/publish
+          if ($LASTEXITCODE -ne 0) { throw "App publish failed: $LASTEXITCODE" }
           dotnet publish src/NetLights.UpdateAgent/NetLights.UpdateAgent.csproj -c Release -r win-x64 --self-contained true -p:RestoreLockedMode=false -p:PublishSingleFile=true -p:DebugType=none -o artifacts/publish
+          if ($LASTEXITCODE -ne 0) { throw "Update agent publish failed: $LASTEXITCODE" }
       - name: Upload TRX
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
