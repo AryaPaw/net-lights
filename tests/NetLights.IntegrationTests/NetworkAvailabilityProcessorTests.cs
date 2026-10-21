@@ -7,7 +7,7 @@ namespace NetLights.IntegrationTests;
 public sealed class NetworkAvailabilityProcessorTests
 {
     [Fact]
-    public async Task DelayedWorkerNotificationCannotReorderMonitorState()
+    public void DelayedWorkerNotificationCannotReorderMonitorState()
     {
         var owner = new QueuedSynchronizationContext();
         var signals = new List<NetworkAvailabilitySignal>();
@@ -23,7 +23,8 @@ public sealed class NetworkAvailabilityProcessorTests
         DateTimeOffset start = DateTimeOffset.Parse("2026-10-03T12:00:00Z");
 
         processor.ObserveChange(false, start);
-        await Task.Run(() => processor.ObserveChange(false, start.AddMilliseconds(500)));
+        RunOnWorker(() => processor.ObserveChange(false, start.AddMilliseconds(500)));
+        Assert.Equal(1, owner.PendingCount);
         processor.ObserveHeartbeat(true, start.AddSeconds(1));
         owner.Drain();
 
@@ -33,7 +34,7 @@ public sealed class NetworkAvailabilityProcessorTests
     }
 
     [Fact]
-    public async Task QueuedNotificationIsDiscardedOnceShutdownStarts()
+    public void QueuedNotificationIsDiscardedOnceShutdownStarts()
     {
         var owner = new QueuedSynchronizationContext();
         var signals = new List<NetworkAvailabilitySignal>();
@@ -46,16 +47,38 @@ public sealed class NetworkAvailabilityProcessorTests
             () => stopping,
             _ => { });
 
-        await Task.Run(() => processor.ObserveChange(false, DateTimeOffset.UtcNow));
+        RunOnWorker(() => processor.ObserveChange(false, DateTimeOffset.UtcNow));
+        Assert.Equal(1, owner.PendingCount);
+        Assert.Empty(signals);
         stopping = true;
         owner.Drain();
 
         Assert.Empty(signals);
     }
 
+    private static void RunOnWorker(Action action)
+    {
+        int ownerThread = Environment.CurrentManagedThreadId;
+        Exception? failure = null;
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                Assert.NotEqual(ownerThread, Environment.CurrentManagedThreadId);
+                action();
+            }
+            catch (Exception ex) { failure = ex; }
+        }) { IsBackground = true };
+        worker.Start();
+        Assert.True(worker.Join(TimeSpan.FromSeconds(5)), "Network notification worker did not finish.");
+        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
     private sealed class QueuedSynchronizationContext : SynchronizationContext
     {
-        private readonly Queue<(SendOrPostCallback Callback, object? State)> _pending = new();
+        private readonly System.Collections.Concurrent.ConcurrentQueue<(SendOrPostCallback Callback, object? State)> _pending = new();
+
+        public int PendingCount => _pending.Count;
 
         public override void Post(SendOrPostCallback d, object? state)
             => _pending.Enqueue((d, state));
