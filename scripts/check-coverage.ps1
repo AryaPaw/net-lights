@@ -23,7 +23,7 @@ foreach ($file in $files) {
         foreach ($class in $package.classes.class) {
             $source = ([string]$class.filename).Replace('/', '\')
             if ($source -match '^(NetLights\.(?:App|Core|Networking|Updates|UpdateAgent)\\)') { $source = 'src\' + $source }
-            foreach ($line in $class.lines.line) {
+            foreach ($line in $class.SelectNodes('lines/line')) {
                 $key = "$source`:$($line.number)"
                 $hits = [int]$line.hits
                 if (-not $linesByAssembly[$assembly].ContainsKey($key) -or $hits -gt $linesByAssembly[$assembly][$key]) {

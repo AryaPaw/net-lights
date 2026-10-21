@@ -16,12 +16,10 @@ This repo already has CI. Do not invent a second pipeline. Local green is requir
 From the repo root, Release, all three projects. Do not skip soak. Do not stop after `dotnet build`.
 
 ```ps1
-dotnet test tests/NetLights.UnitTests/NetLights.UnitTests.csproj -c Release
-dotnet test tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj -c Release
-dotnet test tests/NetLights.SoakTests/NetLights.SoakTests.csproj -c Release
+pwsh -File scripts/verify.ps1
 ```
 
-CI (`.github/workflows/ci.yml`) also runs those three, then a 0.80 coverage gate, then `dotnet publish`. Coverage is collected on unit and integration tests, then merged by source line.
+Local verification, CI and release use `scripts/verify.ps1`: locked restore, Release build, sequential unit/integration/soak smoke and the coverage gate. Publish remains a separate packaging step. Coverage is collected on unit and integration tests, then merged by source line. Sandbox, visual acceptance and long resource runs are separate checks; the default soak is only a short smoke.
 
 If any fail: fix, re-run the failing project, then re-run all three. Do not push.
 

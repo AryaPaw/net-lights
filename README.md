@@ -76,8 +76,10 @@ Net Lights проверяет заданные контрольные адрес
 Для сборки нужен [.NET SDK](https://dotnet.microsoft.com/download/dotnet/10.0) 10. Из корня репозитория `run-local.cmd` публикует и запускает локальную копию.
 
 ```ps1
-dotnet test tests/NetLights.UnitTests/NetLights.UnitTests.csproj -c Release
+pwsh -File scripts/verify.ps1
 dotnet publish src/NetLights.App/NetLights.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/publish
 ```
+
+`scripts/verify.ps1` выполняет locked restore, Release-сборку, unit, integration, короткий soak smoke и проверку покрытия. Тот же скрипт используется в CI и при выпуске. Результаты каждого запуска сохраняются в отдельной папке `TestResults`; первый сбой останавливает проверку. Windows Sandbox, визуальная приёмка и длительные ресурсные прогоны выполняются отдельно.
 
 [GPL-3.0](LICENSE)

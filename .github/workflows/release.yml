@@ -31,23 +31,9 @@ jobs:
           [xml]$props = Get-Content Directory.Build.props
           if ($version -cne $props.Project.PropertyGroup.Version) { throw "Tag $tag differs from Directory.Build.props version $($props.Project.PropertyGroup.Version)" }
           echo "version=$version" >> $env:GITHUB_OUTPUT
-      - name: Restore
-        run: dotnet restore NetLights.slnx --locked-mode
-      - name: Build
-        run: dotnet build NetLights.slnx -c Release --no-restore
-      - name: Unit tests
-        run: dotnet test tests/NetLights.UnitTests/NetLights.UnitTests.csproj -c Release --no-build --collect:"XPlat Code Coverage" --settings tests/coverlet.runsettings --logger "trx;LogFileName=unit.trx" --results-directory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/unit"
-      - name: Integration tests
-        run: >
-          dotnet test tests/NetLights.IntegrationTests/NetLights.IntegrationTests.csproj -c Release --no-build
-          --collect:"XPlat Code Coverage" --settings tests/coverlet.runsettings
-          --logger "trx;LogFileName=integration.trx"
-          --results-directory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/integration"
-      - name: Soak smoke
-        run: dotnet test tests/NetLights.SoakTests/NetLights.SoakTests.csproj -c Release --no-build --logger "trx;LogFileName=soak-smoke.trx" --results-directory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/soak"
-      - name: Coverage gate
+      - name: Verify
         shell: pwsh
-        run: scripts/check-coverage.ps1 -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
+        run: scripts/verify.ps1 -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
       - name: Upload test and coverage results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
