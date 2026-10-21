@@ -28,7 +28,7 @@ internal static class SilentUpdateRuntime
         });
     }
 
-    private static async Task Loop(
+    internal static async Task Loop(
         Func<bool> autoUpdateEnabled,
         string currentVersion,
         string processPath,
@@ -37,8 +37,11 @@ internal static class SilentUpdateRuntime
         CancellationToken cancellationToken)
     {
         string? applicationDirectory = Path.GetDirectoryName(processPath);
-        if (string.IsNullOrWhiteSpace(applicationDirectory))
+        if (string.IsNullOrWhiteSpace(applicationDirectory)
+            || !SilentUpdatePolicy.HasInnoUninstaller(applicationDirectory)
+            || SilentUpdatePolicy.RidFor(RuntimeInformation.ProcessArchitecture) is null)
         {
+            RuntimeJournal.Write("update-loop-ineligible");
             return;
         }
 
@@ -175,7 +178,7 @@ internal static class SilentUpdateRuntime
         catch (UnauthorizedAccessException) { }
     }
 
-    private static TimeSpan DelayAfter(SilentUpdateOutcome outcome)
+    internal static TimeSpan DelayAfter(SilentUpdateOutcome outcome)
     {
         switch (outcome)
         {
@@ -187,6 +190,7 @@ internal static class SilentUpdateRuntime
                 return SilentUpdatePolicy.FailedRetry;
             case SilentUpdateOutcome.NoUpdate:
             case SilentUpdateOutcome.Skipped:
+                return TimeSpan.FromHours(12);
             case SilentUpdateOutcome.Applied:
                 return TimeSpan.Zero;
             default:
