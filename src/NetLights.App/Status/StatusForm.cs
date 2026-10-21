@@ -12,7 +12,7 @@ internal sealed class StatusForm : Form
     private readonly StatusBadge _worldBadge = new();
     private readonly Label _confirmLine = new();
     private readonly Label _versionLabel = new();
-    private readonly ComboBox _diagNode = new();
+    private readonly ScrollSafeComboBox _diagNode = new();
     private readonly ThemedButton _diagRun = new("Сравнить HTTPS, ICMP и TCP", true);
     private readonly TextBox _diagOut = new();
     private readonly CheckBox _autoStart = new();
@@ -21,9 +21,10 @@ internal sealed class StatusForm : Form
     private readonly CheckBox _geoCountryIcon = new();
     private readonly MouseFocusCueCheckBox _emphasizeShortStatuses = new() { Checked = true };
     private readonly Label _letterSizeLabel = new();
-    private readonly ComboBox _letterSize = new();
-    private readonly ComboBox _availabilityPolling = new();
-    private readonly ComboBox _countryPolling = new();
+    private readonly ScrollSafeComboBox _letterSize = new();
+    private readonly ScrollSafeComboBox _availabilityPolling = new();
+    private readonly ScrollSafeComboBox _countryPolling = new();
+    private SettingsRow? _letterSizeRow;
     private readonly Label _trafficLine = new();
     private readonly Label _updateLine = new();
     private readonly Label _persistenceLine = new();
@@ -878,14 +879,26 @@ internal sealed class StatusForm : Form
         links.Controls.Add(github);
         links.Controls.Add(releases);
         links.Controls.Add(dataSources);
-        stack.Controls.Add(SettingsBlock("Общие", _autoStart, _geoCountryDetection, _geoCountryIcon, _letterSizeLabel, _letterSize));
+        _letterSizeRow = new SettingsRow(_letterSizeLabel, _letterSize);
+        _letterSizeRow.Visible = _geoCountryDetection.Checked && _geoCountryIcon.Checked;
+        var trafficRow = new FlowLayoutPanel
+        {
+            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = true, Margin = Padding.Empty, BackColor = UiTheme.Card
+        };
+        trafficDetails.Margin = new Padding(0, 4, 12, 0);
+        _trafficLine.Margin = new Padding(0, 12, 0, 4);
+        trafficRow.Controls.Add(trafficDetails);
+        trafficRow.Controls.Add(_trafficLine);
         stack.Controls.Add(SettingsBlock("Проверки и трафик",
-            Hint("Доступность сайтов: интервал для каждой группы"), _availabilityPolling,
-            Hint("Сайты в группе проверяются по очереди. Реже проверки – меньше трафика, но дольше обнаружение изменений. При сбоях возможны дополнительные проверки."),
-            Hint("Определение страны внешнего IP"), _countryPolling,
-            _trafficLine, trafficDetails));
-        stack.Controls.Add(SettingsBlock("Приложение", windowActions, _persistenceLine));
-        stack.Controls.Add(SettingsBlock("Обновления", _autoUpdate, _updateLine, actions, _manualUpdateLine));
+            new SettingsRow(new Label { AutoSize = true, Text = "Проверка доступности сайтов" }, _availabilityPolling),
+            new SettingsRow(new Label { AutoSize = true, Text = "Проверка страны внешнего IP" }, _countryPolling),
+            Hint("Интервал доступности задан для каждой группы; сайты проверяются по очереди. Реже проверки – меньше трафика, но дольше обнаружение сбоев."),
+            trafficRow));
+        stack.Controls.Add(SettingsBlock("Локация и трей", _geoCountryDetection, _geoCountryIcon, _letterSizeRow));
+        _autoStart.Margin = new Padding(0, 0, 0, 8);
+        stack.Controls.Add(SettingsBlock("Приложение", _autoStart, _autoUpdate, _updateLine, actions,
+            windowActions, _manualUpdateLine, _persistenceLine));
         stack.Controls.Add(links);
         _settingsPage.Controls.Add(stack);
         stack.Relayout();
@@ -921,6 +934,7 @@ internal sealed class StatusForm : Form
         bool show = _geoCountryDetection.Checked && _geoCountryIcon.Checked;
         _letterSizeLabel.Visible = show;
         _letterSize.Visible = show;
+        if (_letterSizeRow is not null) _letterSizeRow.Visible = show;
         if (_settingsPage.Controls.Count > 0 && _settingsPage.Controls[0] is VerticalStack stack)
         {
             stack.Relayout();

@@ -249,6 +249,8 @@ internal sealed class VerticalStack : Panel
 
     public void Relayout() => LayoutStack();
 
+    internal void ScrollWheel(int delta) => OnMouseWheel(new MouseEventArgs(MouseButtons.None, 0, 0, 0, delta));
+
     protected override Point ScrollToControl(Control activeControl) => DisplayRectangle.Location;
 
     protected override void OnSizeChanged(EventArgs e)
@@ -312,7 +314,7 @@ internal sealed class VerticalStack : Panel
             ApplyWrap(child, childWidth);
             Size pref = child.GetPreferredSize(new Size(childWidth, 0));
             int height = Math.Max(pref.Height, child.MinimumSize.Height);
-            child.SetBounds(Padding.Left + child.Margin.Left, y + child.Margin.Top, childWidth, height);
+            child.SetBounds(Padding.Left + child.Margin.Left, y + child.Margin.Top + AutoScrollPosition.Y, childWidth, height);
             y += child.Margin.Vertical + height;
         }
 
