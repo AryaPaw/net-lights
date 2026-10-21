@@ -83,7 +83,8 @@ internal static class LocationHistoryStore
             // Keep the backup intact; the app can still start with an empty in-memory history.
         }
 
-        _recoveredPath = null;
+        if (File.Exists(backupPath)) fallbackStatus = HistoryLoadStatus.Corrupt;
+        _recoveredPath = fallbackStatus == HistoryLoadStatus.Corrupt ? path : null;
         LastLoadStatus = fallbackStatus;
         return new LocationHistory();
     }
@@ -219,6 +220,8 @@ internal static class LocationHistoryStore
             JsonSerializer.Serialize(stream, file, Options);
         }
         bool recoveredCurrent = string.Equals(path, _recoveredPath, StringComparison.OrdinalIgnoreCase);
+        if (recoveredCurrent && LastLoadStatus == HistoryLoadStatus.Corrupt && File.Exists(path + ".bak"))
+            File.Copy(path + ".bak", path + ".bak.corrupt-" + Guid.NewGuid().ToString("N") + ".json");
         if (File.Exists(path))
         {
             if (recoveredCurrent)

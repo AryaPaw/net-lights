@@ -108,6 +108,8 @@ internal sealed class GeoCountryTrayHost : IDisposable
 
     public void NotifyNetworkOrResume() => _scheduler.NotifyNetworkOrResume();
 
+    public void SetPollingInterval(int seconds) => _scheduler.SetPollingInterval(seconds);
+
     public void Restore()
     {
         if (!_visible || _icon is null)

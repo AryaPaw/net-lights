@@ -15,6 +15,9 @@ public sealed class GeoCountryScheduler : IDisposable
     private int _generation;
     private int _failStreak;
     private bool _enabled;
+    private TimeSpan _refreshInterval = GeoCountryPolicy.RefreshInterval;
+    private long _scheduledAt;
+    private TimeSpan _scheduledDelay;
     private string? _lastSuccessfulCountry;
     private DateTimeOffset _lastSuccessfulAt;
     private string? _lastPublicIpHash;
@@ -41,6 +44,21 @@ public sealed class GeoCountryScheduler : IDisposable
             }
         }
     }
+
+    public void SetPollingInterval(int seconds)
+    {
+        lock (_gate)
+        {
+            _refreshInterval = TimeSpan.FromSeconds(PollingIntervals.NormalizeCountry(seconds));
+            if (_enabled && Volatile.Read(ref _inflight) == 0)
+            {
+                TimeSpan remaining = _scheduledDelay - _time.GetElapsedTime(_scheduledAt);
+                ArmLocked(remaining > _refreshInterval ? remaining : _refreshInterval);
+            }
+        }
+    }
+
+    private TimeSpan RefreshInterval { get { lock (_gate) return _refreshInterval; } }
 
     public bool IsEnabled
     {
@@ -127,7 +145,7 @@ public sealed class GeoCountryScheduler : IDisposable
             token = _run.Token;
         }
 
-        TimeSpan delay = GeoCountryPolicy.RefreshInterval;
+        TimeSpan delay = RefreshInterval;
         try
         {
             delay = await ExecuteAsync(gen, token).ConfigureAwait(false);
@@ -167,7 +185,7 @@ public sealed class GeoCountryScheduler : IDisposable
             if (lookup.ResolutionSource is null && !lookup.Conflicted && !lookup.DifferentIp)
             {
                 KeepLastKnown(gen);
-                return lookup.RetryAfter ?? NextBackoff();
+                return FailureDelay(lookup.RetryAfter);
             }
             lock (_gate)
             {
@@ -175,7 +193,7 @@ public sealed class GeoCountryScheduler : IDisposable
                 GeoCountryDisplay display = BuildDisplayLocked(lookup, country: null, confirmed: false);
                 PublishIfChangedLocked(display);
             }
-            return lookup.RetryAfter ?? NextBackoff();
+            return FailureDelay(lookup.RetryAfter);
         }
 
         string country = lookup.CountryCode!;
@@ -193,7 +211,7 @@ public sealed class GeoCountryScheduler : IDisposable
             PublishIfChangedLocked(display);
         }
 
-        return GeoCountryPolicy.RefreshInterval;
+        return RefreshInterval;
     }
 
     private void KeepLastKnown(int gen)
@@ -237,10 +255,17 @@ public sealed class GeoCountryScheduler : IDisposable
                 _failStreak++;
             }
 
-            return index < GeoCountryPolicy.FailureBackoff.Length
+            TimeSpan delay = index < GeoCountryPolicy.FailureBackoff.Length
                 ? GeoCountryPolicy.FailureBackoff[index]
-                : GeoCountryPolicy.RefreshInterval;
+                : _refreshInterval;
+            return delay > _refreshInterval ? delay : _refreshInterval;
         }
+    }
+
+    private TimeSpan FailureDelay(TimeSpan? retryAfter)
+    {
+        TimeSpan delay = retryAfter ?? NextBackoff();
+        return delay > RefreshInterval ? delay : RefreshInterval;
     }
 
     private void ReplaceRunLocked()
@@ -253,6 +278,8 @@ public sealed class GeoCountryScheduler : IDisposable
 
     private void ArmLocked(TimeSpan delay)
     {
+        _scheduledAt = _time.GetTimestamp();
+        _scheduledDelay = delay;
         _timer ??= _time.CreateTimer(OnTimer, this, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         _timer.Change(delay, Timeout.InfiniteTimeSpan);
     }

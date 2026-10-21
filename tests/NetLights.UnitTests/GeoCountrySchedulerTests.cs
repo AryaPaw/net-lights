@@ -7,6 +7,29 @@ namespace NetLights.UnitTests;
 public sealed class GeoCountrySchedulerTests
 {
     [Fact]
+    public async Task ConfiguredIntervalControlsCountryPollingAndRetryAfterSurvivesSettingChange()
+    {
+        var time = new FakeTimeProvider();
+        var source = new FakeCountrySource("DE");
+        using var scheduler = new GeoCountryScheduler(source, time);
+        scheduler.SetPollingInterval(30);
+        scheduler.Start();
+        await WaitDisplay(scheduler, "DE");
+        time.Advance(TimeSpan.FromSeconds(29));
+        Assert.Equal(1, source.LookupCount);
+        source.LookupOk = false;
+        source.RetryAfter = TimeSpan.FromHours(1);
+        time.Advance(TimeSpan.FromSeconds(1));
+        await WaitUntil(() => source.LookupCount == 2);
+        // Wait for the serialized cycle to finish publishing before changing its timer.
+        await WaitUntil(() => !scheduler.Current.Fresh);
+        scheduler.SetPollingInterval(10);
+        time.Advance(TimeSpan.FromMinutes(30));
+        Assert.Equal(2, source.LookupCount);
+        time.Advance(TimeSpan.FromMinutes(30));
+        await WaitUntil(() => source.LookupCount == 3);
+    }
+    [Fact]
     public void RefreshPolicy_IsTenSeconds()
     {
         Assert.Equal(TimeSpan.FromSeconds(10), GeoCountryPolicy.RefreshInterval);

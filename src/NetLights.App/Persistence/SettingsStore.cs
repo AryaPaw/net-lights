@@ -8,6 +8,8 @@ internal sealed class AppSettings
 {
     public bool AutoStart { get; set; } = true;
     public bool AutoUpdateEnabled { get; set; } = true;
+    public int AvailabilityPollingSeconds { get; set; } = PollingIntervals.DefaultAvailabilitySeconds;
+    public int CountryPollingSeconds { get; set; } = PollingIntervals.DefaultCountrySeconds;
     public bool EmphasizeShortStatuses { get; set; } = true;
     public bool ShowLocationDebugSources { get; set; }
     public bool GeoCountryDetectionEnabled { get; set; }
@@ -172,6 +174,8 @@ internal static class SettingsStore
 
     private static void Normalize(AppSettings settings)
     {
+        settings.AvailabilityPollingSeconds = PollingIntervals.NormalizeAvailability(settings.AvailabilityPollingSeconds);
+        settings.CountryPollingSeconds = PollingIntervals.NormalizeCountry(settings.CountryPollingSeconds);
         if (settings.WindowWidth < UiTheme.WindowMinWidth)
             settings.WindowWidth = UiTheme.WindowDefaultWidth;
         if (settings.WindowHeight < UiTheme.WindowMinHeight)
@@ -215,6 +219,8 @@ internal static class SettingsStore
         }
 
         _recoveredPath = null;
+        if (failure == SettingsLoadStatus.Absent && File.Exists(path + ".bak"))
+            failure = SettingsLoadStatus.Corrupt;
         _blockedPath = failure == SettingsLoadStatus.Absent ? null : path;
         return (new AppSettings(), failure);
     }

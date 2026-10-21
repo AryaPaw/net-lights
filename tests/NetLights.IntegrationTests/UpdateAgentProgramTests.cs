@@ -411,7 +411,8 @@ public sealed class UpdateAgentProgramTests
                         if (!process.HasExited && IsFixtureOwnedAppPath(imagePath))
                         {
                             process.Kill(entireProcessTree: true);
-                            process.WaitForExit(2000);
+                            if (!process.WaitForExit(5000))
+                                throw new TimeoutException("Fixture app did not exit after termination.");
                         }
                     }
                     catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
@@ -420,7 +421,17 @@ public sealed class UpdateAgentProgramTests
                 }
             }
 
-            if (Directory.Exists(InstallDirectory)) Directory.Delete(InstallDirectory, recursive: true);
+            // Windows may release an exited process's image mapping slightly after its exit signal.
+            var cleanup = Stopwatch.StartNew();
+            while (Directory.Exists(InstallDirectory))
+            {
+                try { Directory.Delete(InstallDirectory, recursive: true); }
+                catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException)
+                    && cleanup.Elapsed < TimeSpan.FromSeconds(3))
+                {
+                    Thread.Sleep(25);
+                }
+            }
             DeleteRoot(Root);
         }
 

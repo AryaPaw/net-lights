@@ -140,6 +140,7 @@ internal sealed class NetLightsContext : ApplicationContext
             && !AutoStartStore.HasForeignEntry(Application.ExecutablePath))
             AutoStartStore.Set(_settings.AutoStart, Application.ExecutablePath);
         (MonitorConfiguration config, string? warning) = SettingsStore.LoadPool();
+        config = PollingIntervals.Apply(config, _settings.AvailabilityPollingSeconds);
         _probe = HttpsProbeFactory.CreateProduction(TimeProvider.System, ProductInfo.Version);
         var kernel = new MonitorKernel(config, TimeProvider.System);
         _host = new MonitorHost(kernel, _probe, TimeProvider.System, () => _probe.RecycleConnections(), _ui);
@@ -187,6 +188,7 @@ internal sealed class NetLightsContext : ApplicationContext
             }
         };
         _countryTray = new GeoCountryTrayHost(() => ShowStatus(1), ProductInfo.Version, SettingsStore.RootDirectory, TimeProvider.System, _ui);
+        _countryTray.SetPollingInterval(_settings.CountryPollingSeconds);
         _countryTray.DisplayChanged = OnCountryDisplay;
         _network = new NetworkAvailabilityProcessor(
             _ui,
@@ -354,7 +356,8 @@ internal sealed class NetLightsContext : ApplicationContext
             _settings.LocationChartWindowHours,
             _settings.GeoCountryDetectionEnabled,
             _settings.EmphasizeShortStatuses,
-            _settings.ShowLocationDebugSources);
+            _settings.ShowLocationDebugSources,
+            _settings.AvailabilityPollingSeconds, _settings.CountryPollingSeconds);
         status.BindLocations(
             _locations,
             _settings.GeoCountryDetectionEnabled
@@ -372,6 +375,8 @@ internal sealed class NetLightsContext : ApplicationContext
         {
             AutoStartChanged = OnAutoStartFromWindow,
             AutoUpdateChanged = OnAutoUpdateFromWindow,
+            AvailabilityPollingChanged = OnAvailabilityPollingFromWindow,
+            CountryPollingChanged = OnCountryPollingFromWindow,
             GeoCountryIconChanged = OnGeoCountryIconFromWindow,
             GeoCountryDetectionChanged = OnGeoCountryDetectionFromWindow,
             EmphasizeShortStatusesChanged = OnEmphasizeShortStatusesFromWindow,
@@ -409,7 +414,8 @@ internal sealed class NetLightsContext : ApplicationContext
             _status?.BindSettings(AutoStartStore.IsEnabled(Application.ExecutablePath), _settings.AutoUpdateEnabled,
                 _settings.GeoCountryIconEnabled, GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize),
                 _updateNotice, _settings.LocationChartWindowHours, _settings.GeoCountryDetectionEnabled,
-                _settings.EmphasizeShortStatuses, _settings.ShowLocationDebugSources);
+                _settings.EmphasizeShortStatuses, _settings.ShowLocationDebugSources,
+                _settings.AvailabilityPollingSeconds, _settings.CountryPollingSeconds);
             return;
         }
         AutoStartStore.Set(enabled, Application.ExecutablePath);
@@ -420,6 +426,20 @@ internal sealed class NetLightsContext : ApplicationContext
     private void OnAutoUpdateFromWindow(bool enabled)
     {
         _settings.AutoUpdateEnabled = enabled;
+        TrySaveSettings();
+    }
+
+    private void OnAvailabilityPollingFromWindow(int seconds)
+    {
+        _settings.AvailabilityPollingSeconds = PollingIntervals.NormalizeAvailability(seconds);
+        _host.SetPollingInterval(_settings.AvailabilityPollingSeconds);
+        TrySaveSettings();
+    }
+
+    private void OnCountryPollingFromWindow(int seconds)
+    {
+        _settings.CountryPollingSeconds = PollingIntervals.NormalizeCountry(seconds);
+        _countryTray.SetPollingInterval(_settings.CountryPollingSeconds);
         TrySaveSettings();
     }
 

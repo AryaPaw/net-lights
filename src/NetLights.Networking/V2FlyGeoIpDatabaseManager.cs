@@ -35,7 +35,10 @@ internal sealed class V2FlyGeoIpDatabaseManager : IGeoIpDatabaseProvider, IDispo
         _versionPath = Path.Combine(directory, "version.txt");
         _time = time ?? TimeProvider.System;
         _requestDeadline = requestDeadline ?? RequestDeadline;
-        _client = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: true);
+        _client = new HttpClient(handler ?? new SocketsHttpHandler
+        {
+            ConnectCallback = (context, token) => NetworkTraffic.ConnectAsync(context, token, "База V2Fly")
+        }, disposeHandler: true);
         _client.Timeout = Timeout.InfiniteTimeSpan;
         _client.DefaultRequestHeaders.UserAgent.ParseAdd("NetLights/1.0 GeoIP database updater");
     }
@@ -177,7 +180,8 @@ internal sealed class V2FlyGeoIpDatabaseManager : IGeoIpDatabaseProvider, IDispo
         {
             // Keep serving the previous parsed database; retry on a later network signal or restart.
             Volatile.Write(ref _lastFailure, ex.ToString());
-            _retryAfter = _time.GetUtcNow() + TimeSpan.FromMinutes(5);
+            _retryAfter = _time.GetUtcNow() + (ex is InvalidDataException or FormatException
+                ? RefreshInterval : TimeSpan.FromMinutes(5));
         }
         finally
         {

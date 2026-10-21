@@ -10,7 +10,10 @@ internal sealed class IPLocateCountryDatabaseManager : IDisposable
     private static readonly Uri PointerUri = new("https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-country/ip-to-country.csv.zip");
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromDays(1);
     private readonly string _path;
-    private readonly HttpClient _http = new();
+    private readonly HttpClient _http = new(new SocketsHttpHandler
+    {
+        ConnectCallback = (context, token) => NetworkTraffic.ConnectAsync(context, token, "База IPLocate")
+    });
     private readonly CancellationTokenSource _shutdown = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
     private IPLocateCountryDatabase? _database;

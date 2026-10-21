@@ -10,6 +10,10 @@ namespace NetLights.Networking;
 
 public sealed class HttpsProbe : IProbe, IDisposable
 {
+    // A full seven-site rotation at the default interval takes 35 seconds.
+    // Keep idle sockets beyond that rotation to avoid a new TLS handshake each time.
+    private static readonly TimeSpan ConnectionIdleTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan ConnectionLifetime = TimeSpan.FromMinutes(5);
     private HttpClient _client;
     private SocketsHttpHandler _handler;
     private readonly TimeProvider _time;
@@ -167,8 +171,8 @@ public sealed class HttpsProbe : IProbe, IDisposable
             Credentials = null,
             PreAuthenticate = false,
             AutomaticDecompression = DecompressionMethods.None,
-            PooledConnectionLifetime = MonitorConstants.PooledConnectionLifetime,
-            PooledConnectionIdleTimeout = MonitorConstants.PooledConnectionIdleTimeout,
+            PooledConnectionLifetime = ConnectionLifetime,
+            PooledConnectionIdleTimeout = ConnectionIdleTimeout,
             MaxConnectionsPerServer = MonitorConstants.MaxConnectionsPerServer,
             MaxResponseHeadersLength = MonitorConstants.MaxResponseHeadersKiB,
             ConnectTimeout = MonitorConstants.ProbeDeadline,
@@ -217,7 +221,7 @@ public sealed class HttpsProbe : IProbe, IDisposable
                 }
             }
 
-            return new NetworkStream(socket, ownsSocket: true);
+            return NetworkTraffic.Track(new NetworkStream(socket, ownsSocket: true), "Доступность сайтов", context.DnsEndPoint.Host);
         }
         catch
         {

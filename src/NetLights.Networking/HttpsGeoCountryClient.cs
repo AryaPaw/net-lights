@@ -188,6 +188,7 @@ public sealed class HttpsGeoCountryClient : IGeoCountrySource, IDisposable
             MaxConnectionsPerServer = 2,
             MaxResponseHeadersLength = MonitorConstants.MaxResponseHeadersKiB,
             ConnectTimeout = GeoCountryPolicy.RequestDeadline,
+            ConnectCallback = (context, token) => NetworkTraffic.ConnectAsync(context, token, "Определение страны"),
             SslOptions = new SslClientAuthenticationOptions
             {
                 EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13

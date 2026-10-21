@@ -68,6 +68,8 @@ internal static class AvailabilityHistoryStore
             // Leave the backup untouched and try the legacy recovery source below.
         }
 
+        if (File.Exists(backupPath)) fallbackStatus = HistoryLoadStatus.Corrupt;
+        LastLoadStatus = fallbackStatus;
         AvailabilityHistory legacy = LoadLegacyStateHistory(saveCanonical: !File.Exists(path));
         LastLoadStatus = legacy.Spans.Count > 0 ? HistoryLoadStatus.Recovered : fallbackStatus;
         return legacy;
@@ -236,6 +238,8 @@ internal static class AvailabilityHistoryStore
             JsonSerializer.Serialize(stream, new HistoryWriteFile { LastObservedUtc = snapshot.LastObservedUtc, Spans = snapshot.Spans }, Options);
         }
         bool recoveredCurrent = string.Equals(path, _recoveredPath, StringComparison.OrdinalIgnoreCase);
+        if (recoveredCurrent && LastLoadStatus == HistoryLoadStatus.Corrupt && File.Exists(path + ".bak"))
+            File.Copy(path + ".bak", path + ".bak.corrupt-" + Guid.NewGuid().ToString("N") + ".json");
         if (File.Exists(path))
         {
             if (recoveredCurrent)

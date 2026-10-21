@@ -10,6 +10,29 @@ namespace NetLights.UnitTests;
 
 public sealed class V2FlyGeoIpDatabaseManagerTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RejectedReleaseIsNotDownloadedAgainAfterFiveMinutes(bool invalidChecksum)
+    {
+        var clock = new FakeTimeProvider();
+        using var fixture = new ReleaseFixture("release-1", ValidDatabase("DE"), validChecksum: true);
+        using var manager = new V2FlyGeoIpDatabaseManager(fixture.Root, clock, fixture.Handler);
+        await manager.RefreshIfDueAsync(force: true);
+        fixture.SetRelease("release-2", invalidChecksum ? ValidDatabase("TR") : [0xff], validChecksum: !invalidChecksum);
+        clock.Advance(TimeSpan.FromDays(1));
+        await manager.RefreshIfDueAsync(force: false);
+        int downloads = fixture.Handler.AssetRequestsWithBinaryAccept;
+        Assert.Equal(4, downloads);
+        clock.Advance(TimeSpan.FromMinutes(5));
+        await manager.RefreshIfDueAsync(force: false);
+        Assert.Equal(downloads, fixture.Handler.AssetRequestsWithBinaryAccept);
+        Assert.Equal("release-1", manager.Version);
+        clock.Advance(TimeSpan.FromDays(1));
+        await manager.RefreshIfDueAsync(force: false);
+        Assert.Equal(downloads + 2, fixture.Handler.AssetRequestsWithBinaryAccept);
+    }
+
     [Fact]
     public async Task LocalVersionMetadata_IsBoundedBeforeAllocation()
     {

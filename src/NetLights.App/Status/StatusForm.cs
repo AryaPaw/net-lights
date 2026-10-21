@@ -1,4 +1,5 @@
 using NetLights.Core;
+using NetLights.Networking;
 
 namespace NetLights.App;
 
@@ -21,6 +22,9 @@ internal sealed class StatusForm : Form
     private readonly MouseFocusCueCheckBox _emphasizeShortStatuses = new() { Checked = true };
     private readonly Label _letterSizeLabel = new();
     private readonly ComboBox _letterSize = new();
+    private readonly ComboBox _availabilityPolling = new();
+    private readonly ComboBox _countryPolling = new();
+    private readonly Label _trafficLine = new();
     private readonly Label _updateLine = new();
     private readonly Label _persistenceLine = new();
     private readonly ThemedButton _checkUpdates = new("Проверить обновления", true);
@@ -57,6 +61,10 @@ internal sealed class StatusForm : Form
     public Action<bool>? AutoStartChanged { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action<bool>? AutoUpdateChanged { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<int>? AvailabilityPollingChanged { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<int>? CountryPollingChanged { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Action<bool>? GeoCountryIconChanged { get; set; }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
@@ -228,11 +236,17 @@ internal sealed class StatusForm : Form
         int locationChartWindowHours = 12,
         bool geoCountryDetection = false,
         bool emphasizeShortStatuses = true,
-        bool showLocationDebugSources = false)
+        bool showLocationDebugSources = false,
+        int availabilityPollingSeconds = PollingIntervals.DefaultAvailabilitySeconds,
+        int countryPollingSeconds = PollingIntervals.DefaultCountrySeconds)
     {
         _suppressSettings = true;
         _autoStart.Checked = autoStart;
         _autoUpdate.Checked = autoUpdate;
+        _availabilityPolling.SelectedIndex = Array.IndexOf(PollingIntervals.AvailabilitySeconds,
+            PollingIntervals.NormalizeAvailability(availabilityPollingSeconds));
+        _countryPolling.SelectedIndex = Array.IndexOf(PollingIntervals.CountrySeconds,
+            PollingIntervals.NormalizeCountry(countryPollingSeconds));
         _geoCountryDetection.Checked = geoCountryDetection;
         _geoCountryIcon.Checked = geoCountryIcon;
         _geoCountryIcon.Enabled = geoCountryDetection;
@@ -326,6 +340,7 @@ internal sealed class StatusForm : Form
         }
 
         DateTimeOffset now = _time.GetUtcNow();
+        if (_settingsPage.Visible) RefreshTraffic();
         if (_availabilityHistory is not null && _livePage.Visible)
         {
             _availabilityChart.Bind(_availabilityHistory, now, _availabilityWindow);
@@ -532,6 +547,7 @@ internal sealed class StatusForm : Form
         _tabLocations.Primary = index == 1;
         _tabDiag.Primary = index == 2;
         _tabSettings.Primary = index == 3;
+        if (index == 3) RefreshTraffic();
         if (index == 0)
         {
             ScaleColumns(_list, [120, 140, 100, 60, 110, 90, 120, 170]);
@@ -763,6 +779,19 @@ internal sealed class StatusForm : Form
             }
         };
         SyncLetterSizeVisibility();
+        ConfigurePollingSelector(_availabilityPolling, "availabilityPollingInterval", PollingIntervals.AvailabilitySeconds,
+            PollingIntervals.DefaultAvailabilitySeconds, seconds => AvailabilityPollingChanged?.Invoke(seconds));
+        ConfigurePollingSelector(_countryPolling, "countryPollingInterval", PollingIntervals.CountrySeconds,
+            PollingIntervals.DefaultCountrySeconds, seconds => CountryPollingChanged?.Invoke(seconds));
+        _trafficLine.AutoSize = true;
+        _trafficLine.Font = UiTheme.Caption;
+        _trafficLine.ForeColor = UiTheme.Muted;
+        _trafficLine.Margin = new Padding(0, 10, 0, 8);
+        _trafficLine.AccessibleName = "networkTrafficTotal";
+        var trafficDetails = new ThemedButton("Трафик по источникам", false) { Stretch = false };
+        trafficDetails.FitToText();
+        trafficDetails.AccessibleName = "networkTrafficDetails";
+        trafficDetails.Click += (_, _) => { using var dialog = new NetworkTrafficDialog(); dialog.ShowDialog(this); };
         _updateLine.AutoSize = true;
         _updateLine.Font = UiTheme.Caption;
         _updateLine.ForeColor = UiTheme.Muted;
@@ -850,11 +879,41 @@ internal sealed class StatusForm : Form
         links.Controls.Add(releases);
         links.Controls.Add(dataSources);
         stack.Controls.Add(SettingsBlock("Общие", _autoStart, _geoCountryDetection, _geoCountryIcon, _letterSizeLabel, _letterSize));
+        stack.Controls.Add(SettingsBlock("Проверки и трафик",
+            Hint("Доступность сайтов: интервал для каждой группы"), _availabilityPolling,
+            Hint("Сайты в группе проверяются по очереди. Реже проверки – меньше трафика, но дольше обнаружение изменений. При сбоях возможны дополнительные проверки."),
+            Hint("Определение страны внешнего IP"), _countryPolling,
+            _trafficLine, trafficDetails));
         stack.Controls.Add(SettingsBlock("Приложение", windowActions, _persistenceLine));
         stack.Controls.Add(SettingsBlock("Обновления", _autoUpdate, _updateLine, actions, _manualUpdateLine));
         stack.Controls.Add(links);
         _settingsPage.Controls.Add(stack);
         stack.Relayout();
+    }
+
+    private void ConfigurePollingSelector(ComboBox selector, string name, int[] values, int defaultSeconds,
+        Action<int> changed)
+    {
+        selector.DropDownStyle = ComboBoxStyle.DropDownList;
+        selector.Font = UiTheme.Body;
+        selector.Width = 230;
+        selector.AccessibleName = name;
+        selector.Items.AddRange(values.Select(seconds => (object)(seconds + " с"
+            + (seconds == defaultSeconds ? " (по умолчанию)" : ""))).ToArray());
+        selector.SelectedIndex = Array.IndexOf(values, defaultSeconds);
+        selector.SelectedIndexChanged += (_, _) =>
+        {
+            if (!_suppressSettings && selector.SelectedIndex >= 0) changed(values[selector.SelectedIndex]);
+        };
+    }
+
+    private void RefreshTraffic()
+    {
+        IReadOnlyList<NetworkTrafficRow> rows = NetworkTraffic.Snapshot();
+        string text = "С запуска: получено " + NetworkTrafficDialog.FormatBytes(rows.Sum(row => row.ReceivedBytes))
+            + ", отправлено " + NetworkTrafficDialog.FormatBytes(rows.Sum(row => row.SentBytes))
+            + ". Без обновлений программы.";
+        if (_trafficLine.Text != text) _trafficLine.Text = text;
     }
 
     private void SyncLetterSizeVisibility()

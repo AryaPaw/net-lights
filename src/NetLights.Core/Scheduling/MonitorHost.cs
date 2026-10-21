@@ -63,6 +63,8 @@ public sealed class MonitorHost : IAsyncDisposable
 
     public void RequestCheckNow() => PostCritical(() => Dispatch(_kernel.RequestCheckNow()));
 
+    public void SetPollingInterval(int seconds) => PostCritical(() => _kernel.SetPollingInterval(seconds));
+
     public void SetPaused(bool paused) => PostCritical(() => Dispatch(_kernel.SetPaused(paused)));
 
     public void NotifyNetworkChange() => PostCritical(() => Dispatch(_kernel.BeginNewEpoch("network-change")));

@@ -2,7 +2,7 @@ namespace NetLights.Core;
 
 public sealed partial class MonitorKernel
 {
-    private readonly MonitorConfiguration _config;
+    private MonitorConfiguration _config;
     private readonly TimeProvider _time;
     private readonly MonotonicClock _clock;
     private readonly GroupRuntime _ru;
@@ -51,6 +51,13 @@ public sealed partial class MonitorKernel
     public int ConfirmationEpisodeCount { get; private set; }
     public int MaxObservedPhysical { get; private set; }
     public int AppliedCompletions { get; private set; }
+
+    public void SetPollingInterval(int seconds)
+    {
+        _config = PollingIntervals.Apply(_config, seconds);
+        _ru.NextSlotAt = _clock.Add(_clock.Now, _config.GroupInterval);
+        _world.NextSlotAt = _clock.Add(_clock.Now, _config.GroupOffset);
+    }
 
     public IReadOnlyList<WorkItem> Tick()
     {
@@ -460,7 +467,7 @@ public sealed partial class MonitorKernel
             return;
         }
 
-        long episodeStart = group.ConsecutiveFailures[0].Started;
+        long episodeStart = _clock.Now;
         BeginConfirmation(group, episodeStart, "failures");
         AbsorbRelevantInflight(group);
         AddTrace("confirm-begin", group.Slots[0], 0);
