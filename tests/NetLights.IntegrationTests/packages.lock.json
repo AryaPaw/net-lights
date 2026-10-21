@@ -102,9 +102,9 @@
       "NetLights": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.5.1, )",
-          "NetLights.Networking": "[1.5.1, )",
-          "NetLights.Updates": "[1.5.1, )"
+          "NetLights.Core": "[1.6.0, )",
+          "NetLights.Networking": "[1.6.0, )",
+          "NetLights.Updates": "[1.6.0, )"
         }
       },
       "netlights.core": {
@@ -113,7 +113,7 @@
       "netlights.networking": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.5.1, )"
+          "NetLights.Core": "[1.6.0, )"
         }
       },
       "netlights.testapp": {
@@ -125,13 +125,13 @@
       "netlights.testsupport": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.5.1, )"
+          "NetLights.Core": "[1.6.0, )"
         }
       },
       "netlights.updateagent": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Updates": "[1.5.1, )"
+          "NetLights.Updates": "[1.6.0, )"
         }
       },
       "netlights.updates": {

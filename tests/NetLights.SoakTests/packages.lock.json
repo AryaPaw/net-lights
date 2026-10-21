@@ -99,13 +99,13 @@
       "netlights.networking": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.5.1, )"
+          "NetLights.Core": "[1.6.0, )"
         }
       },
       "netlights.testsupport": {
         "type": "Project",
         "dependencies": {
-          "NetLights.Core": "[1.5.1, )"
+          "NetLights.Core": "[1.6.0, )"
         }
       }
     }
