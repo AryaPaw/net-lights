@@ -21,6 +21,15 @@ internal static class Program
         File.WriteAllText(Path.Combine(target, "installer-added.marker"), "test install");
         File.WriteAllText(Path.Combine(target, "rollback-probe.marker"), "new-app-payload");
 
+        if (mode.Equals("legacy-autostart", StringComparison.OrdinalIgnoreCase))
+        {
+            using var child = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Path.Combine(target, "NetLights.exe"))
+            {
+                UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = target
+            }) ?? throw new InvalidOperationException("Legacy app did not start.");
+            File.WriteAllText(Path.Combine(target, "installer-started-app.pid"), child.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+
         if (mode.Equals("hang", StringComparison.OrdinalIgnoreCase))
             Thread.Sleep(Timeout.Infinite);
 

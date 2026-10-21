@@ -237,6 +237,47 @@ public sealed class UpdateAgentProgramTests
     }
 
     [Fact]
+    public void LegacyInstallerAutostart_DoesNotBlockRollbackOrStopOtherInstallations()
+    {
+        using var fixture = new InstallerFixture("legacy-autostart", "1.6.0");
+        using var other = new InstallerFixture("success", "1.5.0");
+        using Process unrelated = Process.Start(new ProcessStartInfo(Path.Combine(other.InstallDirectory, "NetLights.exe"))
+        {
+            UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = other.InstallDirectory
+        })!;
+        try
+        {
+            int result = fixture.Run();
+            Assert.Equal(8, result);
+            Assert.Equal("old-app-payload", File.ReadAllText(Path.Combine(fixture.InstallDirectory, "rollback-probe.marker")));
+            Assert.False(File.Exists(Path.Combine(fixture.InstallDirectory, "installer-added.marker")));
+            Assert.True(fixture.TryGetRunningApp(out _));
+            Assert.False(unrelated.HasExited);
+            Assert.True(fixture.Store.TryReadLastFailure(out string? message));
+            Assert.Contains("Предыдущие файлы восстановлены", message);
+        }
+        finally
+        {
+            if (!unrelated.HasExited) unrelated.Kill();
+            Assert.True(unrelated.WaitForExit(5000));
+        }
+    }
+
+    [Fact]
+    public void RecoveryPathError_PreservesBackupInsteadOfThrowingOrDeletingIt()
+    {
+        using var fixture = new InstallerFixture("success", "1.5.0");
+        using (InstallationSnapshot backup = InstallationSnapshot.Create(Path.Combine(fixture.InstallDirectory, "NetLights.exe"), fixture.Root))
+        {
+            var method = typeof(Program).GetMethod("RestorePreviousInstallation", System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Static)!;
+            Assert.False((bool)method.Invoke(null, [backup, new Dictionary<string, string> { ["restart"] = "invalid\0path" }, null])!);
+        }
+        string retained = Assert.Single(Directory.GetDirectories(Path.Combine(fixture.Root, "rollback")));
+        Assert.True(File.Exists(Path.Combine(retained, "NetLights.exe")));
+    }
+
+    [Fact]
     public void NewAppWithoutHealthSignal_RollsBackAndRestartsPriorApp()
     {
         using var fixture = new InstallerFixture("success", "1.5.0", skipHealthSignal: true);

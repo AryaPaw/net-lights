@@ -129,7 +129,7 @@ internal static class Program
 
                 bool stopped = install.WaitForExit(ToTimeoutMilliseconds(testOptions?.InstallerStopWait ?? TimeSpan.FromSeconds(5)));
                 if (!stopped) backup.KeepForRecovery();
-                bool restored = stopped && backup.Restore();
+                bool restored = stopped && RestorePreviousInstallation(backup, parsed, testOptions);
                 store.WritePhase(restored ? "rollback-complete" : "rollback-failed");
 
                 installerReadLock.Dispose();
@@ -150,7 +150,7 @@ internal static class Program
             bool recoveredPrevious = false;
             if (!ok)
             {
-                restoredPrevious = backup.Restore();
+                restoredPrevious = RestorePreviousInstallation(backup, parsed, testOptions);
                 store.WritePhase(restoredPrevious ? "rollback-complete" : "rollback-failed");
                 recoveredPrevious = restoredPrevious && Restart(parsed, testOptions: testOptions);
                 store.WritePhase(recoveredPrevious ? "previous-process-restarted" : "previous-process-restart-failed");
@@ -197,7 +197,7 @@ internal static class Program
                 }
 
                 if (installerStopped)
-                    restored = activeBackup.Restore();
+                    restored = RestorePreviousInstallation(activeBackup, Parse(args), testOptions);
                 else
                     activeBackup.KeepForRecovery();
             }
@@ -239,6 +239,65 @@ internal static class Program
             installerReadLock?.Dispose();
             activeInstaller?.Dispose();
             activeBackup?.Dispose();
+        }
+    }
+
+    private static bool RestorePreviousInstallation(InstallationSnapshot backup,
+        Dictionary<string, string> parsed, UpdateAgentTestOptions? testOptions)
+    {
+        // Older installers can launch the app even when /NETLIGHTSUPDATE was supplied.
+        // Only the exact installation being rolled back belongs to this operation.
+        Process[] processes = [];
+        try
+        {
+            if (!parsed.TryGetValue("restart", out string? executable))
+            {
+                backup.KeepForRecovery();
+                return false;
+            }
+            string expected = Path.GetFullPath(executable);
+            TimeSpan timeout = testOptions?.InstallerStopWait ?? TimeSpan.FromSeconds(5);
+            var elapsed = Stopwatch.StartNew();
+            processes = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(expected));
+            foreach (Process process in processes)
+            {
+                string? path;
+                try
+                {
+                    _ = process.SafeHandle; // Pin the process identity before inspecting its executable path.
+                    path = process.MainModule?.FileName;
+                }
+                catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { continue; }
+                if (path is null || !string.Equals(Path.GetFullPath(path), expected, StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    if (process.HasExited) continue;
+                    process.Kill();
+                    int remaining = (int)Math.Clamp((timeout - elapsed.Elapsed).TotalMilliseconds, 0, int.MaxValue);
+                    if (!process.WaitForExit(remaining))
+                    {
+                        backup.KeepForRecovery();
+                        return false;
+                    }
+                }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                    backup.KeepForRecovery();
+                    return false;
+                }
+            }
+            return backup.Restore();
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException
+            or IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            backup.KeepForRecovery();
+            return false;
+        }
+        finally
+        {
+            foreach (Process process in processes) process.Dispose();
         }
     }
 
