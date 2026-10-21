@@ -1,6 +1,6 @@
 #define MyAppName "Net Lights"
 #ifndef MyAppVersion
-#define MyAppVersion "1.5.1"
+#define MyAppVersion "1.6.0"
 #endif
 #define MyAppPublisher "AryaPaw"
 #define MyAppURL "https://github.com/AryaPaw/net-lights"
