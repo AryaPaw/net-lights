@@ -1,0 +1,3072 @@
+diff --git a/Directory.Build.props b/Directory.Build.props
+--- a/Directory.Build.props
++++ b/Directory.Build.props
+@@ -7,7 +7,8 @@
+     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+     <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
+     <NuGetAudit>true</NuGetAudit>
+-    <Version>1.6.0</Version>
++    <Version>1.6.1</Version>
++    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+     <Authors>AryaPaw</Authors>
+     <Company>AryaPaw</Company>
+     <Product>Net Lights</Product>
+diff --git a/installer/net-lights.iss b/installer/net-lights.iss
+--- a/installer/net-lights.iss
++++ b/installer/net-lights.iss
+@@ -1,6 +1,6 @@
+ #define MyAppName "Net Lights"
+ #ifndef MyAppVersion
+-#define MyAppVersion "1.6.0"
++#define MyAppVersion "1.6.1"
+ #endif
+ #define MyAppPublisher "AryaPaw"
+ #define MyAppURL "https://github.com/AryaPaw/net-lights"
+@@ -48,6 +48,7 @@
+ Name: "{group}\Net Lights"; Filename: "{app}\{#MyAppExeName}"
+ 
+ [Run]
++Filename: "{app}\NetLights.UpdateAgent.exe"; Parameters: "--complete-manual-install --restart ""{app}\{#MyAppExeName}"""; Flags: runhidden; Check: not IsUpdateAgentInstall
+ Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall skipifsilent; Check: not IsUpdateAgentInstall
+ Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent; Check: not IsUpdateAgentInstall
+ 
+diff --git a/src/NetLights.App/Hosting/NetLightsContext.cs b/src/NetLights.App/Hosting/NetLightsContext.cs
+--- a/src/NetLights.App/Hosting/NetLightsContext.cs
++++ b/src/NetLights.App/Hosting/NetLightsContext.cs
+@@ -48,7 +48,7 @@
+     private readonly string? _updateHealthEvent;
+     private int _updateHealthSignaled;
+ 
+-    public NetLightsContext(string? updateHealthEvent = null)
++    public NetLightsContext(string? updateHealthEvent = null, bool skipAutomaticUpdates = false)
+     {
+         _updateHealthEvent = updateHealthEvent;
+         _uiThreadId = Environment.CurrentManagedThreadId;
+@@ -148,6 +148,13 @@
+         if (new PendingUpdateStore().TryReadLastFailure(out string? updateError))
+         {
+             _updateNotice = updateError;
++        }
++
++        if (skipAutomaticUpdates)
++        {
++            _updateNotice = (_updateNotice is null ? "" : _updateNotice + " ")
++                + "Автообновление приостановлено до следующего запуска: не удалось сохранить состояние восстановления. Ручная проверка доступна.";
++            RuntimeJournal.Write("automatic-updates-suspended-for-recovery");
+         }
+ 
+         _host.SnapshotChanged += OnSnapshot;
+@@ -235,7 +242,7 @@
+         _countryTray.SetLetterScale(GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize));
+         _countryTray.SetDetectionEnabled(_settings.GeoCountryDetectionEnabled);
+         _countryTray.SetTrayIconEnabled(_settings.GeoCountryIconEnabled);
+-        SilentUpdateRuntime.Start(
++        if (!skipAutomaticUpdates) SilentUpdateRuntime.Start(
+             () => _settings.AutoUpdateEnabled,
+             ProductInfo.Version,
+             Application.ExecutablePath,
+@@ -728,6 +735,7 @@
+ 
+         bool exitRequested = false;
+         SilentUpdateOutcome outcome = SilentUpdateOutcome.Failed;
++        string? updateError = null;
+         string? downloadDirectory = null;
+         try
+         {
+@@ -754,7 +762,8 @@
+                 feed,
+                 new AgentSilentSetupInstaller(Application.ExecutablePath),
+                 () => exitRequested = true,
+-                _diagnosticsCts.Token)).ConfigureAwait(false);
++                _diagnosticsCts.Token,
++                ReportError: message => updateError = message)).ConfigureAwait(true);
+         }
+         catch (Exception ex)
+         {
+@@ -770,7 +779,7 @@
+             _updateGate.Release();
+         }
+ 
+-        _status?.SetManualUpdateState(false, ManualUpdateCopy.For(outcome));
++        _status?.SetManualUpdateState(false, updateError ?? ManualUpdateCopy.For(outcome));
+         if (exitRequested)
+         {
+             RuntimeJournal.Write("manual-update-exit-requested");
+diff --git a/src/NetLights.App/Hosting/Program.cs b/src/NetLights.App/Hosting/Program.cs
+--- a/src/NetLights.App/Hosting/Program.cs
++++ b/src/NetLights.App/Hosting/Program.cs
+@@ -56,7 +56,8 @@
+             ApplicationConfiguration.Initialize();
+             using var exitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, exitEventName);
+             UpdateHealthSignal.TryReadName(args, out string? updateHealthEvent);
+-            var context = new NetLightsContext(updateHealthEvent);
++            var context = new NetLightsContext(updateHealthEvent,
++                skipAutomaticUpdates: args.Contains("--skip-automatic-updates", StringComparer.Ordinal));
+             if (args.Length == 1 && args[0] == "--show-local")
+                 context.ShowLocalWindowOnStart();
+             _ = Task.Run(() =>
+diff --git a/src/NetLights.App/Hosting/SilentUpdateRuntime.cs b/src/NetLights.App/Hosting/SilentUpdateRuntime.cs
+--- a/src/NetLights.App/Hosting/SilentUpdateRuntime.cs
++++ b/src/NetLights.App/Hosting/SilentUpdateRuntime.cs
+@@ -85,7 +85,11 @@
+                         feed,
+                         new AgentSilentSetupInstaller(processPath),
+                         () => exitRequested = true,
+-                        cancellationToken)).ConfigureAwait(false);
++                        cancellationToken,
++                        IsAutomatic: true,
++                        RetryStore: new UpdateRetryStore(Path.Combine(
++                            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NetLights", "updates")),
++                        ReportError: _ => RuntimeJournal.Write("update-handoff-failed"))).ConfigureAwait(false);
+                 }
+                 finally
+                 {
+diff --git a/src/NetLights.App/packages.publish.lock.json b/src/NetLights.App/packages.publish.lock.json
+new file mode 100644
+--- /dev/null
++++ b/src/NetLights.App/packages.publish.lock.json
+@@ -0,0 +1,26 @@
++{
++  "version": 2,
++  "dependencies": {
++    "net10.0-windows7.0": {
++      "Microsoft.NET.ILLink.Tasks": {
++        "type": "Direct",
++        "requested": "[10.0.8, )",
++        "resolved": "10.0.8",
++        "contentHash": "dVbSXGIFNR5nZcv2tOLoWI+a9T4jtFd77IYjuND+QVe360qWgAF7H0WtoopYhRw/+SgpGUTyrkrh+65+ClNnfw=="
++      },
++      "netlights.core": {
++        "type": "Project"
++      },
++      "netlights.networking": {
++        "type": "Project",
++        "dependencies": {
++          "NetLights.Core": "[1.6.0, )"
++        }
++      },
++      "netlights.updates": {
++        "type": "Project"
++      }
++    },
++    "net10.0-windows7.0/win-x64": {}
++  }
++}
+\ No newline at end of file
+diff --git a/src/NetLights.Core/packages.publish.lock.json b/src/NetLights.Core/packages.publish.lock.json
+new file mode 100644
+--- /dev/null
++++ b/src/NetLights.Core/packages.publish.lock.json
+@@ -0,0 +1,14 @@
++{
++  "version": 2,
++  "dependencies": {
++    "net10.0": {
++      "Microsoft.NET.ILLink.Tasks": {
++        "type": "Direct",
++        "requested": "[10.0.8, )",
++        "resolved": "10.0.8",
++        "contentHash": "dVbSXGIFNR5nZcv2tOLoWI+a9T4jtFd77IYjuND+QVe360qWgAF7H0WtoopYhRw/+SgpGUTyrkrh+65+ClNnfw=="
++      }
++    },
++    "net10.0/win-x64": {}
++  }
++}
+\ No newline at end of file
+diff --git a/src/NetLights.Networking/packages.publish.lock.json b/src/NetLights.Networking/packages.publish.lock.json
+new file mode 100644
+--- /dev/null
++++ b/src/NetLights.Networking/packages.publish.lock.json
+@@ -0,0 +1,17 @@
++{
++  "version": 2,
++  "dependencies": {
++    "net10.0": {
++      "Microsoft.NET.ILLink.Tasks": {
++        "type": "Direct",
++        "requested": "[10.0.8, )",
++        "resolved": "10.0.8",
++        "contentHash": "dVbSXGIFNR5nZcv2tOLoWI+a9T4jtFd77IYjuND+QVe360qWgAF7H0WtoopYhRw/+SgpGUTyrkrh+65+ClNnfw=="
++      },
++      "netlights.core": {
++        "type": "Project"
++      }
++    },
++    "net10.0/win-x64": {}
++  }
++}
+\ No newline at end of file
+diff --git a/src/NetLights.UpdateAgent/Program.cs b/src/NetLights.UpdateAgent/Program.cs
+--- a/src/NetLights.UpdateAgent/Program.cs
++++ b/src/NetLights.UpdateAgent/Program.cs
+@@ -1,4 +1,9 @@
+ using System.Diagnostics;
++using System.Security.Cryptography;
++using System.Runtime.InteropServices;
++using System.Text;
++using System.Text.Json;
++using Microsoft.Win32.SafeHandles;
+ using NetLights.Updates;
+ 
+ namespace NetLights.UpdateAgent;
+@@ -9,10 +14,14 @@
+     TimeSpan InstallerStopWait,
+     TimeSpan HealthSignalWait,
+     TimeSpan RestartLivenessWait,
+-    IReadOnlyDictionary<string, string> ChildEnvironment);
++    IReadOnlyDictionary<string, string> ChildEnvironment,
++    Action<Process>? ChildStarted = null,
++    Func<string, bool>? OwnsRegistration = null);
+ 
+ internal static class Program
+ {
++    internal const int InstallationBusyExitCode = 10;
++
+     private static int Main(string[] args)
+         => Run(args, Path.Combine(
+             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+@@ -24,14 +33,67 @@
+ 
+     private static int Run(string[] args, string updatesRoot, UpdateAgentTestOptions? testOptions)
+     {
++        if (args.Length > 0 && args[0] == "--complete-manual-install")
++            return CompleteManualInstall(args[1..], updatesRoot);
++        Dictionary<string, string> parsed = Parse(args);
++        if (!parsed.TryGetValue("restart", out string? installedExe)
++            || !UpdatePolicy.IsSafeRestartPath(installedExe)) return 2;
++
++        if (!UpdatePolicy.IsRegisteredInstallation(installedExe, testOptions?.OwnsRegistration)) return 12;
++
++        // Inno's own mutex ends before health verification and rollback. Keep one
++        // owner for the whole transaction, including diagnostics and cleanup.
++        string root;
++        try { root = Path.GetFullPath(updatesRoot); }
++        catch (Exception ex) when (ex is ArgumentException or NotSupportedException) { return 2; }
++        Mutex? installationGuard = null;
++        bool ownsGuard = false;
++        string? transactionMarker = null;
++        try
++        {
++            string canonical = CanonicalInstallationPath(installedExe);
++            string identity = InstallationIdentity(canonical);
++            installationGuard = new Mutex(false, @"Global\NetLights.UpdateInstallation." + identity);
++            try { ownsGuard = installationGuard.WaitOne(0); }
++            catch (AbandonedMutexException)
++            {
++                // The previous owner may have left an installer child alive.
++                installationGuard.ReleaseMutex();
++                installationGuard.Dispose();
++                return 11;
++            }
++            if (ownsGuard)
++            {
++                string marker = Path.Combine(root, "active-" + identity + ".json");
++                Directory.CreateDirectory(root);
++                using FileStream stream = new(marker, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
++                // A durable marker survives disappearance of the last mutex handle.
++                // Existing or unreadable markers are never repaired automatically.
++                transactionMarker = marker;
++                JsonSerializer.Serialize(stream, new { Version = 2, InstalledExecutable = canonical });
++                stream.Flush(flushToDisk: true);
++            }
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
++        {
++            if (ownsGuard) installationGuard?.ReleaseMutex();
++            installationGuard?.Dispose();
++            return 11;
++        }
++        if (!ownsGuard)
++        {
++            installationGuard.Dispose();
++            return InstallationBusyExitCode;
++        }
++
+         InstallationSnapshot? activeBackup = null;
+         Process? activeInstaller = null;
+         FileStream? installerReadLock = null;
+-        string root = Path.GetFullPath(updatesRoot);
++        bool installationCommitted = false;
++        bool installerStarted = false;
+         var store = new PendingUpdateStore(root);
+         try
+         {
+-            Dictionary<string, string> parsed = Parse(args);
+             if (!parsed.TryGetValue("parent", out string? parentText)
+                 || !int.TryParse(parentText, out int parentId)
+                 || !parsed.TryGetValue("pending", out string? installer)
+@@ -43,7 +105,7 @@
+             store.WritePhase("agent-start");
+             if (!File.Exists(installer))
+             {
+-                store.WriteResult("unknown", false, "Файл установщика не найден.");
++                TryWriteResult(store, "unknown", false, "Файл установщика не найден.");
+                 return 3;
+             }
+ 
+@@ -51,7 +113,7 @@
+             string fullInstaller = Path.GetFullPath(installer);
+             if (!UpdatePolicy.IsInsideRoot(allowedRoot, fullInstaller))
+             {
+-                store.WriteResult("unknown", false, "Путь установщика вне каталога обновлений.");
++                TryWriteResult(store, "unknown", false, "Путь установщика вне каталога обновлений.");
+                 return 4;
+             }
+ 
+@@ -62,8 +124,9 @@
+                 installerReadLock?.Dispose();
+                 installerReadLock = null;
+                 CleanupInstaller(fullInstaller, allowedRoot);
+-                bool recovered = Restart(parsed, testOptions: testOptions);
+-                store.WriteResult("unknown", false, "Размер установщика вне допустимых пределов."
++                bool guarded = RecordRecoveryFailure(store, parsed, "Размер установщика вне допустимых пределов.");
++                bool recovered = Restart(parsed, testOptions: testOptions, suppressAutomaticUpdates: !guarded);
++                TryWriteResult(store, "unknown", false, "Размер установщика вне допустимых пределов."
+                     + (recovered ? " Приложение запущено." : " Не удалось подтвердить запуск приложения."));
+                 return 9;
+             }
+@@ -81,26 +144,47 @@
+             if (!WaitForParent(parentId, testOptions?.ParentWait ?? TimeSpan.FromSeconds(60)))
+             {
+                 store.WritePhase("parent-timeout");
+-                store.WriteResult("unknown", false, "Родительский процесс не завершился.");
++                TryWriteResult(store, "unknown", false, "Родительский процесс не завершился.");
+                 return 6;
+             }
+ 
++            if (!UpdatePolicy.IsRegisteredInstallation(installedExe, testOptions?.OwnsRegistration))
++            {
++                store.WritePhase("registration-ownership-changed");
++                bool guarded = RecordRecoveryFailure(store, parsed, UpdatePolicy.RegistrationMismatchNotice);
++                CleanupInstaller(fullInstaller, allowedRoot);
++                bool recovered = Restart(parsed, testOptions: testOptions, suppressAutomaticUpdates: !guarded);
++                TryWriteResult(store, "unknown", false, UpdatePolicy.RegistrationMismatchNotice
++                    + (recovered ? " Приложение запущено." : " Не удалось подтвердить запуск приложения."));
++                return 12;
++            }
++
+             installerReadLock = new FileStream(fullInstaller, FileMode.Open, FileAccess.Read, FileShare.Read);
+-            string actual = IntegrityVerifier.Sha256Hex(installerReadLock);
++            if (installerReadLock.Length <= 0 || installerReadLock.Length > UpdatePolicy.MaxInstallerBytes)
++            {
++                installerReadLock.Dispose(); installerReadLock = null;
++                store.WritePhase("locked-installer-size-rejected");
++                CleanupInstaller(fullInstaller, allowedRoot);
++                bool guarded = RecordRecoveryFailure(store, parsed, "Размер установщика после ожидания вне допустимых пределов.");
++                bool recovered = Restart(parsed, testOptions: testOptions, suppressAutomaticUpdates: !guarded);
++                TryWriteResult(store, "unknown", false, "Размер установщика после ожидания вне допустимых пределов."
++                    + (recovered ? " Приложение запущено." : " Не удалось подтвердить запуск приложения."));
++                return 9;
++            }
++            string actual = HashLockedInstaller(installerReadLock);
+             if (!IntegrityVerifier.Matches(sha256, actual))
+             {
+                 installerReadLock?.Dispose();
+                 installerReadLock = null;
+                 store.WritePhase("installer-hash-failed");
+                 CleanupInstaller(fullInstaller, allowedRoot);
+-                bool recovered = Restart(parsed, testOptions: testOptions);
+-                store.WriteResult("unknown", false, "Контрольная сумма установщика не совпала."
++                bool guarded = RecordRecoveryFailure(store, parsed, "Контрольная сумма установщика не совпала.");
++                bool recovered = Restart(parsed, testOptions: testOptions, suppressAutomaticUpdates: !guarded);
++                TryWriteResult(store, "unknown", false, "Контрольная сумма установщика не совпала."
+                     + (recovered ? " Приложение запущено, работа монитора не подтверждена." : " Не удалось подтвердить запуск приложения."));
+                 return 5;
+             }
+ 
+-            if (!parsed.TryGetValue("restart", out string? installedExe))
+-                return 2;
+             InstallationSnapshot backup = InstallationSnapshot.Create(installedExe, allowedRoot);
+             activeBackup = backup;
+             store.WritePhase("installed-files-backed-up");
+@@ -111,10 +195,12 @@
+             install.StartInfo.ArgumentList.Add("/NORESTART");
+             install.StartInfo.ArgumentList.Add("/SUPPRESSMSGBOXES");
+             install.StartInfo.ArgumentList.Add("/NETLIGHTSUPDATE");
++            install.StartInfo.ArgumentList.Add("/DIR=" + Path.GetDirectoryName(Path.GetFullPath(installedExe))!);
+             install.StartInfo.UseShellExecute = false;
+             install.StartInfo.CreateNoWindow = true;
+             ApplyTestEnvironment(install.StartInfo, testOptions);
+-            install.Start();
++            if (!install.Start()) throw new InvalidOperationException("Installer did not start.");
++            installerStarted = true;
+             store.WritePhase("installer-started");
+             if (!install.WaitForExit(ToTimeoutMilliseconds(testOptions?.InstallerWait ?? TimeSpan.FromMinutes(10))))
+             {
+@@ -135,9 +221,11 @@
+                 installerReadLock.Dispose();
+                 installerReadLock = null;
+                 CleanupInstaller(fullInstaller, allowedRoot);
+-                bool recovered = restored && Restart(parsed, testOptions: testOptions);
+-                store.WriteResult("unknown", false, "Установщик не завершился вовремя."
+-                    + (restored ? " Предыдущие файлы восстановлены." : " Восстановление предыдущих файлов не подтверждено.")
++                bool guarded = RecordRecoveryFailure(store, parsed, "Установщик не завершился вовремя."
++                    + DescribeRestoration(backup, restored));
++                bool recovered = backup.FilesRestored && Restart(parsed, testOptions: testOptions, suppressAutomaticUpdates: !guarded);
++                TryWriteResult(store, "unknown", false, "Установщик не завершился вовремя."
++                    + DescribeRestoration(backup, restored)
+                     + (recovered ? " Приложение запущено, работа монитора не подтверждена." : " Не удалось подтвердить запуск приложения."));
+                 return 7;
+             }
+@@ -146,13 +234,18 @@
+             bool restarted = versionOk && Restart(parsed, requireMonitorSignal: true, testOptions: testOptions);
+             store.WritePhase(restarted ? "process-restarted" : "process-restart-failed");
+             bool ok = versionOk && restarted;
++            installationCommitted = ok;
+             bool restoredPrevious = false;
+             bool recoveredPrevious = false;
+             if (!ok)
+             {
+                 restoredPrevious = RestorePreviousInstallation(backup, parsed, testOptions);
+                 store.WritePhase(restoredPrevious ? "rollback-complete" : "rollback-failed");
+-                recoveredPrevious = restoredPrevious && Restart(parsed, testOptions: testOptions);
++                bool guarded = RecordRecoveryFailure(store, parsed,
++                    install.ExitCode != 0 ? "Установщик завершился с ошибкой " + install.ExitCode
++                        : !versionOk ? "Установщик завершился, но ожидаемая версия не найдена."
++                        : "Новая версия установлена, но запуск мониторинга не подтвержден.");
++                recoveredPrevious = backup.FilesRestored && Restart(parsed, testOptions: testOptions, suppressAutomaticUpdates: !guarded);
+                 store.WritePhase(recoveredPrevious ? "previous-process-restarted" : "previous-process-restart-failed");
+             }
+             string resultMessage = install.ExitCode != 0
+@@ -161,12 +254,16 @@
+                 : !restarted ? "Новая версия установлена, но запуск мониторинга не подтвержден."
+                 : "Установлено, мониторинг запущен.";
+             if (!ok)
+-                resultMessage += (restoredPrevious ? " Предыдущие файлы восстановлены." : " Восстановление предыдущих файлов не подтверждено.")
++                resultMessage += DescribeRestoration(backup, restoredPrevious)
+                     + (recoveredPrevious ? " Предыдущая версия запущена, работа монитора не подтверждена." : " Запуск предыдущей версии не подтвержден.");
+-            store.WriteResult(Path.GetFileName(fullInstaller), ok, resultMessage);
++            TryWriteResult(store, Path.GetFileName(fullInstaller), ok, resultMessage);
+             if (ok)
+             {
+-                store.ClearPending();
++                try { store.ClearPending(); }
++                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
++                {
++                    store.WritePhase("pending-cleanup-failed");
++                }
+             }
+ 
+             installerReadLock?.Dispose();
+@@ -177,6 +274,13 @@
+         }
+         catch (Exception ex)
+         {
++            // Once the expected version is healthy, staging/diagnostic cleanup is
++            // outside the install transaction and must never trigger recovery.
++            if (installationCommitted)
++            {
++                store.WritePhase("post-success-cleanup-failed");
++                return 0;
++            }
+             installerReadLock?.Dispose();
+             installerReadLock = null;
+             bool restored = activeBackup is null;
+@@ -201,9 +305,10 @@
+                 else
+                     activeBackup.KeepForRecovery();
+             }
++            bool guarded = false;
+             try
+             {
+-                store.WriteResult("unknown", false, ex.GetType().Name);
++                guarded = RecordRecoveryFailure(store, Parse(args), ex.GetType().Name);
+             }
+             catch (Exception)
+             {
+@@ -220,15 +325,15 @@
+             catch (Exception) { }
+ 
+             bool recovered = false;
+-            try { recovered = restored && Restart(Parse(args), testOptions: testOptions); }
++            try { recovered = (restored || activeBackup?.FilesRestored == true) && Restart(Parse(args), testOptions: testOptions, suppressAutomaticUpdates: !guarded); }
+             catch (Exception) { }
+             try
+             {
+-                string recovery = (restored ? " Предыдущие файлы восстановлены." : " Восстановление предыдущих файлов не подтверждено.")
++                string recovery = DescribeRestoration(activeBackup, restored)
+                     + (recovered
+                     ? " Приложение перезапущено, работа монитора не подтверждена."
+                     : " Запуск приложения не подтвержден.");
+-                store.WriteResult("unknown", false, ex.GetType().Name + "." + recovery);
++                TryWriteResult(store, "unknown", false, ex.GetType().Name + "." + recovery);
+             }
+             catch (Exception) { }
+ 
+@@ -236,11 +341,167 @@
+         }
+         finally
+         {
+-            installerReadLock?.Dispose();
+-            activeInstaller?.Dispose();
+-            activeBackup?.Dispose();
+-        }
+-    }
++            try
++            {
++                bool installerStopped = !installerStarted;
++                if (installerStarted)
++                {
++                    try { installerStopped = activeInstaller?.HasExited == true; }
++                    catch (InvalidOperationException) { }
++                }
++                if (transactionMarker is not null && (!installerStarted
++                    || installerStopped && (installationCommitted || activeBackup?.FilesRestored == true)))
++                {
++                    try { File.Delete(transactionMarker); }
++                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
++                    {
++                        store.WritePhase("transaction-marker-cleanup-failed");
++                    }
++                }
++                installerReadLock?.Dispose();
++                activeInstaller?.Dispose();
++                activeBackup?.Dispose();
++            }
++            finally
++            {
++                installationGuard.ReleaseMutex();
++                installationGuard.Dispose();
++            }
++        }
++    }
++
++    internal static string CanonicalInstallationPath(string executable) => UpdatePolicy.CanonicalInstallationPath(executable);
++    internal static string InstallationIdentity(string executable) => UpdatePolicy.InstallationIdentity(executable);
++
++    private static int CompleteManualInstall(string[] args, string updatesRoot)
++    {
++        Mutex? guard = null;
++        bool owned = false;
++        try
++        {
++            Dictionary<string, string> parsed = Parse(args);
++            if (!parsed.TryGetValue("restart", out string? executable) || !UpdatePolicy.IsSafeRestartPath(executable)) return 2;
++            string directory = Path.GetDirectoryName(Path.GetFullPath(executable))!;
++            string expectedAgent = Path.Combine(directory, "NetLights.UpdateAgent.exe");
++            if (!File.Exists(Path.Combine(directory, "unins000.exe")) || Environment.ProcessPath is not string processPath
++                || !string.Equals(CanonicalInstallationPath(processPath), CanonicalInstallationPath(expectedAgent), StringComparison.OrdinalIgnoreCase)) return 2;
++            string root = Path.GetFullPath(updatesRoot);
++            EnsureUnlinkedPath(directory);
++            EnsureUnlinkedPath(executable);
++            EnsureUnlinkedPath(expectedAgent);
++            EnsureUnlinkedPath(Path.Combine(directory, "unins000.exe"));
++            EnsureUnlinkedPath(root);
++            string canonical = CanonicalInstallationPath(executable);
++            string identity = InstallationIdentity(canonical);
++            guard = new Mutex(false, @"Global\NetLights.UpdateInstallation." + identity);
++            try { owned = guard.WaitOne(0); }
++            catch (AbandonedMutexException) { owned = true; return 11; }
++            if (!owned) return InstallationBusyExitCode;
++            string marker = Path.Combine(root, "active-" + identity + ".json");
++            EnsureUnlinkedPath(marker);
++            if (!File.Exists(marker)) return 0;
++            using (FileStream input = new(marker, FileMode.Open, FileAccess.Read, FileShare.Read))
++            {
++                if (input.Length == 0 || input.Length > 4096) return 11;
++                using JsonDocument document = JsonDocument.Parse(input, new JsonDocumentOptions { MaxDepth = 4 });
++                JsonElement value = document.RootElement;
++                if (value.ValueKind != JsonValueKind.Object || value.EnumerateObject().Count() != 2
++                    || !value.TryGetProperty("Version", out JsonElement version) || !version.TryGetInt32(out int format) || format != 2
++                    || !value.TryGetProperty("InstalledExecutable", out JsonElement target) || target.ValueKind != JsonValueKind.String
++                    || !SameInstallationPath(target.GetString()!, canonical)) return 11;
++            }
++            EnsureUnlinkedPath(root);
++            EnsureUnlinkedPath(marker);
++            File.Delete(marker);
++            return 0;
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException
++            or ArgumentException or NotSupportedException or WaitHandleCannotBeOpenedException)
++        {
++            return 11;
++        }
++        finally
++        {
++            if (owned) guard?.ReleaseMutex();
++            guard?.Dispose();
++        }
++    }
++
++    internal static bool SameInstallationPath(string left, string right)
++        => OperatingSystem.IsWindows()
++            ? CompareStringOrdinal(left, left.Length, right, right.Length, true) == 2
++            : string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
++
++    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
++    private static extern int CompareStringOrdinal(string left, int leftLength, string right, int rightLength,
++        [MarshalAs(UnmanagedType.Bool)] bool ignoreCase);
++
++    private static void EnsureUnlinkedPath(string path)
++    {
++        for (string? current = Path.GetFullPath(path); current is not null; current = Path.GetDirectoryName(current))
++            if ((File.Exists(current) || Directory.Exists(current)) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
++                throw new IOException("Update transaction path contains a link.");
++    }
++
++
++    private static string HashLockedInstaller(FileStream input)
++    {
++        long length = input.Length;
++        if (length <= 0 || length > UpdatePolicy.MaxInstallerBytes)
++            throw new InvalidDataException("Locked installer exceeds its size limit.");
++        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
++        byte[] buffer = new byte[32768];
++        long total = 0;
++        int count;
++        while ((count = input.Read(buffer, 0, (int)Math.Min(buffer.Length, UpdatePolicy.MaxInstallerBytes - total + 1))) != 0)
++        {
++            total += count;
++            if (total > UpdatePolicy.MaxInstallerBytes) throw new InvalidDataException("Installer grew while hashing.");
++            hash.AppendData(buffer, 0, count);
++        }
++        if (total != length) throw new InvalidDataException("Installer length changed while hashing.");
++        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
++    }
++
++    private static bool RecordRecoveryFailure(PendingUpdateStore store, Dictionary<string, string> parsed, string message)
++    {
++        string candidate = parsed.TryGetValue("pending", out string? installer) ? Path.GetFileName(installer) : "unknown";
++        bool guarded = false;
++        const string prefix = "NetLights-Setup-win-x64-";
++        if (candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
++            && candidate.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
++            && Version.TryParse(candidate[prefix.Length..^4], out _)
++            && parsed.TryGetValue("sha256", out string? hash))
++        {
++            try
++            {
++                new UpdateRetryStore(store.Root).RecordFailure(candidate[prefix.Length..^4], hash);
++                guarded = true;
++            }
++            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
++            {
++                store.WritePhase("retry-guard-write-failed");
++            }
++        }
++        TryWriteResult(store, candidate, false, message);
++        return guarded;
++    }
++
++    private static void TryWriteResult(PendingUpdateStore store, string version, bool success, string message)
++    {
++        try { store.WriteResult(version, success, message); }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
++        {
++            // Diagnostic storage failure must not prevent recording the independent retry guard
++            // or turn a confirmed successful installation into a rollback.
++            store.WritePhase("result-write-failed");
++        }
++    }
++
++    internal static string DescribeRestoration(InstallationSnapshot? backup, bool complete)
++        => backup is null ? " Установка не изменялась." : complete ? " Предыдущая установка восстановлена." : backup.FilesRestored
++            ? " Файлы восстановлены, но регистрация установки или ярлык не восстановлены полностью."
++            : " Восстановление предыдущих файлов не подтверждено.";
+ 
+     private static bool RestorePreviousInstallation(InstallationSnapshot backup,
+         Dictionary<string, string> parsed, UpdateAgentTestOptions? testOptions)
+@@ -304,7 +565,8 @@
+     private static bool Restart(
+         Dictionary<string, string> parsed,
+         bool requireMonitorSignal = false,
+-        UpdateAgentTestOptions? testOptions = null)
++        UpdateAgentTestOptions? testOptions = null,
++        bool suppressAutomaticUpdates = false)
+     {
+         if (!parsed.TryGetValue("restart", out string? restart) || !UpdatePolicy.IsSafeRestartPath(restart))
+         {
+@@ -323,6 +585,8 @@
+             next.StartInfo.WorkingDirectory = Path.GetDirectoryName(fullRestart);
+             next.StartInfo.UseShellExecute = false;
+             ApplyTestEnvironment(next.StartInfo, testOptions);
++            if (suppressAutomaticUpdates)
++                next.StartInfo.ArgumentList.Add("--skip-automatic-updates");
+             if (healthName is not null)
+             {
+                 next.StartInfo.ArgumentList.Add(UpdateHealthSignal.ArgumentName);
+@@ -330,6 +594,7 @@
+             }
+ 
+             if (!next.Start()) return false;
++            testOptions?.ChildStarted?.Invoke(next);
+             if (health is not null && !health.WaitOne(testOptions?.HealthSignalWait ?? TimeSpan.FromSeconds(20)))
+             {
+                 try { if (!next.HasExited) next.Kill(entireProcessTree: true); }
+diff --git a/src/NetLights.UpdateAgent/packages.publish.lock.json b/src/NetLights.UpdateAgent/packages.publish.lock.json
+new file mode 100644
+--- /dev/null
++++ b/src/NetLights.UpdateAgent/packages.publish.lock.json
+@@ -0,0 +1,17 @@
++{
++  "version": 2,
++  "dependencies": {
++    "net10.0": {
++      "Microsoft.NET.ILLink.Tasks": {
++        "type": "Direct",
++        "requested": "[10.0.8, )",
++        "resolved": "10.0.8",
++        "contentHash": "dVbSXGIFNR5nZcv2tOLoWI+a9T4jtFd77IYjuND+QVe360qWgAF7H0WtoopYhRw/+SgpGUTyrkrh+65+ClNnfw=="
++      },
++      "netlights.updates": {
++        "type": "Project"
++      }
++    },
++    "net10.0/win-x64": {}
++  }
++}
+\ No newline at end of file
+diff --git a/src/NetLights.Updates/InstallationSnapshot.cs b/src/NetLights.Updates/InstallationSnapshot.cs
+--- a/src/NetLights.Updates/InstallationSnapshot.cs
++++ b/src/NetLights.Updates/InstallationSnapshot.cs
+@@ -5,25 +5,35 @@
+ {
+     private const long MaxBytes = 256L * 1024 * 1024;
+     private const int MaxFiles = 100;
++    private const string PayloadDirectory = "payload";
+     private readonly string _installationDirectory;
+     private readonly string _backupDirectory;
+     private readonly string[] _relativeFiles;
+     private readonly HashSet<string> _relativeDirectories;
+     private bool _restorationFailed;
++    private readonly IInstallationMetadataSnapshot _metadata;
++
++    public bool FilesRestored { get; private set; }
+ 
+     private InstallationSnapshot(
+         string installationDirectory,
+         string backupDirectory,
+         string[] relativeFiles,
+-        IEnumerable<string> relativeDirectories)
++        IEnumerable<string> relativeDirectories,
++        IInstallationMetadataSnapshot metadata)
+     {
+         _installationDirectory = installationDirectory;
+         _backupDirectory = backupDirectory;
+         _relativeFiles = relativeFiles;
+         _relativeDirectories = new HashSet<string>(relativeDirectories, StringComparer.OrdinalIgnoreCase);
++        _metadata = metadata;
+     }
+ 
+     public static InstallationSnapshot Create(string executablePath, string updateRoot)
++        => Create(executablePath, updateRoot, OwnedInstallationMetadata.Capture);
++
++    internal static InstallationSnapshot Create(string executablePath, string updateRoot,
++        Func<string, IInstallationMetadataSnapshot> captureMetadata)
+     {
+         string executable = Path.GetFullPath(executablePath);
+         if (!UpdatePolicy.IsSafeRestartPath(executable))
+@@ -32,6 +42,7 @@
+         EnsureSafeDirectoryPath(installationDirectory);
+         if (!File.Exists(Path.Combine(installationDirectory, "unins000.exe")))
+             throw new InvalidOperationException("Installation cannot be identified.");
++        IInstallationMetadataSnapshot metadata = captureMetadata(executable);
+ 
+         string root = Path.GetFullPath(updateRoot);
+         // Staging cleanup only owns GUID directories directly under updateRoot.
+@@ -55,11 +66,12 @@
+         {
+             foreach (string relative in files)
+             {
+-                string destination = Path.Combine(backupDirectory, relative);
++                string destination = Path.Combine(backupDirectory, PayloadDirectory, relative);
+                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                 File.Copy(Path.Combine(installationDirectory, relative), destination);
+             }
+-            return new InstallationSnapshot(installationDirectory, backupDirectory, files, directories);
++            metadata.WriteRecoveryCopy(backupDirectory);
++            return new InstallationSnapshot(installationDirectory, backupDirectory, files, directories, metadata);
+         }
+         catch
+         {
+@@ -70,10 +82,12 @@
+ 
+     public bool Restore()
+     {
++        FilesRestored = false;
+         try
+         {
+-            EnsureSafeDirectoryPath(_installationDirectory);
+             EnsureSafeDirectoryPath(_backupDirectory);
++            EnsureSafeDirectoryPath(Path.Combine(_backupDirectory, PayloadDirectory));
++            RestoreInstallationDirectory(_installationDirectory);
+             var originalFiles = new HashSet<string>(_relativeFiles, StringComparer.OrdinalIgnoreCase);
+             foreach (string relative in EnumerateRegularFiles(_installationDirectory))
+             {
+@@ -86,10 +100,19 @@
+                 File.Delete(addedFile);
+             }
+ 
++            // Remove empty installer-added directories before restoring an old file
++            // at the same path, then recreate original directories (including empty ones).
++            RemoveEmptyDirectories(_installationDirectory, _relativeDirectories);
++            foreach (string relative in _relativeDirectories)
++            {
++                string target = Path.Combine(_installationDirectory, relative);
++                EnsureNoLinkedAncestor(_installationDirectory, target);
++                Directory.CreateDirectory(target);
++            }
+             foreach (string relative in _relativeFiles)
+             {
+                 string destination = Path.Combine(_installationDirectory, relative);
+-                string source = Path.Combine(_backupDirectory, relative);
++                string source = Path.Combine(_backupDirectory, PayloadDirectory, relative);
+                 EnsureSafeDirectoryPath(_installationDirectory);
+                 EnsureNoLinkedAncestor(_installationDirectory, destination);
+                 EnsureSafeDirectoryPath(_backupDirectory);
+@@ -99,7 +122,10 @@
+             }
+             EnsureSafeDirectoryPath(_installationDirectory);
+             RemoveEmptyDirectories(_installationDirectory, _relativeDirectories);
+-            return true;
++            FilesRestored = true;
++            bool complete = _metadata.Restore();
++            if (!complete) _restorationFailed = true;
++            return complete;
+         }
+         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+         {
+@@ -148,7 +174,7 @@
+ 
+     public void KeepForRecovery() => _restorationFailed = true;
+ 
+-    private static string[] EnumerateRegularFiles(string root)
++    private static string[] EnumerateRegularFiles(string root, int limit = MaxFiles)
+     {
+         EnsureSafeDirectoryPath(root);
+         var files = new List<string>();
+@@ -168,12 +194,31 @@
+                 else
+                 {
+                     files.Add(Path.GetRelativePath(root, entry));
+-                    if (files.Count > MaxFiles)
++                    if (files.Count > limit)
+                         throw new InvalidDataException("Installation file count exceeds the backup limit.");
+                 }
+             }
+         }
+         return files.ToArray();
++    }
++
++    private static void RestoreInstallationDirectory(string path)
++    {
++        // The installer may have removed the complete captured target. Inspect all
++        // remaining ancestors before recreating exactly that directory; never follow
++        // a replacement junction, dangling link, or a file occupying an ancestor.
++        string fullPath = Path.GetFullPath(path);
++        for (string? current = fullPath; current is not null; current = Path.GetDirectoryName(current))
++        {
++            FileAttributes attributes;
++            try { attributes = File.GetAttributes(current); }
++            catch (FileNotFoundException) { continue; }
++            catch (DirectoryNotFoundException) { continue; }
++            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != FileAttributes.Directory)
++                throw new IOException("Installation ancestor was replaced or linked.");
++        }
++        Directory.CreateDirectory(fullPath);
++        EnsureSafeDirectoryPath(fullPath);
+     }
+ 
+     private static void EnsureSafeDirectoryPath(string path)
+@@ -212,7 +257,7 @@
+         try
+         {
+             EnsureSafeDirectoryPath(_backupDirectory);
+-            string[] files = EnumerateRegularFiles(_backupDirectory);
++            string[] files = EnumerateRegularFiles(_backupDirectory, MaxFiles + 1);
+             string[] directories = EnumerateDirectories(_backupDirectory)
+                 .Select(relative => Path.Combine(_backupDirectory, relative))
+                 .OrderByDescending(path => path.Length)
+diff --git a/src/NetLights.Updates/OwnedInstallationMetadata.cs b/src/NetLights.Updates/OwnedInstallationMetadata.cs
+new file mode 100644
+--- /dev/null
++++ b/src/NetLights.Updates/OwnedInstallationMetadata.cs
+@@ -0,0 +1,245 @@
++using Microsoft.Win32;
++using Microsoft.Win32.SafeHandles;
++using System.Runtime.InteropServices;
++using System.Runtime.Versioning;
++using System.Text.Json;
++
++namespace NetLights.Updates;
++
++internal interface IInstallationMetadataSnapshot
++{
++    bool Restore();
++    void WriteRecoveryCopy(string directory);
++}
++
++/// <summary>Only the per-user Inno registration and shortcut owned by this installation.</summary>
++internal sealed class OwnedInstallationMetadata : IInstallationMetadataSnapshot
++{
++    internal const string ProductKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\{7C2B1A9E-4F31-4A6D-9C2E-1B8E5D2A0F11}_is1";
++    private readonly string _executable;
++    private readonly string _keyPath;
++    private readonly Dictionary<string, SavedValue>? _values;
++    private readonly string? _shortcutPath;
++    private readonly byte[]? _shortcut;
++    private readonly Func<string, string> _readShortcutTarget;
++    private sealed record SavedValue(RegistryValueKind Kind, object Value);
++
++    private OwnedInstallationMetadata(string executable, string keyPath, Dictionary<string, SavedValue>? values,
++        string? shortcutPath, byte[]? shortcut, Func<string, string> readShortcutTarget)
++    {
++        _executable = executable;
++        _keyPath = keyPath;
++        _values = values;
++        _shortcutPath = shortcutPath;
++        _shortcut = shortcut;
++        _readShortcutTarget = readShortcutTarget;
++    }
++
++    internal static bool HasOwnedRegistration(string executable)
++    {
++        if (!OperatingSystem.IsWindows()) return false;
++        using RegistryKey? key = Registry.CurrentUser.OpenSubKey(ProductKey, writable: false);
++        return key is not null && IsOwned(key, Path.GetFullPath(executable));
++    }
++
++    internal static IInstallationMetadataSnapshot Capture(string executable)
++        => OperatingSystem.IsWindows()
++            ? CaptureWindows(executable, ProductKey, Environment.GetFolderPath(Environment.SpecialFolder.Programs))
++            : new OwnedInstallationMetadata(executable, ProductKey, null, null, null, _ => "");
++
++    [SupportedOSPlatform("windows")]
++    internal static IInstallationMetadataSnapshot CaptureWindows(string executable, string keyPath,
++        string programsDirectory, Func<string, string>? readShortcutTarget = null)
++    {
++        executable = Path.GetFullPath(executable);
++        readShortcutTarget ??= ReadShortcutTarget;
++        using RegistryKey? key = Registry.CurrentUser.OpenSubKey(keyPath);
++        // A portable fixture or another installation must not acquire ownership of this key.
++        if (key is null || !IsOwned(key, executable))
++            return new OwnedInstallationMetadata(executable, keyPath, null, null, null, readShortcutTarget);
++        Dictionary<string, SavedValue> values = ReadValues(key);
++        string group = key.GetValue("Inno Setup: Icon Group", "Net Lights", RegistryValueOptions.DoNotExpandEnvironmentNames) as string
++            ?? throw new InvalidDataException("Invalid installed shortcut group.");
++        if (Path.IsPathRooted(group) || group.Split(['\\', '/']).Any(part => part is "" or "." or ".."
++            || part.EndsWith(' ') || part.EndsWith('.') || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0))
++            throw new InvalidDataException("Invalid installed shortcut group.");
++        string shortcutPath = Path.GetFullPath(Path.Combine(programsDirectory, group, "Net Lights.lnk"));
++        if (!UpdatePolicy.IsInsideRoot(Path.GetFullPath(programsDirectory), shortcutPath))
++            throw new InvalidDataException("Shortcut is outside the user programs directory.");
++        EnsureUnlinkedPath(shortcutPath);
++        byte[]? shortcut = null;
++        if (File.Exists(shortcutPath))
++        {
++            if (!SamePath(readShortcutTarget(shortcutPath), executable))
++                throw new InvalidDataException("Installed shortcut belongs to another application.");
++            if (new FileInfo(shortcutPath).Length > 256 * 1024)
++                throw new InvalidDataException("Installed shortcut exceeds the backup limit.");
++            shortcut = File.ReadAllBytes(shortcutPath);
++            if (shortcut.Length > 256 * 1024) throw new InvalidDataException("Installed shortcut exceeds the backup limit.");
++        }
++        return new OwnedInstallationMetadata(executable, keyPath, values, shortcutPath, shortcut, readShortcutTarget);
++    }
++
++    public bool Restore()
++    {
++        if (_values is null) return true;
++        if (!OperatingSystem.IsWindows()) return false;
++        try { return RestoreWindows(); }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException
++            or System.Security.SecurityException or COMException or ArgumentException
++            or System.Reflection.TargetInvocationException or InvalidOperationException) { return false; }
++    }
++
++    [SupportedOSPlatform("windows")]
++    private bool RestoreWindows()
++    {
++        // Never overwrite a key reassigned to another installation during the update.
++        using (RegistryKey? current = Registry.CurrentUser.OpenSubKey(_keyPath))
++            if (current is not null && !IsOwned(current, _executable)) return false;
++        if (_shortcutPath is not null)
++        {
++            EnsureUnlinkedPath(_shortcutPath);
++            if (File.Exists(_shortcutPath) && !SamePath(_readShortcutTarget(_shortcutPath), _executable)) return false;
++        }
++        using (RegistryKey key = OpenWritableForRestore(out bool created))
++        {
++            // Validate the writable handle after the external COM call. The key may have
++            // changed ownership since the initial read; a newly created key must be empty.
++            if (created ? key.ValueCount != 0 || key.SubKeyCount != 0 : !IsOwned(key, _executable)) return false;
++            if (key.SubKeyCount != 0 || key.ValueCount > 64) return false;
++            foreach (string name in key.GetValueNames())
++                if (!_values!.ContainsKey(name)) key.DeleteValue(name, throwOnMissingValue: false);
++            foreach ((string name, SavedValue value) in _values!) key.SetValue(name, value.Value, value.Kind);
++        }
++        if (_shortcutPath is not null)
++        {
++            EnsureUnlinkedPath(_shortcutPath);
++            if (_shortcut is null)
++            {
++                // No shortcut was captured. A user who deselected Start Menu
++                // icons may have no group directory at all.
++                if (File.Exists(_shortcutPath)) File.Delete(_shortcutPath);
++            }
++            else
++            {
++                Directory.CreateDirectory(Path.GetDirectoryName(_shortcutPath)!);
++                EnsureUnlinkedPath(_shortcutPath);
++                File.WriteAllBytes(_shortcutPath, _shortcut);
++            }
++        }
++        return true;
++    }
++
++    [SupportedOSPlatform("windows")]
++    private RegistryKey OpenWritableForRestore(out bool created)
++    {
++        RegistryKey? existing = Registry.CurrentUser.OpenSubKey(_keyPath, writable: true);
++        if (existing is not null)
++        {
++            created = false;
++            return existing;
++        }
++        // The disposition distinguishes our new empty key from one created by another
++        // process between OpenSubKey and RegCreateKeyEx.
++        int status = RegCreateKeyEx(Registry.CurrentUser.Handle, _keyPath, 0, null, 0,
++            0x2001F, IntPtr.Zero, out SafeRegistryHandle handle, out int disposition);
++        if (status != 0)
++        {
++            handle.Dispose();
++            throw new IOException("Uninstall registration could not be recreated.", new System.ComponentModel.Win32Exception(status));
++        }
++        created = disposition == 1;
++        try { return RegistryKey.FromHandle(handle); }
++        catch { handle.Dispose(); throw; }
++    }
++
++    [DllImport("advapi32.dll", EntryPoint = "RegCreateKeyExW", CharSet = CharSet.Unicode)]
++    private static extern int RegCreateKeyEx(SafeRegistryHandle key, string subKey, int reserved, string? keyClass,
++        int options, int desiredAccess, IntPtr securityAttributes, out SafeRegistryHandle result, out int disposition);
++
++    public void WriteRecoveryCopy(string directory)
++    {
++        if (_values is null) return;
++        using FileStream stream = new(Path.Combine(directory, "installation-metadata.json"), FileMode.CreateNew, FileAccess.Write, FileShare.None);
++        JsonSerializer.Serialize(stream, new
++        {
++            Key = _keyPath, Values = _values, ShortcutPath = _shortcutPath,
++            Shortcut = _shortcut is null ? null : Convert.ToBase64String(_shortcut)
++        });
++        stream.Flush(flushToDisk: true);
++    }
++
++    [SupportedOSPlatform("windows")]
++    private static bool IsOwned(RegistryKey key, string executable)
++    {
++        if (key.GetValue("InstallLocation", null, RegistryValueOptions.DoNotExpandEnvironmentNames) is not string location
++            || !SamePath(location, Path.GetDirectoryName(executable)!)) return false;
++        if (key.GetValue("UninstallString", null, RegistryValueOptions.DoNotExpandEnvironmentNames) is not string command
++            || command.Length > 8192) return false;
++        // Inno writes the quoted uninstall executable without arguments.
++        string uninstaller = command.Trim().Trim('"');
++        return SamePath(Path.GetDirectoryName(uninstaller) ?? "", location)
++            && Path.GetFileName(uninstaller).StartsWith("unins", StringComparison.OrdinalIgnoreCase)
++            && string.Equals(Path.GetExtension(uninstaller), ".exe", StringComparison.OrdinalIgnoreCase);
++    }
++
++    [SupportedOSPlatform("windows")]
++    private static Dictionary<string, SavedValue> ReadValues(RegistryKey key)
++    {
++        if (key.SubKeyCount != 0 || key.ValueCount > 64) throw new InvalidDataException("Uninstall registration exceeds the backup limit.");
++        var values = new Dictionary<string, SavedValue>(StringComparer.OrdinalIgnoreCase);
++        int size = 0;
++        foreach (string name in key.GetValueNames())
++        {
++            if (name.Length > 256) throw new InvalidDataException("Invalid uninstall value name.");
++            RegistryValueKind kind = key.GetValueKind(name);
++            object? value = key.GetValue(name, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
++            int length = (kind, value) switch
++            {
++                (RegistryValueKind.String or RegistryValueKind.ExpandString, string text) when text.Length <= 8192 => text.Length * 2,
++                (RegistryValueKind.DWord, int _) => 4,
++                (RegistryValueKind.QWord, long _) => 8,
++                (RegistryValueKind.Binary, byte[] bytes) when bytes.Length <= 65536 => bytes.Length,
++                (RegistryValueKind.MultiString, string[] strings) when strings.Length <= 64 && strings.All(s => s.Length <= 8192) => strings.Sum(s => s.Length * 2),
++                _ => throw new InvalidDataException("Unsupported uninstall value.")
++            };
++            size = checked(size + length + name.Length * 2);
++            if (size > 128 * 1024) throw new InvalidDataException("Uninstall registration exceeds the backup limit.");
++            values.Add(name, new SavedValue(kind, value!));
++        }
++        return values;
++    }
++
++    private static bool SamePath(string left, string right)
++    {
++        try { return string.Equals(Path.GetFullPath(left).TrimEnd('\\', '/'), Path.GetFullPath(right).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase); }
++        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return false; }
++    }
++
++    private static void EnsureUnlinkedPath(string path)
++    {
++        for (string? current = Path.GetFullPath(path); current is not null; current = Path.GetDirectoryName(current))
++            if ((File.Exists(current) || Directory.Exists(current)) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
++                throw new IOException("Installed metadata contains a linked path.");
++    }
++
++    [SupportedOSPlatform("windows")]
++    private static string ReadShortcutTarget(string path)
++    {
++        object? shell = null;
++        object? shortcut = null;
++        try
++        {
++            Type type = Type.GetTypeFromProgID("WScript.Shell") ?? throw new IOException("Shortcut reader is unavailable.");
++            shell = Activator.CreateInstance(type) ?? throw new IOException("Shortcut reader could not start.");
++            shortcut = type.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, [path])
++                ?? throw new IOException("Shortcut could not be read.");
++            return (string?)shortcut.GetType().InvokeMember("TargetPath", System.Reflection.BindingFlags.GetProperty, null, shortcut, null) ?? "";
++        }
++        finally
++        {
++            if (shortcut is not null && Marshal.IsComObject(shortcut)) Marshal.FinalReleaseComObject(shortcut);
++            if (shell is not null && Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell);
++        }
++    }
++}
+diff --git a/src/NetLights.Updates/PendingUpdateStore.cs b/src/NetLights.Updates/PendingUpdateStore.cs
+--- a/src/NetLights.Updates/PendingUpdateStore.cs
++++ b/src/NetLights.Updates/PendingUpdateStore.cs
+@@ -82,11 +82,29 @@
+ 
+     public void WriteResult(string version, bool success, string message)
+     {
+-        Directory.CreateDirectory(_root);
+         var payload = new { version, success, message, utc = DateTimeOffset.UtcNow };
+-        string tmp = ResultPath + ".tmp";
+-        File.WriteAllText(tmp, JsonSerializer.Serialize(payload, Options));
+-        File.Move(tmp, ResultPath, true);
++        WriteAtomic(ResultPath, JsonSerializer.Serialize(payload, Options));
++    }
++
++    internal static void WriteAtomic(string path, string contents)
++    {
++        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
++        string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
++        try
++        {
++            using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
++            using (var writer = new StreamWriter(output))
++            {
++                writer.Write(contents);
++                writer.Flush();
++                output.Flush(flushToDisk: true);
++            }
++            File.Move(temporary, path, overwrite: true);
++        }
++        finally
++        {
++            if (File.Exists(temporary)) File.Delete(temporary);
++        }
+     }
+ 
+     public bool TryReadLastFailure(out string? message)
+@@ -99,8 +117,9 @@
+ 
+         try
+         {
+-            if (new FileInfo(ResultPath).Length > 64 * 1024) return false;
+-            using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(ResultPath));
++            using FileStream input = new(ResultPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
++            if (input.Length > 64 * 1024) return false;
++            using JsonDocument doc = JsonDocument.Parse(input);
+             JsonElement root = doc.RootElement;
+             if (root.TryGetProperty("success", out JsonElement success) && success.GetBoolean())
+             {
+diff --git a/src/NetLights.Updates/SilentSetupLauncher.cs b/src/NetLights.Updates/SilentSetupLauncher.cs
+--- a/src/NetLights.Updates/SilentSetupLauncher.cs
++++ b/src/NetLights.Updates/SilentSetupLauncher.cs
+@@ -5,6 +5,8 @@
+ 
+ public interface ISetupInstaller
+ {
++    string? LastError => null;
++    string? PreflightError => null;
+     bool TryStartSilent(string setupPath, string verifiedSha256);
+ }
+ 
+@@ -71,17 +73,28 @@
+ public sealed class AgentSilentSetupInstaller : ISetupInstaller
+ {
+     private readonly string _restartPath;
++    private readonly string _updatesRoot;
++    private readonly Func<string, bool>? _ownsRegistration;
++    public string? LastError { get; private set; }
+ 
+-    public AgentSilentSetupInstaller(string restartPath) => _restartPath = restartPath;
++    public AgentSilentSetupInstaller(string restartPath) : this(restartPath,
++        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NetLights", "updates"), null) { }
++    internal AgentSilentSetupInstaller(string restartPath, string updatesRoot, Func<string, bool>? ownsRegistration)
++    {
++        _restartPath = restartPath; _updatesRoot = updatesRoot; _ownsRegistration = ownsRegistration;
++    }
++    public string? PreflightError => UpdatePolicy.InstallationPreflight(_restartPath, _updatesRoot, _ownsRegistration);
+ 
+     public bool TryStartSilent(string setupPath, string verifiedSha256)
+     {
++        LastError = null;
++        if (PreflightError is string blocked) { LastError = blocked; return false; }
+         if (!UpdatePolicy.IsSafeRestartPath(_restartPath))
+         {
+             return false;
+         }
+ 
+-        string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NetLights", "updates");
++        string root = _updatesRoot;
+         if (!UpdatePolicy.IsInsideRoot(root, setupPath) || !File.Exists(setupPath))
+         {
+             return false;
+@@ -123,6 +136,11 @@
+         catch (Exception) { }
+         try { process.WaitForExit(5000); }
+         catch (Exception) { }
++        try { if (process.HasExited) LastError = FailureForExitCode(process.ExitCode); }
++        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+         return false;
+     }
++
++    internal static string? FailureForExitCode(int code)
++        => code == 11 ? UpdatePolicy.UnresolvedTransactionNotice : code == 12 ? UpdatePolicy.RegistrationMismatchNotice : null;
+ }
+diff --git a/src/NetLights.Updates/SilentUpdateCoordinator.cs b/src/NetLights.Updates/SilentUpdateCoordinator.cs
+--- a/src/NetLights.Updates/SilentUpdateCoordinator.cs
++++ b/src/NetLights.Updates/SilentUpdateCoordinator.cs
+@@ -32,10 +32,24 @@
+     IReleaseFeed Feed,
+     ISetupInstaller Installer,
+     Action RequestExit,
+-    CancellationToken CancellationToken);
++    CancellationToken CancellationToken,
++    bool IsAutomatic = false,
++    UpdateRetryStore? RetryStore = null,
++    Action<string>? ReportError = null,
++    Func<string?>? InstallationPreflight = null);
+ 
+ public static class SilentUpdateCoordinator
+ {
++    private static string? Preflight(SilentUpdateContext context)
++    {
++        // Production callers use this mandatory default. An ordinary explicit DI
++        // callback lets tests describe their disposable registration without HKCU.
++        if (context.InstallationPreflight is not null) return context.InstallationPreflight();
++        string updates = context.RetryStore?.Root ?? Path.Combine(
++            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NetLights", "updates");
++        return UpdatePolicy.InstallationPreflight(Path.Combine(context.ApplicationDirectory, "NetLights.exe"), updates);
++    }
++
+     public static async Task<SilentUpdateOutcome> RunOnce(SilentUpdateContext context)
+     {
+         if (!SilentUpdatePolicy.AllowsBackgroundProcess(context.ProcessName)
+@@ -48,6 +62,12 @@
+ 
+         if (!SilentUpdatePolicy.IsSafeToRestart())
+         {
++            return SilentUpdateOutcome.Busy;
++        }
++
++        if (Preflight(context) is string blocked)
++        {
++            context.ReportError?.Invoke(blocked);
+             return SilentUpdateOutcome.Busy;
+         }
+ 
+@@ -102,6 +122,17 @@
+             return SilentUpdateOutcome.Failed;
+         }
+ 
++        if (context.IsAutomatic && context.RetryStore is not null
++            && !context.RetryStore.AllowsAutomaticAttempt(candidate.ToString(), expected))
++            return SilentUpdateOutcome.Busy;
++
++        // Ownership may have changed while the small release manifest was queried.
++        if (Preflight(context) is string changed)
++        {
++            context.ReportError?.Invoke(changed);
++            return SilentUpdateOutcome.Busy;
++        }
++
+         string destination = Path.Combine(context.DownloadDirectory, fileName);
+         if (!SilentUpdatePolicy.IsSafeSetupPath(destination, context.DownloadDirectory))
+         {
+@@ -134,6 +165,12 @@
+ 
+         if (!context.Installer.TryStartSilent(destination, expected))
+         {
++            if (context.RetryStore is not null)
++            {
++                try { context.RetryStore.RecordFailure(candidate.ToString(), expected); }
++                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException) { }
++            }
++            context.ReportError?.Invoke(context.Installer.LastError ?? "Не удалось запустить установку обновления.");
+             TryDelete(destination);
+             return SilentUpdateOutcome.Failed;
+         }
+diff --git a/src/NetLights.Updates/UpdatePolicy.cs b/src/NetLights.Updates/UpdatePolicy.cs
+--- a/src/NetLights.Updates/UpdatePolicy.cs
++++ b/src/NetLights.Updates/UpdatePolicy.cs
+@@ -1,3 +1,8 @@
++using Microsoft.Win32.SafeHandles;
++using System.Runtime.InteropServices;
++using System.Security.Cryptography;
++using System.Text;
++
+ namespace NetLights.Updates;
+ 
+ public sealed class UpdatePolicy
+@@ -128,6 +133,74 @@
+         }
+     }
+ 
++    public const string UnresolvedTransactionNotice = "Сохранена отметка незавершённого обновления. Без подтверждения владельца автоматически удалять её небезопасно. Данные не изменены. Повторный запуск установщика не гарантирует восстановление; нужна проверка этой отметки.";
++    public const string RegistrationMismatchNotice = "Регистрация установки принадлежит другой копии или не подтверждена. Автообновление этой копии остановлено; выберите нужную установку вручную. Данные не изменены.";
++
++    public static string CanonicalInstallationPath(string executable)
++    {
++        if (!OperatingSystem.IsWindows()) return Path.GetFullPath(executable);
++        using SafeFileHandle handle = File.OpenHandle(executable, FileMode.Open, FileAccess.Read,
++            FileShare.ReadWrite | FileShare.Delete);
++        var path = new StringBuilder(32768);
++        uint length = GetFinalPathNameByHandle(handle, path, (uint)path.Capacity, 0);
++        if (length == 0 || length >= path.Capacity) throw new IOException("Cannot determine the installation path.");
++        return path.ToString();
++    }
++    public static string InstallationIdentity(string executable)
++        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(CanonicalInstallationPath(executable).ToUpperInvariant())));
++
++    public static bool IsRegisteredInstallation(string executable, Func<string, bool>? ownsRegistration = null)
++    {
++        try
++        {
++            if (!IsSafeRestartPath(executable)) return false;
++            EnsureUnlinkedInstallationPath(executable);
++            return (ownsRegistration ?? OwnedInstallationMetadata.HasOwnedRegistration)(executable);
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException
++            or System.Security.SecurityException or System.ComponentModel.Win32Exception) { return false; }
++    }
++
++    public static string? InstallationPreflight(string executable, string updatesRoot, Func<string, bool>? ownsRegistration = null)
++    {
++        try
++        {
++            if (!IsSafeRestartPath(executable)) return RegistrationMismatchNotice;
++            EnsureUnlinkedInstallationPath(executable);
++            EnsureUnlinkedInstallationPath(updatesRoot, directoryLeaf: true);
++            if (!IsRegisteredInstallation(executable, ownsRegistration)) return RegistrationMismatchNotice;
++            string marker = Path.Combine(Path.GetFullPath(updatesRoot), "active-" + InstallationIdentity(executable) + ".json");
++            EnsureUnlinkedInstallationPath(marker);
++            try
++            {
++                using var input = new FileStream(marker, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
++                return UnresolvedTransactionNotice;
++            }
++            catch (FileNotFoundException) { return null; }
++            catch (DirectoryNotFoundException) { return null; }
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException
++            or System.Security.SecurityException or System.ComponentModel.Win32Exception)
++        {
++            return UnresolvedTransactionNotice;
++        }
++    }
++    private static void EnsureUnlinkedInstallationPath(string path, bool directoryLeaf = false)
++    {
++        string full = Path.GetFullPath(path);
++        for (string? current = full; current is not null; current = Path.GetDirectoryName(current))
++        {
++            FileAttributes attributes;
++            try { attributes = File.GetAttributes(current); }
++            catch (FileNotFoundException) { continue; }
++            catch (DirectoryNotFoundException) { continue; }
++            if ((attributes & FileAttributes.ReparsePoint) != 0 || ((directoryLeaf || current != full)
++                && (attributes & FileAttributes.Directory) == 0)) throw new IOException("Linked or non-directory installation ancestor rejected.");
++        }
++    }
++    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
++    private static extern uint GetFinalPathNameByHandle(SafeFileHandle handle, StringBuilder path, uint capacity, uint flags);
++
+     public static string Normalize(string version)
+     {
+         string value = version.Trim();
+diff --git a/src/NetLights.Updates/UpdateRetryStore.cs b/src/NetLights.Updates/UpdateRetryStore.cs
+new file mode 100644
+--- /dev/null
++++ b/src/NetLights.Updates/UpdateRetryStore.cs
+@@ -0,0 +1,75 @@
++using System.Text.Json;
++
++namespace NetLights.Updates;
++
++public sealed record FailedUpdateCandidate(string Version, string Sha256, int Attempts, DateTimeOffset RetryAfterUtc);
++
++/// <summary>Persists a failed candidate before recovery starts another application process.</summary>
++public sealed class UpdateRetryStore
++{
++    private readonly string _path;
++    private readonly TimeProvider _time;
++    private static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
++
++    public UpdateRetryStore(string root, TimeProvider? time = null)
++    {
++        _path = Path.Combine(root, "failed-candidate.json");
++        _time = time ?? TimeProvider.System;
++    }
++
++    public string Root => Path.GetDirectoryName(_path)!;
++
++    public bool AllowsAutomaticAttempt(string version, string sha256)
++    {
++        try
++        {
++            FailedUpdateCandidate? failed = Read();
++            return failed is null || !Matches(failed, version, sha256) || _time.GetUtcNow() >= failed.RetryAfterUtc;
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
++        {
++            // An unreadable guard must not turn recovery into another install loop.
++            return false;
++        }
++    }
++
++    public void RecordFailure(string version, string sha256)
++    {
++        if (!Version.TryParse(UpdatePolicy.Normalize(version), out Version? normalized)
++            || sha256.Length != 64 || !sha256.All(Uri.IsHexDigit))
++            throw new InvalidDataException("Invalid failed update candidate.");
++        int attempts = 1;
++        try
++        {
++            FailedUpdateCandidate? previous = Read();
++            if (previous is not null && Matches(previous, version, sha256))
++                attempts = Math.Min(previous.Attempts + 1, 8);
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException) { }
++        TimeSpan cooldown = TimeSpan.FromHours(Math.Min(12 * Math.Pow(2, attempts - 1), 7 * 24));
++        var failed = new FailedUpdateCandidate(normalized.ToString(), sha256.ToLowerInvariant(), attempts, _time.GetUtcNow() + cooldown);
++        PendingUpdateStore.WriteAtomic(_path, JsonSerializer.Serialize(failed, Options));
++    }
++
++    private FailedUpdateCandidate? Read()
++    {
++        try
++        {
++            using FileStream input = new(_path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
++            if (input.Length > 4096) throw new InvalidDataException("Update retry state is too large.");
++            FailedUpdateCandidate failed = JsonSerializer.Deserialize<FailedUpdateCandidate>(input, Options)
++                ?? throw new InvalidDataException("Missing update retry state.");
++            if (!Version.TryParse(failed.Version, out _) || failed.Sha256 is not { Length: 64 }
++                || !failed.Sha256.All(Uri.IsHexDigit) || failed.Attempts is < 1 or > 8
++                || failed.RetryAfterUtc == default)
++                throw new InvalidDataException("Invalid update retry state.");
++            return failed;
++        }
++        catch (FileNotFoundException) { return null; }
++        catch (DirectoryNotFoundException) { return null; }
++    }
++
++    private static bool Matches(FailedUpdateCandidate failed, string version, string sha256)
++        => string.Equals(failed.Version, UpdatePolicy.Normalize(version), StringComparison.OrdinalIgnoreCase)
++            && IntegrityVerifier.Matches(failed.Sha256, sha256);
++}
+diff --git a/src/NetLights.Updates/packages.publish.lock.json b/src/NetLights.Updates/packages.publish.lock.json
+new file mode 100644
+--- /dev/null
++++ b/src/NetLights.Updates/packages.publish.lock.json
+@@ -0,0 +1,14 @@
++{
++  "version": 2,
++  "dependencies": {
++    "net10.0": {
++      "Microsoft.NET.ILLink.Tasks": {
++        "type": "Direct",
++        "requested": "[10.0.8, )",
++        "resolved": "10.0.8",
++        "contentHash": "dVbSXGIFNR5nZcv2tOLoWI+a9T4jtFd77IYjuND+QVe360qWgAF7H0WtoopYhRw/+SgpGUTyrkrh+65+ClNnfw=="
++      }
++    },
++    "net10.0/win-x64": {}
++  }
++}
+\ No newline at end of file
+diff --git a/tests/NetLights.IntegrationTests/UpdateAgentProgramTests.cs b/tests/NetLights.IntegrationTests/UpdateAgentProgramTests.cs
+--- a/tests/NetLights.IntegrationTests/UpdateAgentProgramTests.cs
++++ b/tests/NetLights.IntegrationTests/UpdateAgentProgramTests.cs
+@@ -8,13 +8,19 @@
+ 
+ public sealed class UpdateAgentProgramTests
+ {
++    [Theory]
++    [InlineData(false)]
++    [InlineData(true)]
++    public void FailureBeforeSnapshot_DoesNotClaimInstallationWasRestored(bool complete)
++        => Assert.Equal(" Установка не изменялась.", Program.DescribeRestoration(null, complete));
++
+     [Fact]
+     public void MissingArguments_ReturnsUsageErrorWithoutCreatingUpdateFiles()
+     {
+         string root = CreateRoot();
+         try
+         {
+-            Assert.Equal(2, Program.RunForTests([], root));
++            Assert.Equal(2, RunIsolated([], root));
+             Assert.Empty(Directory.EnumerateFileSystemEntries(root));
+         }
+         finally
+@@ -30,7 +36,7 @@
+         try
+         {
+             string installer = Path.Combine(root, "NetLights-Setup-win-x64-1.5.0.exe");
+-            int result = Program.RunForTests(Arguments(installer, new string('0', 64)), root);
++            int result = RunIsolated(Arguments(installer, new string('0', 64), root), root);
+ 
+             Assert.Equal(3, result);
+             Assert.True(new PendingUpdateStore(root).TryReadLastFailure(out string? message));
+@@ -50,7 +56,7 @@
+         try
+         {
+             File.WriteAllText(outside, "not an installer");
+-            int result = Program.RunForTests(Arguments(outside, new string('0', 64)), root);
++            int result = RunIsolated(Arguments(outside, new string('0', 64), root), root);
+ 
+             Assert.Equal(4, result);
+             Assert.True(new PendingUpdateStore(root).TryReadLastFailure(out string? message));
+@@ -71,7 +77,7 @@
+         {
+             string installer = Path.Combine(root, "NetLights-Setup-win-x64-1.5.0.exe");
+             File.WriteAllText(installer, "incorrect installer bytes");
+-            int result = Program.RunForTests(Arguments(installer, new string('0', 64)), root);
++            int result = RunIsolated(Arguments(installer, new string('0', 64), root), root);
+ 
+             Assert.Equal(5, result);
+             Assert.False(File.Exists(installer));
+@@ -94,7 +100,7 @@
+             File.WriteAllText(installer, "replacement bytes after coordinator verification");
+             string publishedDigest = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("published bytes"))).ToLowerInvariant();
+ 
+-            int result = Program.RunForTests(Arguments(installer, publishedDigest), root);
++            int result = RunIsolated(Arguments(installer, publishedDigest, root), root);
+ 
+             Assert.Equal(5, result);
+             Assert.False(File.Exists(installer));
+@@ -116,7 +122,7 @@
+             string installer = Path.Combine(root, "NetLights-Setup-win-x64-1.5.0.exe");
+             File.WriteAllBytes(installer, []);
+ 
+-            int result = Program.RunForTests(Arguments(installer, new string('0', 64)), root);
++            int result = RunIsolated(Arguments(installer, new string('0', 64), root), root);
+ 
+             Assert.Equal(9, result);
+             Assert.False(File.Exists(installer));
+@@ -137,9 +143,9 @@
+         {
+             string installer = Path.Combine(root, "NetLights-Setup-win-x64-1.5.0.exe");
+             File.WriteAllText(installer, "installer bytes");
+-            string[] args = [.. Arguments(installer, new string('0', 64)), "--ready", "Local\\invalid"];
+-
+-            Assert.Equal(2, Program.RunForTests(args, root));
++            string[] args = [.. Arguments(installer, new string('0', 64), root), "--ready", "Local\\invalid"];
++
++            Assert.Equal(2, RunIsolated(args, root));
+             Assert.Empty(Directory.GetFiles(root, "result.json"));
+         }
+         finally
+@@ -159,8 +165,8 @@
+             string hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(installer))).ToLowerInvariant();
+             string ready = "Local\\NetLights.UpdateAgentReady." + Guid.NewGuid().ToString("N");
+ 
+-            int result = Program.RunForTests(
+-                [.. Arguments(installer, hash), "--ready", ready],
++            int result = RunIsolated(
++                [.. Arguments(installer, hash, root), "--ready", ready],
+                 root);
+ 
+             Assert.Equal(1, result);
+@@ -186,6 +192,7 @@
+         Assert.True(File.Exists(Path.Combine(fixture.InstallDirectory, "installer-added.marker")));
+         Assert.True(fixture.TryGetRunningApp(out _));
+         Assert.True(fixture.Store.TryReadLastFailure(out _ ) is false);
++        Assert.Empty(Directory.GetFiles(fixture.Root, "active-*.json"));
+     }
+ 
+     [Fact]
+@@ -202,6 +209,7 @@
+         Assert.True(fixture.TryGetRunningApp(out _));
+         Assert.True(fixture.Store.TryReadLastFailure(out string? message));
+         Assert.Contains("ошибкой 17", message);
++        Assert.Empty(Directory.GetFiles(fixture.Root, "active-*.json"));
+     }
+ 
+     [Fact]
+@@ -254,7 +262,7 @@
+             Assert.True(fixture.TryGetRunningApp(out _));
+             Assert.False(unrelated.HasExited);
+             Assert.True(fixture.Store.TryReadLastFailure(out string? message));
+-            Assert.Contains("Предыдущие файлы восстановлены", message);
++            Assert.Contains("Предыдущая установка восстановлена", message);
+         }
+         finally
+         {
+@@ -274,7 +282,7 @@
+             Assert.False((bool)method.Invoke(null, [backup, new Dictionary<string, string> { ["restart"] = "invalid\0path" }, null])!);
+         }
+         string retained = Assert.Single(Directory.GetDirectories(Path.Combine(fixture.Root, "rollback")));
+-        Assert.True(File.Exists(Path.Combine(retained, "NetLights.exe")));
++        Assert.True(File.Exists(Path.Combine(retained, "payload", "NetLights.exe")));
+     }
+ 
+     [Fact]
+@@ -315,8 +323,588 @@
+         Assert.Contains("Родительский процесс", message);
+     }
+ 
+-    private static string[] Arguments(string installer, string sha256)
+-        => ["--parent", "-123", "--pending", installer, "--sha256", sha256];
++    [Fact]
++    public void RecoveryAppReadsCurrentFailureAndPersistedCooldownAtStartup()
++    {
++        using var fixture = new InstallerFixture("fail", "1.5.0");
++        Assert.Equal(17, fixture.Run());
++        Assert.True(fixture.TryGetRunningApp(out int pid));
++        string observed = fixture.Store.ResultPath + ".observed-" + pid;
++        Assert.True(SpinWait.SpinUntil(() => File.Exists(observed), TimeSpan.FromSeconds(3)),
++            "Recovered process did not observe the update result.");
++        using var result = System.Text.Json.JsonDocument.Parse(File.ReadAllText(observed));
++        Assert.False(result.RootElement.GetProperty("success").GetBoolean());
++        Assert.Contains("ошибкой 17", result.RootElement.GetProperty("message").GetString());
++        Assert.False(new UpdateRetryStore(fixture.Root).AllowsAutomaticAttempt("1.5.0", fixture.InstallerHash));
++    }
++
++    [Fact]
++    public void InstallerTimeoutStopsItsChildWriterBeforeRestoringFiles()
++    {
++        using var fixture = new InstallerFixture("hang-child", "1.5.0", installerWait: TimeSpan.FromSeconds(2));
++        Assert.Equal(7, fixture.Run());
++        Assert.True(fixture.TryGetRunningApp(out _));
++        string childPid = fixture.InstallDirectory + ".child.pid";
++        Assert.True(File.Exists(childPid), "Installer did not create the child writer.");
++        int pid = int.Parse(File.ReadAllText(childPid), System.Globalization.CultureInfo.InvariantCulture);
++        try
++        {
++            using Process writer = Process.GetProcessById(pid);
++            Assert.True(writer.HasExited, "Installer child writer survived rollback.");
++        }
++        catch (ArgumentException) { }
++        Assert.False(File.Exists(Path.Combine(fixture.InstallDirectory, "child-writer.marker")));
++        Assert.Equal("old-app-payload", File.ReadAllText(Path.Combine(fixture.InstallDirectory, "rollback-probe.marker")));
++    }
++
++    [Fact]
++    public void RecoveryProcessIsOwnedBeforeItsManagedPidRegistration()
++    {
++        using var fixture = new InstallerFixture("fail", "1.5.0");
++        string gateName = "Local\\NetLights.TestAppStartup." + Guid.NewGuid().ToString("N");
++        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, gateName);
++        using var entered = new EventWaitHandle(false, EventResetMode.ManualReset, gateName + ".entered");
++        UpdateAgentTestOptions options = fixture.CreateOptions(TimeSpan.FromSeconds(5));
++        options = options with
++        {
++            ChildEnvironment = new Dictionary<string, string>(options.ChildEnvironment)
++            {
++                ["NL_TEST_APP_START_GATE"] = gateName
++            }
++        };
++        try
++        {
++            Assert.Equal(17, fixture.Run(options: options));
++            Assert.True(entered.WaitOne(TimeSpan.FromSeconds(3)), "Child did not enter its registration gate.");
++            Assert.True(fixture.TryGetRunningApp(out _));
++            Assert.False(File.Exists(Path.Combine(fixture.Root, "spawned-app-pids.txt")),
++                "The negative control must still be before managed PID registration.");
++        }
++        finally { release.Set(); }
++        // Dispose must stop this pinned child even though it never reached its PID-file write.
++    }
++
++    [Theory]
++    [InlineData(true, false)]
++    [InlineData(false, true)]
++    [InlineData(true, true)]
++    public void RecoverySurvivesIndependentResultAndGuardWriteDenials(bool denyResult, bool denyGuard)
++    {
++        using var fixture = new InstallerFixture("fail", "1.5.0");
++        if (denyResult) Directory.CreateDirectory(fixture.Store.ResultPath);
++        if (denyGuard) Directory.CreateDirectory(Path.Combine(fixture.Root, "failed-candidate.json"));
++        Assert.Equal(17, fixture.Run());
++        Assert.True(fixture.TryGetRunningApp(out int pid));
++        string arguments = fixture.Store.ResultPath + ".arguments-" + pid;
++        Assert.True(SpinWait.SpinUntil(() => File.Exists(arguments), TimeSpan.FromSeconds(3)));
++        string[] observed = System.Text.Json.JsonSerializer.Deserialize<string[]>(File.ReadAllText(arguments))!;
++        Assert.Equal(denyGuard, observed.Contains("--skip-automatic-updates", StringComparer.Ordinal));
++        Assert.False(new UpdateRetryStore(fixture.Root).AllowsAutomaticAttempt("1.5.0", fixture.InstallerHash));
++        Assert.Equal("old-app-payload", File.ReadAllText(Path.Combine(fixture.InstallDirectory, "rollback-probe.marker")));
++    }
++
++    [Fact]
++    public void ResultWriteDenialDoesNotRollbackConfirmedSuccessfulInstallation()
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        Directory.CreateDirectory(fixture.Store.ResultPath);
++        Assert.Equal(0, fixture.Run());
++        Assert.True(fixture.TryGetRunningApp(out _));
++        Assert.Equal("new-app-payload", File.ReadAllText(Path.Combine(fixture.InstallDirectory, "rollback-probe.marker")));
++    }
++
++    [Theory]
++    [InlineData(false)]
++    [InlineData(true)]
++    public void PendingCleanupFailureCannotRollbackConfirmedSuccessfulInstallation(bool readOnly)
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        File.WriteAllText(fixture.Store.PendingPath, "legacy pending update");
++        FileStream? locked = null;
++        try
++        {
++            if (readOnly) File.SetAttributes(fixture.Store.PendingPath, FileAttributes.ReadOnly);
++            else locked = new FileStream(fixture.Store.PendingPath, FileMode.Open, FileAccess.Read, FileShare.Read);
++            Assert.Equal(0, fixture.Run());
++            Assert.True(fixture.TryGetRunningApp(out _));
++            Assert.Equal("new-app-payload", File.ReadAllText(Path.Combine(fixture.InstallDirectory, "rollback-probe.marker")));
++            Assert.True(File.Exists(fixture.Store.PendingPath));
++            Assert.False(fixture.Store.TryReadLastFailure(out _));
++            Assert.Contains("pending-cleanup-failed", File.ReadAllText(fixture.Store.PhasePath));
++            Assert.DoesNotContain("rollback-complete", File.ReadAllText(fixture.Store.PhasePath));
++        }
++        finally
++        {
++            locked?.Dispose();
++            if (File.Exists(fixture.Store.PendingPath)) File.SetAttributes(fixture.Store.PendingPath, FileAttributes.Normal);
++        }
++    }
++
++    [Theory]
++    [InlineData(false)]
++    [InlineData(true)]
++    public void ConcurrentAgentForSameInstallationCannotHandoffOrChangeTransaction(bool duringHealthCheck)
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        string name = "Local\\NetLights.AgentConcurrency." + Guid.NewGuid().ToString("N");
++        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, name);
++        using var entered = new EventWaitHandle(false, EventResetMode.ManualReset, name + ".entered");
++        string readyName = "Local\\NetLights.UpdateAgentReady." + Guid.NewGuid().ToString("N");
++        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, readyName);
++        string invocations = Path.Combine(fixture.Root, "installer-invocations.txt");
++        File.WriteAllText(fixture.Store.PendingPath, "preserved pending");
++        File.WriteAllText(fixture.Store.ResultPath, "preserved result");
++        var environment = new Dictionary<string, string>
++        {
++            [duringHealthCheck ? "NL_TEST_APP_START_GATE" : "NL_TEST_INSTALL_GATE"] = name,
++            ["NL_TEST_INSTALL_INVOCATIONS"] = invocations
++        };
++        using Process first = fixture.StartAgentProcess(environment);
++        try
++        {
++            Assert.True(entered.WaitOne(TimeSpan.FromSeconds(15)), "First agent did not reach its bounded gate.");
++            Assert.False(first.HasExited);
++            Dictionary<string, byte[]> original = Directory.GetFiles(fixture.Root)
++                .ToDictionary(path => Path.GetFileName(path)!, File.ReadAllBytes, StringComparer.OrdinalIgnoreCase);
++            // Different spelling must still identify the same Windows installation.
++            string alias = Path.Combine(fixture.InstallDirectory, ".", "NETLIGHTS.EXE");
++            using Process second = fixture.StartAgentProcess(environment, readyName, alias);
++            Assert.True(second.WaitForExit(5000), "Busy agent did not exit promptly.");
++            Assert.Equal(Program.InstallationBusyExitCode, second.ExitCode);
++            Assert.False(ready.WaitOne(0));
++            Assert.Equal(original.Keys.Order(), Directory.GetFiles(fixture.Root).Select(path => Path.GetFileName(path)!).Order());
++            foreach ((string file, byte[] bytes) in original)
++                Assert.Equal(bytes, File.ReadAllBytes(Path.Combine(fixture.Root, file)));
++            Assert.Single(File.ReadAllLines(invocations));
++        }
++        finally
++        {
++            release.Set();
++            if (!first.WaitForExit(15000))
++            {
++                first.Kill(entireProcessTree: true);
++                first.WaitForExit(5000);
++                throw new TimeoutException("First agent did not finish after releasing its gate.");
++            }
++        }
++        Assert.Equal(0, first.ExitCode);
++        Assert.True(fixture.TryGetRunningApp(out _));
++        Assert.False(fixture.Store.TryReadLastFailure(out _));
++    }
++
++    [Fact]
++    public void DifferentInstallationsCanUpdateWhileAnotherTransactionIsGated()
++    {
++        using var firstFixture = new InstallerFixture("success", "1.5.0");
++        using var secondFixture = new InstallerFixture("success", "1.5.0");
++        string name = "Local\\NetLights.AgentConcurrency." + Guid.NewGuid().ToString("N");
++        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, name);
++        using var entered = new EventWaitHandle(false, EventResetMode.ManualReset, name + ".entered");
++        using Process first = firstFixture.StartAgentProcess(new Dictionary<string, string> { ["NL_TEST_INSTALL_GATE"] = name });
++        try
++        {
++            Assert.True(entered.WaitOne(TimeSpan.FromSeconds(15)));
++            using Process second = secondFixture.StartAgentProcess();
++            Assert.True(second.WaitForExit(15000));
++            Assert.Equal(0, second.ExitCode);
++            Assert.False(first.HasExited);
++            Assert.True(secondFixture.TryGetRunningApp(out _));
++        }
++        finally
++        {
++            release.Set();
++            if (!first.WaitForExit(15000))
++            {
++                first.Kill(entireProcessTree: true);
++                first.WaitForExit(5000);
++                throw new TimeoutException("First agent did not finish after releasing its gate.");
++            }
++        }
++        Assert.Equal(0, first.ExitCode);
++    }
++
++    [Fact]
++    public void CrashedAgentCannotBeReplacedWhileItsInstallerIsAliveOrAfterMutexDisappears()
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        string name = "Local\\NetLights.AgentCrash." + Guid.NewGuid().ToString("N");
++        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, name);
++        using var entered = new EventWaitHandle(false, EventResetMode.ManualReset, name + ".entered");
++        string childPid = Path.Combine(fixture.Root, "installer.pid");
++        var environment = new Dictionary<string, string>
++        {
++            ["NL_TEST_INSTALL_GATE"] = name,
++            ["NL_TEST_INSTALL_PID_FILE"] = childPid
++        };
++        using Process first = fixture.StartAgentProcess(environment);
++        Process? installer = null;
++        Mutex? retainedHandle = null;
++        try
++        {
++            Assert.True(entered.WaitOne(TimeSpan.FromSeconds(15)));
++            installer = Process.GetProcessById(int.Parse(File.ReadAllText(childPid), System.Globalization.CultureInfo.InvariantCulture));
++            _ = installer.SafeHandle;
++            Assert.Equal(Path.Combine(fixture.Root, "NetLights-Setup-win-x64-1.5.0.exe"), installer.MainModule!.FileName,
++                ignoreCase: true);
++            string marker = Assert.Single(Directory.GetFiles(fixture.Root, "active-*.json"));
++            string identity = Path.GetFileName(marker)["active-".Length..^".json".Length];
++            retainedHandle = Mutex.OpenExisting(@"Global\NetLights.UpdateInstallation." + identity);
++            first.Kill(entireProcessTree: false);
++            Assert.True(first.WaitForExit(5000));
++            Assert.False(installer.HasExited);
++            Dictionary<string, byte[]> original = Directory.GetFiles(fixture.Root)
++                .ToDictionary(path => Path.GetFileName(path)!, File.ReadAllBytes, StringComparer.OrdinalIgnoreCase);
++            for (int attempt = 0; attempt < 2; attempt++)
++            {
++                string readyName = "Local\\NetLights.UpdateAgentReady." + Guid.NewGuid().ToString("N");
++                using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, readyName);
++                using Process next = fixture.StartAgentProcess(environment, readyName);
++                Assert.True(next.WaitForExit(5000));
++                Assert.Equal(11, next.ExitCode);
++                Assert.False(ready.WaitOne(0));
++                Assert.False(installer.HasExited);
++                Assert.Equal(original.Keys.Order(), Directory.GetFiles(fixture.Root).Select(path => Path.GetFileName(path)!).Order());
++                foreach ((string file, byte[] bytes) in original)
++                    Assert.Equal(bytes, File.ReadAllBytes(Path.Combine(fixture.Root, file)));
++                // The next attempt cannot rely on an abandoned kernel object:
++                // all handles disappear, while the flushed marker remains.
++                retainedHandle?.Dispose();
++                retainedHandle = null;
++            }
++        }
++        finally
++        {
++            retainedHandle?.Dispose();
++            release.Set();
++            if (!first.HasExited)
++            {
++                first.Kill(entireProcessTree: true);
++                first.WaitForExit(5000);
++            }
++            if (installer is not null)
++            {
++                try
++                {
++                    if (!installer.WaitForExit(5000))
++                    {
++                        installer.Kill(entireProcessTree: true);
++                        Assert.True(installer.WaitForExit(5000));
++                    }
++                }
++                finally { installer.Dispose(); }
++            }
++        }
++    }
++
++    [Fact]
++    public void ActiveMarkerWriteFailureRefusesHandoffWithoutChangingExistingState()
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        string identity = Program.InstallationIdentity(Path.Combine(fixture.InstallDirectory, "NetLights.exe"));
++        string marker = Path.Combine(fixture.Root, "active-" + identity + ".json");
++        Directory.CreateDirectory(marker);
++        File.WriteAllText(Path.Combine(marker, "preserved.txt"), "untouched");
++        File.WriteAllText(fixture.Store.ResultPath, "preserved result");
++        File.WriteAllText(fixture.Store.PendingPath, "preserved pending");
++        string readyName = "Local\\NetLights.UpdateAgentReady." + Guid.NewGuid().ToString("N");
++        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, readyName);
++        using Process agent = fixture.StartAgentProcess(readyName: readyName);
++        Assert.True(agent.WaitForExit(5000));
++        Assert.Equal(11, agent.ExitCode);
++        Assert.False(ready.WaitOne(0));
++        Assert.False(File.Exists(fixture.Store.PhasePath));
++        Assert.Equal("untouched", File.ReadAllText(Path.Combine(marker, "preserved.txt")));
++        Assert.Equal("preserved result", File.ReadAllText(fixture.Store.ResultPath));
++        Assert.Equal("preserved pending", File.ReadAllText(fixture.Store.PendingPath));
++        Assert.False(File.Exists(Path.Combine(fixture.InstallDirectory, "installer-added.marker")));
++    }
++
++    [Theory]
++    [InlineData("valid", 0)]
++    [InlineData("foreign", 11)]
++    [InlineData("corrupt", 11)]
++    [InlineData("empty", 11)]
++    [InlineData("oversized", 11)]
++    [InlineData("unsupported", 11)]
++    [InlineData("legacy", 11)]
++    [InlineData("duplicate", 11)]
++    [InlineData("unsupported-deep", 11)]
++    public void ManualInstallCompletionRepairsOnlyItsOwnMarker(string contents, int expected)
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        fixture.PrepareManualAgentHarness();
++        string executable = Path.Combine(fixture.InstallDirectory, "NetLights.exe");
++        string marker = Path.Combine(fixture.Root, "active-" + Program.InstallationIdentity(executable) + ".json");
++        string canonical = Program.CanonicalInstallationPath(executable);
++        string json = contents switch
++        {
++            "corrupt" => "{truncated",
++            "duplicate" => "{\"Version\":2,\"Version\":2}",
++            "empty" => "",
++            "oversized" => new string('x', 4097),
++            "unsupported-deep" => new string('[', 8) + "0" + new string(']', 8),
++            _ => System.Text.Json.JsonSerializer.Serialize(new
++            {
++                Version = contents == "unsupported" ? 3 : contents == "legacy" ? 1 : 2,
++                InstalledExecutable = contents == "foreign" ? canonical + ".foreign" : contents == "legacy" ? canonical.ToUpperInvariant() : canonical
++            })
++        };
++        File.WriteAllText(marker, json);
++        string unrelated = Path.Combine(fixture.Root, "active-" + new string('0', 64) + ".json");
++        File.WriteAllText(unrelated, "another installation");
++        File.WriteAllText(fixture.Store.PendingPath, "preserved pending");
++        File.WriteAllText(fixture.Store.ResultPath, "preserved result");
++        using Process repair = fixture.StartManualCompletionProcess();
++        Assert.True(repair.WaitForExit(5000));
++        Assert.Equal(expected, repair.ExitCode);
++        Assert.Equal(expected != 0, File.Exists(marker));
++        if (expected != 0) Assert.Equal(json, File.ReadAllText(marker));
++        Assert.Equal("another installation", File.ReadAllText(unrelated));
++        Assert.Equal("preserved pending", File.ReadAllText(fixture.Store.PendingPath));
++        Assert.Equal("preserved result", File.ReadAllText(fixture.Store.ResultPath));
++        Assert.False(File.Exists(fixture.Store.PhasePath));
++        string[] quarantined = Directory.GetFiles(fixture.Root, "interrupted-*.json");
++        Assert.Empty(quarantined);
++    }
++
++    [Fact]
++    public void ManualInstallCompletionRefusesLinkedMarkerAndPreservesItsTarget()
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        fixture.PrepareManualAgentHarness();
++        string executable = Path.Combine(fixture.InstallDirectory, "NetLights.exe");
++        string marker = Path.Combine(fixture.Root, "active-" + Program.InstallationIdentity(executable) + ".json");
++        string foreign = Path.Combine(fixture.Root, "foreign-marker-directory");
++        Directory.CreateDirectory(foreign);
++        File.WriteAllText(Path.Combine(foreign, "preserved.txt"), "foreign data");
++        // Junction creation doesn't require Developer Mode or symlink privileges.
++        Assert.DoesNotContain('%', marker);
++        Assert.DoesNotContain('%', foreign);
++        var start = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"))
++        {
++            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true
++        };
++        // cmd's /c tail uses its own quoting grammar, unlike normal argv.
++        start.Arguments = "/d /v:off /c mklink /J \"" + marker + "\" \"" + foreign + "\"";
++        try
++        {
++            using Process link = Process.Start(start)!;
++            if (!link.WaitForExit(5000))
++            {
++                link.Kill(entireProcessTree: true);
++                link.WaitForExit(5000);
++                throw new TimeoutException("Isolated junction creation did not finish.");
++            }
++            string output = link.StandardOutput.ReadToEnd() + link.StandardError.ReadToEnd();
++            Assert.True(link.ExitCode == 0, "Junction fixture creation failed: " + output);
++            Assert.True((File.GetAttributes(marker) & FileAttributes.ReparsePoint) != 0);
++            using Process repair = fixture.StartManualCompletionProcess();
++            Assert.True(repair.WaitForExit(5000));
++            Assert.Equal(11, repair.ExitCode);
++            Assert.Equal("foreign data", File.ReadAllText(Path.Combine(foreign, "preserved.txt")));
++            Assert.Empty(Directory.GetFiles(fixture.Root, "interrupted-*.json"));
++        }
++        finally
++        {
++            if (Directory.Exists(marker)) Directory.Delete(marker);
++        }
++    }
++
++    [Fact]
++    public void ManualCompletionCannotClearMarkerOwnedByLiveTransaction()
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        fixture.PrepareManualAgentHarness();
++        string name = "Local\\NetLights.ManualCompletion." + Guid.NewGuid().ToString("N");
++        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, name);
++        using var entered = new EventWaitHandle(false, EventResetMode.ManualReset, name + ".entered");
++        using Process owner = fixture.StartAgentProcess(new Dictionary<string, string> { ["NL_TEST_INSTALL_GATE"] = name });
++        try
++        {
++            Assert.True(entered.WaitOne(TimeSpan.FromSeconds(15)));
++            string marker = Assert.Single(Directory.GetFiles(fixture.Root, "active-*.json"));
++            string before = File.ReadAllText(marker);
++            using Process repair = fixture.StartManualCompletionProcess();
++            Assert.True(repair.WaitForExit(5000));
++            Assert.Equal(Program.InstallationBusyExitCode, repair.ExitCode);
++            Assert.Equal(before, File.ReadAllText(marker));
++        }
++        finally
++        {
++            release.Set();
++            if (!owner.WaitForExit(15000))
++            {
++                owner.Kill(entireProcessTree: true);
++                owner.WaitForExit(5000);
++                throw new TimeoutException("Agent did not finish after releasing manual-completion gate.");
++            }
++        }
++        Assert.Equal(0, owner.ExitCode);
++    }
++
++    [Fact]
++    public void ManualCompletionFromOutsideTargetDirectoryCannotClearMarker()
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        fixture.PrepareManualAgentHarness();
++        string executable = Path.Combine(fixture.InstallDirectory, "NetLights.exe");
++        string marker = Path.Combine(fixture.Root, "active-" + Program.InstallationIdentity(executable) + ".json");
++        File.WriteAllText(marker, "must not be read or removed");
++        Assert.Equal(2, RunIsolated(["--complete-manual-install", "--restart", executable], fixture.Root));
++        Assert.Equal("must not be read or removed", File.ReadAllText(marker));
++    }
++
++    [Fact]
++    public void InvalidRestartPathIsRejectedWithoutWritingSharedStateOrSignallingReady()
++    {
++        string root = CreateRoot();
++        try
++        {
++            string readyName = "Local\\NetLights.UpdateAgentReady." + Guid.NewGuid().ToString("N");
++            using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, readyName);
++            Assert.Equal(2, RunIsolated(["--parent", "-123", "--pending", Path.Combine(root, "setup.exe"),
++                "--sha256", new string('0', 64), "--restart", Path.Combine(root, "missing.exe"), "--ready", readyName], root));
++            Assert.Empty(Directory.GetFileSystemEntries(root));
++            Assert.False(ready.WaitOne(0));
++        }
++        finally { DeleteRoot(root); }
++    }
++
++    [Fact]
++    public void V2MarkerRetainsRawOwnerWhenLegacyUppercaseHashesCollide()
++    {
++        string pair = CreateRoot();
++        try
++        {
++            using var fixture = new InstallerFixture("success", "1.5.0", installDirectory: Path.Combine(pair, "S"));
++            fixture.PrepareManualAgentHarness();
++            string ours = Path.Combine(fixture.InstallDirectory, "NetLights.exe");
++            string foreign = Path.Combine(pair, "ſ", "NetLights.exe");
++            Directory.CreateDirectory(Path.GetDirectoryName(foreign)!);
++            File.WriteAllText(foreign, "foreign-preserved-bytes");
++            Assert.Equal(Program.InstallationIdentity(ours), Program.InstallationIdentity(foreign));
++            Assert.False(Program.SameInstallationPath(Program.CanonicalInstallationPath(ours), Program.CanonicalInstallationPath(foreign)));
++            string marker = Path.Combine(fixture.Root, "active-" + Program.InstallationIdentity(ours) + ".json");
++            string bytes = System.Text.Json.JsonSerializer.Serialize(new { Version = 2, InstalledExecutable = Program.CanonicalInstallationPath(foreign) });
++            File.WriteAllText(marker, bytes);
++            using Process repair = fixture.StartManualCompletionProcess();
++            Assert.True(repair.WaitForExit(5000));
++            Assert.Equal(11, repair.ExitCode);
++            Assert.Equal(bytes, File.ReadAllText(marker));
++            Assert.Equal("foreign-preserved-bytes", File.ReadAllText(foreign));
++            Assert.Empty(Directory.GetFiles(fixture.Root, "interrupted-*.json"));
++        }
++        finally { DeleteRoot(pair); }
++    }
++
++    [Fact]
++    public async Task InstallerGrowingPastTheLimitDuringParentWaitIsRejectedBeforeHashingOrInstallation()
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        using Process parent = fixture.StartTestAppProcess();
++        string name = "Local\\NetLights.UpdateAgentReady." + Guid.NewGuid().ToString("N");
++        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, name);
++        Task<int> run = Task.Run(() => fixture.Run(parent.Id, readyName: name));
++        try
++        {
++            Assert.True(ready.WaitOne(5000), "The agent must have accepted the original bounded size before the growth.");
++            using (var file = new FileStream(fixture.InstallerPath, FileMode.Open, FileAccess.Write, FileShare.Read))
++            {
++                Assert.True(MarkSparse(file.SafeFileHandle, 0x000900C4, IntPtr.Zero, 0, IntPtr.Zero, 0, out _, IntPtr.Zero));
++                file.SetLength(UpdatePolicy.MaxInstallerBytes + 1);
++            }
++            parent.Kill(entireProcessTree: true);
++            Assert.True(parent.WaitForExit(5000));
++            Assert.Equal(9, await run.WaitAsync(TimeSpan.FromSeconds(15)));
++            Assert.False(File.Exists(Path.Combine(fixture.InstallDirectory, "installer-added.marker")));
++            Assert.False(File.Exists(fixture.InstallerPath));
++            Assert.Contains("locked-installer-size-rejected", File.ReadAllText(fixture.Store.PhasePath));
++            Assert.True(fixture.TryGetRunningApp(out _));
++        }
++        finally
++        {
++            if (!parent.HasExited) { parent.Kill(entireProcessTree: true); parent.WaitForExit(5000); }
++            await run.WaitAsync(TimeSpan.FromSeconds(15));
++        }
++    }
++
++    [System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint = "DeviceIoControl", SetLastError = true)]
++    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
++    private static extern bool MarkSparse(Microsoft.Win32.SafeHandles.SafeFileHandle handle, uint control,
++        IntPtr input, int inputLength, IntPtr output, int outputLength, out int returned, IntPtr overlapped);
++
++    [Fact]
++    public void SetupReceivesTheCapturedInstallationDirectoryAsAnExplicitArgument()
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        Assert.Equal(0, fixture.Run());
++        string[] args = System.Text.Json.JsonSerializer.Deserialize<string[]>(
++            File.ReadAllText(Path.Combine(fixture.Root, "installer-arguments.json")))!;
++        Assert.Single(args, value => value.StartsWith("/DIR=", StringComparison.Ordinal));
++        Assert.Contains("/DIR=" + Path.GetFullPath(fixture.InstallDirectory), args);
++    }
++
++    [Fact]
++    public void DirectAgentEntryRejectsForeignRegistrationBeforeReadyOrSharedStateWrites()
++    {
++        string root = CreateRoot();
++        try
++        {
++            string[] args = Arguments(Path.Combine(root, "NetLights-Setup-win-x64-1.7.0.exe"), new string('a',64), root);
++            var options = new UpdateAgentTestOptions(TimeSpan.FromSeconds(1),TimeSpan.FromSeconds(1),TimeSpan.FromSeconds(1),
++                TimeSpan.FromSeconds(1),TimeSpan.FromSeconds(1),new Dictionary<string,string>(),OwnsRegistration: _ => false);
++            Assert.Equal(12, Program.RunForTests(args, root, options));
++            Assert.False(File.Exists(new PendingUpdateStore(root).PhasePath));
++            Assert.Empty(Directory.GetFiles(root, "active-*.json"));
++            Assert.Equal("non-executable isolated restart fixture", File.ReadAllText(args[7]));
++        }
++        finally { DeleteRoot(root); }
++    }
++
++    [Fact]
++    public async Task RegistrationReassignedWhileWaitingForParentCannotStartTheInstaller()
++    {
++        using var fixture = new InstallerFixture("success", "1.5.0");
++        using Process parent = fixture.StartTestAppProcess();
++        string name = "Local\\NetLights.UpdateAgentReady." + Guid.NewGuid().ToString("N");
++        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, name);
++        bool owned = true;
++        var options = fixture.CreateOptions(TimeSpan.FromSeconds(5)) with { OwnsRegistration = _ => Volatile.Read(ref owned) };
++        Task<int> run = Task.Run(() => fixture.Run(parent.Id, options, name));
++        try
++        {
++            Assert.True(ready.WaitOne(5000));
++            Volatile.Write(ref owned, false);
++            parent.Kill(entireProcessTree:true);Assert.True(parent.WaitForExit(5000));
++            Assert.Equal(12,await run.WaitAsync(TimeSpan.FromSeconds(15)));
++            Assert.False(File.Exists(Path.Combine(fixture.InstallDirectory,"installer-added.marker")));
++            Assert.Equal("old-app-payload",File.ReadAllText(Path.Combine(fixture.InstallDirectory,"rollback-probe.marker")));
++            Assert.Contains("registration-ownership-changed",File.ReadAllText(fixture.Store.PhasePath));
++            Assert.True(fixture.TryGetRunningApp(out _));
++        }
++        finally
++        {
++            if(!parent.HasExited){parent.Kill(entireProcessTree:true);parent.WaitForExit(5000);}
++            await run.WaitAsync(TimeSpan.FromSeconds(15));
++        }
++    }
++
++    private static int RunIsolated(string[] arguments, string root, UpdateAgentTestOptions? options = null)
++    {
++        options ??= new UpdateAgentTestOptions(TimeSpan.FromSeconds(60), TimeSpan.FromMinutes(10),
++            TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(3), new Dictionary<string, string>());
++        // An ordinary DI policy for this filesystem fixture. The production Main
++        // never supplies it and always reads its real per-user Inno ownership.
++        return Program.RunForTests(arguments, root, options with { OwnsRegistration = options.OwnsRegistration ?? (_ => true) });
++    }
++
++    private static string[] Arguments(string installer, string sha256, string root)
++    {
++        string restart = Path.Combine(root, "restart", "NetLights.exe");
++        Directory.CreateDirectory(Path.GetDirectoryName(restart)!);
++        File.WriteAllText(restart, "non-executable isolated restart fixture");
++        return ["--parent", "-123", "--pending", installer, "--sha256", sha256, "--restart", restart];
++    }
+ 
+     private static string CreateRoot()
+     {
+@@ -340,11 +928,12 @@
+         private readonly string _pidFile;
+         private readonly TimeSpan _installerWait;
+         private readonly bool _skipHealthSignal;
+-
+-        public InstallerFixture(string installMode, string expectedVersion, TimeSpan? installerWait = null, bool skipHealthSignal = false)
++        private readonly List<(Process Process, bool IsApp)> _children = [];
++
++        public InstallerFixture(string installMode, string expectedVersion, TimeSpan? installerWait = null, bool skipHealthSignal = false, string? installDirectory = null)
+         {
+             Root = CreateRoot();
+-            InstallDirectory = Path.Combine(Path.GetTempPath(), "nl-agent-install-" + Guid.NewGuid().ToString("N"));
++            InstallDirectory = installDirectory ?? Path.Combine(Path.GetTempPath(), "nl-agent-install-" + Guid.NewGuid().ToString("N"));
+             Directory.CreateDirectory(InstallDirectory);
+             _installMode = installMode;
+             _installerWait = installerWait ?? TimeSpan.FromSeconds(5);
+@@ -366,15 +955,19 @@
+         public string Root { get; }
+         public string InstallDirectory { get; }
+         public PendingUpdateStore Store { get; }
+-
+-        public int Run(int? parentId = null, UpdateAgentTestOptions? options = null)
++        public string InstallerPath => _installerPath;
++        public string InstallerHash => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(
++            Path.Combine(AppContext.BaseDirectory, TestInstallerPrefix + ".exe")))).ToLowerInvariant();
++
++        public int Run(int? parentId = null, UpdateAgentTestOptions? options = null, string? readyName = null)
+         {
+             string hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(_installerPath))).ToLowerInvariant();
+             options ??= CreateOptions(_installerWait);
+             string[] args = ["--parent", (parentId ?? -123).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                 "--pending", _installerPath, "--sha256", hash,
+                 "--restart", Path.Combine(InstallDirectory, "NetLights.exe")];
+-            return Program.RunForTests(args, Root, options);
++            if (readyName is not null) args = [..args, "--ready", readyName];
++            return RunIsolated(args, Root, options);
+         }
+ 
+         public UpdateAgentTestOptions CreateOptions(TimeSpan installerWait)
+@@ -387,15 +980,84 @@
+                 new Dictionary<string, string>(StringComparer.Ordinal)
+                 {
+                     ["NL_TEST_INSTALL_ROOT"] = InstallDirectory,
++                    ["NL_TEST_INSTALLER_ARGUMENTS_FILE"] = Path.Combine(Root, "installer-arguments.json"),
+                     ["NL_TEST_APP_PAYLOAD"] = AppContext.BaseDirectory,
+                     ["NL_TEST_INSTALL_MODE"] = _installMode,
+                     ["NL_TEST_APP_PID_FILE"] = _pidFile,
+-                    ["NL_TEST_APP_SKIP_HEALTH_SIGNAL"] = _skipHealthSignal ? "1" : "0"
++                    ["NL_TEST_APP_SKIP_HEALTH_SIGNAL"] = _skipHealthSignal ? "1" : "0",
++                    ["NL_TEST_UPDATE_RESULT_PATH"] = Store.ResultPath
++                },
++                child =>
++                {
++                    Process owned = Process.GetProcessById(child.Id);
++                    _ = owned.SafeHandle;
++                    bool isApp = string.Equals(Path.GetFullPath(child.StartInfo.FileName),
++                        Path.Combine(InstallDirectory, "NetLights.exe"), StringComparison.OrdinalIgnoreCase);
++                    _children.Add((owned, isApp));
+                 });
+ 
++        public Process StartAgentProcess(IReadOnlyDictionary<string, string>? environment = null,
++            string? readyName = null, string? restartPath = null)
++        {
++            var start = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, TestAppPrefix + ".exe"))
++            {
++                UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = AppContext.BaseDirectory
++            };
++            start.ArgumentList.Add("--run-update-agent");
++            start.ArgumentList.Add(typeof(Program).Assembly.Location);
++            start.ArgumentList.Add(Root);
++            foreach (string argument in new[] { "--parent", "-123", "--pending", _installerPath,
++                "--sha256", InstallerHash, "--restart", restartPath ?? Path.Combine(InstallDirectory, "NetLights.exe") })
++                start.ArgumentList.Add(argument);
++            if (readyName is not null)
++            {
++                start.ArgumentList.Add("--ready");
++                start.ArgumentList.Add(readyName);
++            }
++            foreach ((string key, string value) in CreateOptions(_installerWait).ChildEnvironment)
++                start.Environment[key] = value;
++            if (environment is not null)
++                foreach ((string key, string value) in environment) start.Environment[key] = value;
++            Process process = Process.Start(start) ?? throw new InvalidOperationException("Agent harness did not start.");
++            Process owned = Process.GetProcessById(process.Id);
++            _ = owned.SafeHandle;
++            _children.Add((owned, false));
++            return process;
++        }
++
++        public void PrepareManualAgentHarness()
++        {
++            File.Copy(Path.Combine(AppContext.BaseDirectory, TestAppPrefix + ".exe"), Path.Combine(InstallDirectory, "NetLights.UpdateAgent.exe"));
++            File.Copy(typeof(Program).Assembly.Location, Path.Combine(InstallDirectory, "NetLights.UpdateAgent.dll"));
++            File.Copy(typeof(PendingUpdateStore).Assembly.Location, Path.Combine(InstallDirectory, "NetLights.Updates.dll"));
++        }
++
++        public Process StartManualCompletionProcess()
++        {
++            var start = new ProcessStartInfo(Path.Combine(InstallDirectory, "NetLights.UpdateAgent.exe"))
++            {
++                UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = InstallDirectory
++            };
++            foreach (string argument in new[] { "--run-update-agent", Path.Combine(InstallDirectory, "NetLights.UpdateAgent.dll"), Root,
++                "--complete-manual-install", "--restart", Path.Combine(InstallDirectory, "NetLights.exe") }) start.ArgumentList.Add(argument);
++            Process process = Process.Start(start) ?? throw new InvalidOperationException("Manual completion harness did not start.");
++            Process owned = Process.GetProcessById(process.Id);
++            _ = owned.SafeHandle;
++            _children.Add((owned, false));
++            return process;
++        }
++
+         public bool TryGetRunningApp(out int pid)
+         {
+             pid = 0;
++            foreach ((Process process, bool isApp) in _children)
++            {
++                if (isApp && !process.HasExited)
++                {
++                    pid = process.Id;
++                    return true;
++                }
++            }
+             if (!File.Exists(_pidFile)) return false;
+             foreach (string line in File.ReadAllLines(_pidFile))
+             {
+@@ -440,6 +1102,53 @@
+ 
+         public void Dispose()
+         {
++            string writerPid = InstallDirectory + ".child.pid";
++            if (File.Exists(writerPid))
++            {
++                if (int.TryParse(File.ReadAllText(writerPid), out int pid))
++                {
++                    try
++                    {
++                        using Process writer = Process.GetProcessById(pid);
++                        _ = writer.SafeHandle;
++                        if (!writer.HasExited && IsFixtureOwnedAppPath(writer.MainModule?.FileName))
++                        {
++                            writer.Kill(entireProcessTree: true);
++                            if (!writer.WaitForExit(5000)) throw new TimeoutException("Fixture writer did not exit.");
++                        }
++                    }
++                    catch (ArgumentException) { }
++                }
++                File.Delete(writerPid);
++            }
++            foreach ((Process process, _) in _children)
++            {
++                try
++                {
++                    if (!process.HasExited)
++                    {
++                        process.Kill(entireProcessTree: true);
++                        if (!process.WaitForExit(5000))
++                            throw new TimeoutException("Owned fixture child did not exit.");
++                    }
++                }
++                finally { process.Dispose(); }
++            }
++            string legacyPid = Path.Combine(InstallDirectory, "installer-started-app.pid");
++            if (File.Exists(legacyPid) && int.TryParse(File.ReadAllText(legacyPid), out int legacy))
++            {
++                try
++                {
++                    using Process process = Process.GetProcessById(legacy);
++                    _ = process.SafeHandle;
++                    if (!process.HasExited && IsFixtureOwnedAppPath(process.MainModule?.FileName))
++                    {
++                        process.Kill(entireProcessTree: true);
++                        if (!process.WaitForExit(5000)) throw new TimeoutException("Legacy fixture app did not exit.");
++                    }
++                }
++                catch (ArgumentException) { }
++            }
+             if (File.Exists(_pidFile))
+             {
+                 foreach (string line in File.ReadAllLines(_pidFile))
+diff --git a/tests/NetLights.TestApp/Program.cs b/tests/NetLights.TestApp/Program.cs
+--- a/tests/NetLights.TestApp/Program.cs
++++ b/tests/NetLights.TestApp/Program.cs
+@@ -7,6 +7,28 @@
+ {
+     private static int Main(string[] args)
+     {
++        // Execute the real agent entry in a separate process with a disposable
++        // profile. Production's entry point has no test profile override.
++        if (args.Length >= 3 && args[0] == "--run-update-agent")
++        {
++            var assembly = System.Reflection.Assembly.LoadFrom(args[1]);
++            var entry = assembly.GetType("NetLights.UpdateAgent.Program", throwOnError: true)!
++                .GetMethod("RunForTests", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
++            var optionsType = assembly.GetType("NetLights.UpdateAgent.UpdateAgentTestOptions", throwOnError: true)!;
++            object options = Activator.CreateInstance(optionsType, [TimeSpan.FromSeconds(60), TimeSpan.FromMinutes(10),
++                TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(3),
++                new Dictionary<string, string>(), null, (Func<string, bool>)(_ => true)])!;
++            return (int)entry.Invoke(null, [args[3..], args[2], options])!;
++        }
++        string? startupGate = Environment.GetEnvironmentVariable("NL_TEST_APP_START_GATE");
++        if (!string.IsNullOrEmpty(startupGate))
++        {
++            if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Named test gates require Windows.");
++            using EventWaitHandle entered = EventWaitHandle.OpenExisting(startupGate + ".entered");
++            using EventWaitHandle release = EventWaitHandle.OpenExisting(startupGate);
++            entered.Set();
++            if (!release.WaitOne(TimeSpan.FromMinutes(1))) return 92;
++        }
+         string? pidFile = Environment.GetEnvironmentVariable("NL_TEST_APP_PID_FILE");
+         if (!string.IsNullOrWhiteSpace(pidFile))
+         {
+@@ -23,6 +45,33 @@
+             }
+         }
+ 
++        string? resultPath = Environment.GetEnvironmentVariable("NL_TEST_UPDATE_RESULT_PATH");
++        if (!string.IsNullOrWhiteSpace(resultPath))
++        {
++            string observed = "missing";
++            if (File.Exists(resultPath))
++            {
++                using FileStream input = new(resultPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
++                using var reader = new StreamReader(input);
++                observed = reader.ReadToEnd();
++            }
++            string observedPath = resultPath + ".observed-" + Environment.ProcessId;
++            File.WriteAllText(observedPath + ".tmp", observed);
++            File.Move(observedPath + ".tmp", observedPath);
++            string argumentsPath = resultPath + ".arguments-" + Environment.ProcessId;
++            File.WriteAllText(argumentsPath + ".tmp", System.Text.Json.JsonSerializer.Serialize(args));
++            File.Move(argumentsPath + ".tmp", argumentsPath);
++        }
++
++        if (args.Length == 2 && args[0] == "--write-marker")
++        {
++            while (true)
++            {
++                File.WriteAllText(args[1], Environment.TickCount64.ToString(System.Globalization.CultureInfo.InvariantCulture));
++                Thread.Sleep(25);
++            }
++        }
++
+         Thread.Sleep(TimeSpan.FromMinutes(5));
+         return 0;
+     }
+diff --git a/tests/NetLights.TestInstaller/Program.cs b/tests/NetLights.TestInstaller/Program.cs
+--- a/tests/NetLights.TestInstaller/Program.cs
++++ b/tests/NetLights.TestInstaller/Program.cs
+@@ -4,6 +4,9 @@
+ {
+     private static int Main(string[] args)
+     {
++        string? argv = Environment.GetEnvironmentVariable("NL_TEST_INSTALLER_ARGUMENTS_FILE");
++        if (argv is not null && args.Any(value => value.StartsWith("/DIR=", StringComparison.Ordinal)))
++            File.WriteAllText(argv, System.Text.Json.JsonSerializer.Serialize(args));
+         if (!args.Contains("/NETLIGHTSUPDATE", StringComparer.OrdinalIgnoreCase))
+             return 91;
+ 
+@@ -12,6 +15,21 @@
+         string payload = Environment.GetEnvironmentVariable("NL_TEST_APP_PAYLOAD")
+             ?? throw new InvalidOperationException("NL_TEST_APP_PAYLOAD is required.");
+         string mode = Environment.GetEnvironmentVariable("NL_TEST_INSTALL_MODE") ?? "success";
++
++        string? invocations = Environment.GetEnvironmentVariable("NL_TEST_INSTALL_INVOCATIONS");
++        if (!string.IsNullOrEmpty(invocations)) File.AppendAllText(invocations, "started" + Environment.NewLine);
++        string? gateName = Environment.GetEnvironmentVariable("NL_TEST_INSTALL_GATE");
++        string? installerPidFile = Environment.GetEnvironmentVariable("NL_TEST_INSTALL_PID_FILE");
++        if (!string.IsNullOrEmpty(installerPidFile)) File.WriteAllText(installerPidFile,
++            Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
++        if (!string.IsNullOrEmpty(gateName))
++        {
++            if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Named test gates require Windows.");
++            using EventWaitHandle entered = EventWaitHandle.OpenExisting(gateName + ".entered");
++            using EventWaitHandle release = EventWaitHandle.OpenExisting(gateName);
++            entered.Set();
++            if (!release.WaitOne(TimeSpan.FromSeconds(30))) return 93;
++        }
+ 
+         Directory.CreateDirectory(target);
+         CopyPayload(payload, target, "NetLights.TestApp.exe", "NetLights.exe");
+@@ -30,7 +48,21 @@
+             File.WriteAllText(Path.Combine(target, "installer-started-app.pid"), child.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+         }
+ 
+-        if (mode.Equals("hang", StringComparison.OrdinalIgnoreCase))
++        if (mode.Equals("hang-child", StringComparison.OrdinalIgnoreCase))
++        {
++            var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(target, "NetLights.exe"))
++            {
++                UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = target
++            };
++            start.ArgumentList.Add("--write-marker");
++            start.ArgumentList.Add(Path.Combine(target, "child-writer.marker"));
++            using var child = System.Diagnostics.Process.Start(start)
++                ?? throw new InvalidOperationException("Writer child did not start.");
++            File.WriteAllText(Path.Combine(Path.GetDirectoryName(target)!, Path.GetFileName(target) + ".child.pid"),
++                child.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
++        }
++
++        if (mode.Equals("hang", StringComparison.OrdinalIgnoreCase) || mode.Equals("hang-child", StringComparison.OrdinalIgnoreCase))
+             Thread.Sleep(Timeout.Infinite);
+ 
+         return mode.Equals("fail", StringComparison.OrdinalIgnoreCase) ? 17 : 0;
+diff --git a/tests/NetLights.UnitTests/AgentSilentSetupInstallerTests.cs b/tests/NetLights.UnitTests/AgentSilentSetupInstallerTests.cs
+new file mode 100644
+--- /dev/null
++++ b/tests/NetLights.UnitTests/AgentSilentSetupInstallerTests.cs
+@@ -0,0 +1,26 @@
++using NetLights.Updates;
++using Xunit;
++
++namespace NetLights.UnitTests;
++
++public sealed class AgentSilentSetupInstallerTests
++{
++    [Fact]
++    public void InterruptedTransactionRequiresManualInstallationRatherThanAnAutomaticRetry()
++    {
++        Assert.Equal("Сохранена отметка незавершённого обновления. Без подтверждения владельца автоматически удалять её небезопасно. Данные не изменены. Повторный запуск установщика не гарантирует восстановление; нужна проверка этой отметки.",
++            AgentSilentSetupInstaller.FailureForExitCode(11));
++        Assert.Null(AgentSilentSetupInstaller.FailureForExitCode(10));
++        Assert.Null(AgentSilentSetupInstaller.FailureForExitCode(1));
++    }
++
++    [Theory]
++    [InlineData("")]
++    [InlineData("missing.exe")]
++    [InlineData("missing.exe & notepad.exe")]
++    public void MissingOrInvalidRestartTargetCannotLaunchAnAgent(string restart)
++    {
++        var installer = new AgentSilentSetupInstaller(restart);
++        Assert.False(installer.TryStartSilent("NetLights-Setup-win-x64-1.0.1.exe", new string('a', 64)));
++    }
++}
+diff --git a/tests/NetLights.UnitTests/BridgeSnapshotTests.cs b/tests/NetLights.UnitTests/BridgeSnapshotTests.cs
+new file mode 100644
+--- /dev/null
++++ b/tests/NetLights.UnitTests/BridgeSnapshotTests.cs
+@@ -0,0 +1,80 @@
++using NetLights.Updates;
++using Xunit;
++
++namespace NetLights.UnitTests;
++
++public sealed class BridgeSnapshotTests : IDisposable
++{
++    private readonly string _root = Path.Combine(Path.GetTempPath(), "nl-bridge-snapshot-" + Guid.NewGuid().ToString("N"));
++    private string App => Path.Combine(_root, "app");
++    private string Updates => Path.Combine(_root, "updates");
++    private string Exe => Path.Combine(App, "NetLights.exe");
++    public BridgeSnapshotTests()
++    {
++        Directory.CreateDirectory(App);
++        File.WriteAllText(Exe, "original-app");
++        File.WriteAllText(Path.Combine(App, "unins000.exe"), "original-uninstaller");
++    }
++
++    [Fact]
++    public void RecoveryControlFileCannotCollideWithOriginalInstallationPayload()
++    {
++        string original = Path.Combine(App, "installation-metadata.json");
++        string nested = Path.Combine(App, "payload", "installation-metadata.json");
++        Directory.CreateDirectory(Path.GetDirectoryName(nested)!);
++        File.WriteAllText(original, "original-control-name-bytes");
++        File.WriteAllText(nested, "original-payload-name-bytes");
++        using var backup = InstallationSnapshot.Create(Exe, Updates, _ => new Metadata());
++        File.WriteAllText(original, "changed");
++        File.WriteAllText(nested, "changed-nested");
++        File.WriteAllText(Exe, "new-app");
++        Assert.True(backup.Restore());
++        Assert.True(backup.FilesRestored);
++        Assert.Equal("original-control-name-bytes", File.ReadAllText(original));
++        Assert.Equal("original-payload-name-bytes", File.ReadAllText(nested));
++        Assert.Equal("original-app", File.ReadAllText(Exe));
++    }
++
++    [Fact]
++    public void RestoreReplacesInstallerAddedDirectoryWithOriginalFileAndRecreatesEmptyDirectories()
++    {
++        string original = Path.Combine(App, "original.file");
++        string empty = Path.Combine(App, "empty", "nested");
++        File.WriteAllText(original, "old-file");
++        Directory.CreateDirectory(empty);
++        using var backup = InstallationSnapshot.Create(Exe, Updates, _ => new Metadata());
++        File.Delete(original);
++        Directory.CreateDirectory(original);
++        File.WriteAllText(Path.Combine(original, "added.bin"), "installer-added");
++        Directory.Delete(Path.Combine(App, "empty"), recursive: true);
++        Assert.True(backup.Restore());
++        Assert.Equal("old-file", File.ReadAllText(original));
++        Assert.True(Directory.Exists(empty));
++        Assert.Empty(Directory.EnumerateFileSystemEntries(empty));
++    }
++
++    [Fact]
++    public void RestoreRecreatesTheExactDeletedInstallationRootFromItsCapturedPayload()
++    {
++        string empty = Path.Combine(App, "empty", "nested");
++        Directory.CreateDirectory(empty);
++        using var backup = InstallationSnapshot.Create(Exe, Updates, _ => new Metadata());
++        Directory.Delete(App, recursive: true);
++        Assert.True(backup.Restore());
++        Assert.True(backup.FilesRestored);
++        Assert.Equal("original-app", File.ReadAllText(Exe));
++        Assert.Equal("original-uninstaller", File.ReadAllText(Path.Combine(App, "unins000.exe")));
++        Assert.True(Directory.Exists(empty));
++    }
++
++    private sealed class Metadata : IInstallationMetadataSnapshot
++    {
++        public bool Restore() => true;
++        public void WriteRecoveryCopy(string directory)
++        {
++            using var output = new FileStream(Path.Combine(directory, "installation-metadata.json"), FileMode.CreateNew);
++            output.Write("control"u8);
++        }
++    }
++    public void Dispose() => Directory.Delete(_root, recursive: true);
++}
+diff --git a/tests/NetLights.UnitTests/OwnedInstallationMetadataTests.cs b/tests/NetLights.UnitTests/OwnedInstallationMetadataTests.cs
+new file mode 100644
+--- /dev/null
++++ b/tests/NetLights.UnitTests/OwnedInstallationMetadataTests.cs
+@@ -0,0 +1,187 @@
++using Microsoft.Win32;
++using NetLights.Updates;
++using System.Runtime.Versioning;
++using Xunit;
++
++namespace NetLights.UnitTests;
++
++[SupportedOSPlatform("windows")]
++public sealed class OwnedInstallationMetadataTests : IDisposable
++{
++    private readonly string _root = Path.Combine(Path.GetTempPath(), "nl-metadata-" + Guid.NewGuid().ToString("N"));
++    private readonly string _keyPath = @"Software\NetLights.Tests\" + Guid.NewGuid().ToString("N");
++    private string Executable => Path.Combine(_root, "app", "NetLights.exe");
++    private string Programs => Path.Combine(_root, "programs");
++    private string Shortcut => Path.Combine(Programs, "Custom Group", "Net Lights.lnk");
++
++    public OwnedInstallationMetadataTests()
++    {
++        Directory.CreateDirectory(Path.GetDirectoryName(Executable)!);
++        Directory.CreateDirectory(Programs);
++        File.WriteAllText(Executable, "old-app");
++        File.WriteAllText(Path.Combine(Path.GetDirectoryName(Executable)!, "unins000.exe"), "old-uninstaller");
++    }
++
++    [Fact]
++    public void Restore_RestoresTypedValuesAndCustomGroupShortcut()
++    {
++        Register();
++        Directory.CreateDirectory(Path.GetDirectoryName(Shortcut)!);
++        File.WriteAllText(Shortcut, "old-shortcut");
++        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(_keyPath, writable: true)!)
++        {
++            key.SetValue("DisplayVersion", "1.6.0", RegistryValueKind.String);
++            key.SetValue("MajorVersion", 1, RegistryValueKind.DWord);
++            key.SetValue("CustomBinary", new byte[] { 1, 2 }, RegistryValueKind.Binary);
++        }
++        IInstallationMetadataSnapshot metadata = Capture();
++        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(_keyPath, writable: true)!)
++        {
++            key.SetValue("DisplayVersion", "9.0.0");
++            key.SetValue("MajorVersion", 9);
++            key.SetValue("NewValue", "remove");
++        }
++        File.WriteAllText(Shortcut, "new-shortcut");
++        Assert.True(metadata.Restore());
++        using RegistryKey restored = Registry.CurrentUser.OpenSubKey(_keyPath)!;
++        Assert.Equal("1.6.0", restored.GetValue("DisplayVersion"));
++        Assert.Equal(RegistryValueKind.DWord, restored.GetValueKind("MajorVersion"));
++        Assert.Equal(1, restored.GetValue("MajorVersion"));
++        Assert.Equal(new byte[] { 1, 2 }, Assert.IsType<byte[]>(restored.GetValue("CustomBinary")));
++        Assert.Null(restored.GetValue("NewValue"));
++        Assert.Equal("old-shortcut", File.ReadAllText(Shortcut));
++    }
++
++    [Fact]
++    public void Restore_DoesNotTouchReassignedRegistryOrShortcut()
++    {
++        Register();
++        IInstallationMetadataSnapshot metadata = Capture();
++        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(_keyPath, writable: true)!)
++            key.SetValue("InstallLocation", Path.Combine(_root, "foreign"));
++        Assert.False(metadata.Restore());
++        using RegistryKey current = Registry.CurrentUser.OpenSubKey(_keyPath)!;
++        Assert.Equal(Path.Combine(_root, "foreign"), current.GetValue("InstallLocation"));
++    }
++
++    [Fact]
++    public void Restore_DoesNotAcquireKeyAbsentAtCapture()
++    {
++        IInstallationMetadataSnapshot metadata = Capture();
++        Register();
++        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(_keyPath, writable: true)!) key.SetValue("Keep", "foreign");
++        Assert.True(metadata.Restore());
++        using RegistryKey current = Registry.CurrentUser.OpenSubKey(_keyPath)!;
++        Assert.Equal("foreign", current.GetValue("Keep"));
++    }
++
++    [Fact]
++    public void Restore_RechecksWritableKeyAfterShortcutCallbackReassignsOwnership()
++    {
++        Register();
++        Directory.CreateDirectory(Path.GetDirectoryName(Shortcut)!);
++        File.WriteAllText(Shortcut, "old-shortcut");
++        bool restoring = false;
++        IInstallationMetadataSnapshot metadata = OwnedInstallationMetadata.CaptureWindows(Executable, _keyPath, Programs, _ =>
++        {
++            if (restoring)
++            {
++                using RegistryKey key = Registry.CurrentUser.OpenSubKey(_keyPath, writable: true)!;
++                key.SetValue("InstallLocation", Path.Combine(_root, "foreign"));
++                key.SetValue("DisplayVersion", "foreign-version");
++                key.SetValue("KeepForeign", "keep");
++            }
++            return Executable;
++        });
++        restoring = true;
++        Assert.False(metadata.Restore());
++        using RegistryKey current = Registry.CurrentUser.OpenSubKey(_keyPath)!;
++        Assert.Equal(Path.Combine(_root, "foreign"), current.GetValue("InstallLocation"));
++        Assert.Equal("foreign-version", current.GetValue("DisplayVersion"));
++        Assert.Equal("keep", current.GetValue("KeepForeign"));
++        Assert.Equal("old-shortcut", File.ReadAllText(Shortcut));
++    }
++
++    [Fact]
++    public void Restore_RecreatesOwnedRegistrationDeletedByInstaller()
++    {
++        Register();
++        IInstallationMetadataSnapshot metadata = Capture();
++        Registry.CurrentUser.DeleteSubKeyTree(_keyPath);
++        Assert.True(metadata.Restore());
++        using RegistryKey current = Registry.CurrentUser.OpenSubKey(_keyPath)!;
++        Assert.Equal(Path.GetDirectoryName(Executable), current.GetValue("InstallLocation"));
++    }
++
++    [Fact]
++    public void Restore_LeavesForeignShortcutAndRegistrationIntact()
++    {
++        Register();
++        string target = Executable;
++        IInstallationMetadataSnapshot metadata = OwnedInstallationMetadata.CaptureWindows(Executable, _keyPath, Programs, _ => target);
++        Directory.CreateDirectory(Path.GetDirectoryName(Shortcut)!);
++        File.WriteAllText(Shortcut, "foreign-shortcut");
++        target = Path.Combine(_root, "foreign.exe");
++        Assert.False(metadata.Restore());
++        Assert.Equal("foreign-shortcut", File.ReadAllText(Shortcut));
++    }
++
++    [Fact]
++    public void Capture_RejectsTraversalAndOversizedRegistryValues()
++    {
++        Register();
++        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(_keyPath, writable: true)!)
++            key.SetValue("Inno Setup: Icon Group", @"..\foreign");
++        Assert.Throws<InvalidDataException>(() => Capture());
++        Register();
++        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(_keyPath, writable: true)!) key.SetValue("Huge", new string('x', 8193));
++        Assert.Throws<InvalidDataException>(() => Capture());
++    }
++
++    [Fact]
++    public void InstallationRestore_RestartsFilesButRetainsRecoveryCopyWhenMetadataFails()
++    {
++        Register();
++        string updates = Path.Combine(_root, "updates");
++        using (InstallationSnapshot snapshot = InstallationSnapshot.Create(Executable, updates, _ => Capture()))
++        {
++            File.WriteAllText(Executable, "new-app");
++            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(_keyPath, writable: true)!)
++                key.SetValue("InstallLocation", Path.Combine(_root, "foreign"));
++            Assert.False(snapshot.Restore());
++            Assert.True(snapshot.FilesRestored);
++            Assert.Equal("old-app", File.ReadAllText(Executable));
++        }
++        string recovery = Assert.Single(Directory.GetDirectories(Path.Combine(updates, "rollback")));
++        Assert.True(File.Exists(Path.Combine(recovery, "installation-metadata.json")));
++        Assert.Equal("old-app", File.ReadAllText(Path.Combine(recovery, "payload", "NetLights.exe")));
++    }
++
++    [Fact]
++    public void CaptureFailure_AbortsBeforeBackupOrInstalledFilesChange()
++    {
++        string updates = Path.Combine(_root, "updates");
++        Assert.Throws<System.Reflection.TargetInvocationException>(() => InstallationSnapshot.Create(Executable, updates,
++            _ => throw new System.Reflection.TargetInvocationException(new System.Runtime.InteropServices.COMException("Fixture failure."))));
++        Assert.Equal("old-app", File.ReadAllText(Executable));
++        Assert.Equal("old-uninstaller", File.ReadAllText(Path.Combine(Path.GetDirectoryName(Executable)!, "unins000.exe")));
++        Assert.False(Directory.Exists(updates));
++    }
++
++    private IInstallationMetadataSnapshot Capture()
++        => OwnedInstallationMetadata.CaptureWindows(Executable, _keyPath, Programs, _ => Executable);
++
++    private void Register()
++    {
++        using RegistryKey key = Registry.CurrentUser.CreateSubKey(_keyPath);
++        key.SetValue("InstallLocation", Path.GetDirectoryName(Executable)!);
++        key.SetValue("UninstallString", "\"" + Path.Combine(Path.GetDirectoryName(Executable)!, "unins000.exe") + "\"");
++        key.SetValue("Inno Setup: Icon Group", "Custom Group");
++    }
++
++    public void Dispose()
++    {
++        Registry.CurrentUser.DeleteSubKeyTree(_keyPath, throwOnMissingSubKey: false);
++        Directory.Delete(_root, recursive: true);
++    }
++}
+diff --git a/tests/NetLights.UnitTests/SilentUpdateCoordinatorTests.cs b/tests/NetLights.UnitTests/SilentUpdateCoordinatorTests.cs
+--- a/tests/NetLights.UnitTests/SilentUpdateCoordinatorTests.cs
++++ b/tests/NetLights.UnitTests/SilentUpdateCoordinatorTests.cs
+@@ -235,6 +235,154 @@
+         {
+             Directory.Delete(root, true);
+         }
++    }
++
++    [Fact]
++    public async Task AutomaticRetryOfFailedCandidateDoesNotDownloadButExplicitAttemptIsAllowed()
++    {
++        var store = new UpdateRetryStore(Path.Combine(_tempDir, "retry-state"));
++        store.RecordFailure("1.0.2", MatchingDigest()["sha256:".Length..]);
++        FakeFeed feed = new()
++        {
++            Latest = new GitHubRelease { TagName = "v1.0.2", Assets = ReleaseAssets("1.0.2") },
++            DownloadOk = true
++        };
++        var installer = new FakeInstaller();
++        SilentUpdateContext automatic = Context("NetLights", feed, installer) with { IsAutomatic = true, RetryStore = store };
++        Assert.Equal(SilentUpdateOutcome.Busy, await SilentUpdateCoordinator.RunOnce(automatic));
++        Assert.Empty(feed.DownloadedUrls);
++        Assert.Null(installer.Started);
++        Assert.Equal(SilentUpdateOutcome.Applied, await SilentUpdateCoordinator.RunOnce(automatic with { IsAutomatic = false }));
++        Assert.Single(feed.DownloadedUrls);
++        Assert.NotNull(installer.Started);
++    }
++
++    [Fact]
++    public async Task AssetNameTraversalIsRejectedBeforeAnyDownloadOrInstallerLaunch()
++    {
++        GitHubAsset good = ReleaseAssets("1.0.2")[0];
++        var feed = new FakeFeed
++        {
++            Latest = new GitHubRelease
++            {
++                TagName = "v1.0.2",
++                Assets = [new GitHubAsset
++                {
++                    Name = @"NetLights-Setup-win-x64-1.0.2.exe\..\..\escape.exe",
++                    BrowserDownloadUrl = good.BrowserDownloadUrl, Size = good.Size, Digest = good.Digest
++                }]
++            },
++            DownloadOk = true
++        };
++        var installer = new FakeInstaller();
++        Assert.Equal(SilentUpdateOutcome.Failed, await SilentUpdateCoordinator.RunOnce(Context("NetLights", feed, installer)));
++        Assert.Empty(feed.DownloadedUrls);
++        Assert.Null(installer.Started);
++        Assert.False(File.Exists(Path.Combine(Directory.GetParent(_tempDir)!.FullName, "escape.exe")));
++    }
++
++    [Theory]
++    [InlineData(null, "Не удалось запустить установку обновления.")]
++    [InlineData("Сохранена отметка незавершённого обновления. Без подтверждения владельца автоматически удалять её небезопасно. Данные не изменены. Повторный запуск установщика не гарантирует восстановление; нужна проверка этой отметки.", "Сохранена отметка незавершённого обновления. Без подтверждения владельца автоматически удалять её небезопасно. Данные не изменены. Повторный запуск установщика не гарантирует восстановление; нужна проверка этой отметки.")]
++    public async Task FailedHandoffReportsTheInstallerReasonAndDoesNotExit(string? detail, string expected)
++    {
++        var feed = new FakeFeed
++        {
++            Latest = new GitHubRelease { TagName = "v1.0.2", Assets = ReleaseAssets("1.0.2") },
++            DownloadOk = true
++        };
++        var installer = new FakeInstaller { StartOk = false, LastError = detail };
++        string? message = null;
++        int exits = 0;
++        SilentUpdateContext context = Context("NetLights", feed, installer, exit: () => exits++)
++            with { ReportError = value => message = value };
++        Assert.Equal(SilentUpdateOutcome.Failed, await SilentUpdateCoordinator.RunOnce(context));
++        Assert.Equal(expected, message);
++        Assert.Equal(0, exits);
++        Assert.False(File.Exists(installer.Started));
++    }
++
++    [Theory]
++    [InlineData("v2")]
++    [InlineData("v1")]
++    [InlineData("torn")]
++    [InlineData("empty")]
++    public async Task ActualInterruptedMarkerBlocksTwoAutomaticAttemptsBeforeAnyDownload(string format)
++    {
++        string exe = Path.Combine(_appDir, "NetLights.exe");
++        File.WriteAllText(exe, "isolated executable identity");
++        string marker = Path.Combine(_tempDir, "active-" + UpdatePolicy.InstallationIdentity(exe) + ".json");
++        string bytes = format switch
++        {
++            "empty" => "", "torn" => "{partial",
++            _ => System.Text.Json.JsonSerializer.Serialize(new { Version = format == "v2" ? 2 : 1,
++                InstalledExecutable = UpdatePolicy.CanonicalInstallationPath(exe) })
++        };
++        File.WriteAllText(marker, bytes);
++        int ownershipReads = 0;
++        var installer = new AgentSilentSetupInstaller(exe, _tempDir, _ => { ownershipReads++; return true; });
++        var feed = new FakeFeed { Latest = new GitHubRelease { TagName = "v1.0.2", Assets = ReleaseAssets("1.0.2") }, DownloadOk = true };
++        string? reported = null;
++        var context = Context("NetLights", feed, installer) with { IsAutomatic = true,
++            RetryStore = new UpdateRetryStore(_tempDir), ReportError = value => reported = value };
++        for (int attempt = 0; attempt < 2; attempt++)
++            Assert.Equal(SilentUpdateOutcome.Busy, await SilentUpdateCoordinator.RunOnce(context));
++        Assert.True(ownershipReads >= 2);
++        Assert.Empty(feed.DownloadedUrls);
++        Assert.Equal(UpdatePolicy.UnresolvedTransactionNotice, reported);
++        Assert.Equal(bytes, File.ReadAllText(marker));
++        Assert.False(File.Exists(Path.Combine(_tempDir, "failed-candidate.json")));
++        Assert.Empty(Directory.GetFiles(_tempDir, "interrupted-*.json"));
++    }
++
++    [Fact]
++    public async Task ForeignRegistrationBlocksDownloadAndLeavesBothInstallationAndRegistrationUntouched()
++    {
++        string exe = Path.Combine(_appDir, "NetLights.exe");
++        File.WriteAllText(exe, "installation A");
++        string foreign = Path.Combine(_tempDir, "B", "NetLights.exe");
++        Directory.CreateDirectory(Path.GetDirectoryName(foreign)!); File.WriteAllText(foreign, "installation B");
++        var registration = new Dictionary<string,string> { ["InstallLocation"] = Path.GetDirectoryName(foreign)!, ["DisplayVersion"] = "1.6.1" };
++        string before = System.Text.Json.JsonSerializer.Serialize(registration);
++        int reads = 0;
++        var installer = new AgentSilentSetupInstaller(exe, _tempDir, candidate => {
++            reads++; return string.Equals(Path.GetDirectoryName(candidate), registration["InstallLocation"], StringComparison.OrdinalIgnoreCase);
++        });
++        var feed = new FakeFeed { Latest = new GitHubRelease { TagName = "v1.0.2", Assets = ReleaseAssets("1.0.2") }, DownloadOk = true };
++        string? reason = null;
++        var context = Context("NetLights",feed,installer) with { IsAutomatic=true, ReportError=value=>reason=value };
++        Assert.Equal(SilentUpdateOutcome.Busy, await SilentUpdateCoordinator.RunOnce(context));
++        Assert.True(reads > 0); Assert.Empty(feed.DownloadedUrls);
++        Assert.Equal(UpdatePolicy.RegistrationMismatchNotice, reason);
++        Assert.Equal("installation A",File.ReadAllText(exe)); Assert.Equal("installation B",File.ReadAllText(foreign));
++        Assert.Equal(before,System.Text.Json.JsonSerializer.Serialize(registration));
++        Assert.Empty(Directory.GetFiles(_tempDir,"active-*.json"));
++    }
++
++    [Fact]
++    public async Task FailedHandoffPersistsCooldownBeforeAnotherAutomaticPayloadDownload()
++    {
++        var feed = new FakeFeed { Latest = new GitHubRelease { TagName = "v1.0.2", Assets = ReleaseAssets("1.0.2") }, DownloadOk = true };
++        var installer = new FakeInstaller { StartOk = false };
++        var guard = new UpdateRetryStore(_tempDir);
++        var context = Context("NetLights",feed,installer) with { IsAutomatic=true,RetryStore=guard };
++        Assert.Equal(SilentUpdateOutcome.Failed,await SilentUpdateCoordinator.RunOnce(context));
++        string hash = IntegrityVerifier.DigestSha256(ReleaseAssets("1.0.2")[0].Digest)!;
++        Assert.False(new UpdateRetryStore(_tempDir).AllowsAutomaticAttempt("1.0.2",hash));
++        Assert.Equal(SilentUpdateOutcome.Busy,await SilentUpdateCoordinator.RunOnce(context));
++        Assert.Single(feed.DownloadedUrls);
++    }
++
++    [Fact]
++    public async Task MissingExplicitPolicyUsesTheFailClosedProductionDefault()
++    {
++        var feed = new FakeFeed { Latest = new GitHubRelease { TagName = "v1.0.2", Assets = ReleaseAssets("1.0.2") }, DownloadOk = true };
++        var installer = new FakeInstaller();
++        string? reason = null;
++        var context = Context("NetLights", feed, installer) with { InstallationPreflight=null, ReportError=value=>reason=value };
++        Assert.Equal(SilentUpdateOutcome.Busy, await SilentUpdateCoordinator.RunOnce(context));
++        Assert.Equal(UpdatePolicy.RegistrationMismatchNotice,reason);
++        Assert.Empty(feed.DownloadedUrls); Assert.Null(installer.Started);
+     }
+ 
+     private SilentUpdateContext Context(
+@@ -256,7 +404,8 @@
+             feed,
+             installer,
+             exit ?? (() => { }),
+-            CancellationToken.None);
++            CancellationToken.None,
++            InstallationPreflight: () => installer.PreflightError);
+ 
+     private static string MatchingDigest()
+         => "sha256:" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData([1])).ToLowerInvariant();
+@@ -320,6 +469,8 @@
+ 
+     private sealed class FakeInstaller : ISetupInstaller
+     {
++        public bool StartOk { get; set; } = true;
++        public string? LastError { get; set; }
+         public string? Started { get; private set; }
+         public string? StartedSha256 { get; private set; }
+ 
+@@ -327,7 +478,7 @@
+         {
+             Started = setupPath;
+             StartedSha256 = verifiedSha256;
+-            return true;
++            return StartOk;
+         }
+     }
+ }
+diff --git a/tests/NetLights.UnitTests/UpdateRetryStoreTests.cs b/tests/NetLights.UnitTests/UpdateRetryStoreTests.cs
+new file mode 100644
+--- /dev/null
++++ b/tests/NetLights.UnitTests/UpdateRetryStoreTests.cs
+@@ -0,0 +1,59 @@
++using Microsoft.Extensions.Time.Testing;
++using NetLights.Updates;
++using Xunit;
++
++namespace NetLights.UnitTests;
++
++public sealed class UpdateRetryStoreTests : IDisposable
++{
++    private readonly string _root = Path.Combine(Path.GetTempPath(), "nl-update-retry-" + Guid.NewGuid().ToString("N"));
++    private readonly FakeTimeProvider _time = new(new DateTimeOffset(2026, 10, 22, 0, 0, 0, TimeSpan.Zero));
++    private static readonly string Hash = new('a', 64);
++
++    [Fact]
++    public void FailedCandidateIsBlockedAcrossStoreInstancesUntilCooldownExpires()
++    {
++        var store = new UpdateRetryStore(_root, _time);
++        Assert.True(store.AllowsAutomaticAttempt("1.7.0", Hash));
++        store.RecordFailure("v1.7.0", Hash);
++        Assert.False(new UpdateRetryStore(_root, _time).AllowsAutomaticAttempt("1.7.0", Hash));
++        Assert.True(store.AllowsAutomaticAttempt("1.7.1", Hash));
++        Assert.True(store.AllowsAutomaticAttempt("1.7.0", new string('b', 64)));
++        _time.Advance(TimeSpan.FromHours(12));
++        Assert.True(store.AllowsAutomaticAttempt("1.7.0", Hash));
++        store.RecordFailure("1.7.0", Hash);
++        _time.Advance(TimeSpan.FromHours(12));
++        Assert.False(store.AllowsAutomaticAttempt("1.7.0", Hash));
++        _time.Advance(TimeSpan.FromHours(12));
++        Assert.True(store.AllowsAutomaticAttempt("1.7.0", Hash));
++    }
++
++    [Theory]
++    [InlineData("null")]
++    [InlineData("{\"version\":\"1.7.0\",\"sha256\":null,\"attempts\":1}")]
++    [InlineData("{")]
++    public void CorruptGuardBlocksAutomaticAttemptsButCanBeReplacedByRecordedFailure(string json)
++    {
++        Directory.CreateDirectory(_root);
++        File.WriteAllText(Path.Combine(_root, "failed-candidate.json"), json);
++        var store = new UpdateRetryStore(_root, _time);
++        Assert.False(store.AllowsAutomaticAttempt("1.7.0", Hash));
++        store.RecordFailure("1.7.0", Hash);
++        Assert.False(store.AllowsAutomaticAttempt("1.7.0", Hash));
++        Assert.True(store.AllowsAutomaticAttempt("1.7.1", Hash));
++        Assert.Empty(Directory.GetFiles(_root, "*.tmp"));
++    }
++
++    [Fact]
++    public void OversizedGuardBlocksAutomaticAttempts()
++    {
++        Directory.CreateDirectory(_root);
++        File.WriteAllText(Path.Combine(_root, "failed-candidate.json"), new string('x', 4097));
++        Assert.False(new UpdateRetryStore(_root, _time).AllowsAutomaticAttempt("1.7.0", Hash));
++    }
++
++    public void Dispose()
++    {
++        if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
++    }
++}

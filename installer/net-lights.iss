@@ -1,6 +1,6 @@
 #define MyAppName "Net Lights"
 #ifndef MyAppVersion
-#define MyAppVersion "1.6.0"
+#define MyAppVersion "1.7.0"
 #endif
 #define MyAppPublisher "AryaPaw"
 #define MyAppURL "https://github.com/AryaPaw/net-lights"
@@ -21,7 +21,7 @@ PrivilegesRequiredOverridesAllowed=commandline
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-SetupIconFile=..\src\NetLights.App\Assets\app.ico
+SetupIconFile=..\native\assets\app.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -48,6 +48,7 @@ Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 Name: "{group}\Net Lights"; Filename: "{app}\{#MyAppExeName}"
 
 [Run]
+Filename: "{app}\NetLights.UpdateAgent.exe"; Parameters: "--complete-manual-install --restart ""{app}\{#MyAppExeName}"""; Flags: runhidden; Check: not IsUpdateAgentInstall
 Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall skipifsilent; Check: not IsUpdateAgentInstall
 Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent; Check: not IsUpdateAgentInstall
 

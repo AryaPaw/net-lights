@@ -13,14 +13,24 @@ concurrency:
 jobs:
   release:
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       CI: true
+      CARGO_LLVM_COV_SETUP: "no"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+      - name: Functional UI test tools
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          global-json-file: global.json
+          version: "0.11.7"
+          enable-cache: false
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          $channel = [regex]::Match((Get-Content rust-toolchain.toml -Raw), '(?m)^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$').Groups[1].Value
+          if (-not $channel) { throw 'Rust toolchain must be pinned in rust-toolchain.toml.' }
+          rustup toolchain install $channel --profile minimal --component rustfmt --component clippy --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain setup failed.' }
       - name: Version
         id: ver
         shell: pwsh
@@ -31,7 +41,7 @@ jobs:
           [xml]$props = Get-Content Directory.Build.props
           if ($version -cne $props.Project.PropertyGroup.Version) { throw "Tag $tag differs from Directory.Build.props version $($props.Project.PropertyGroup.Version)" }
           echo "version=$version" >> $env:GITHUB_OUTPUT
-      - name: Verify
+      - name: Verify build, tests and mandatory offline coverage
         shell: pwsh
         run: scripts/verify.ps1 -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
       - name: Upload test and coverage results
@@ -41,14 +51,6 @@ jobs:
           name: release-test-results
           path: TestResults
           if-no-files-found: warn
-      - name: Publish
-        shell: pwsh
-        run: |
-          $v = "${{ steps.ver.outputs.version }}"
-          dotnet publish src/NetLights.App/NetLights.App.csproj -c Release -r win-x64 --self-contained true -p:Version=$v -p:RestoreLockedMode=false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o artifacts/publish
-          if ($LASTEXITCODE -ne 0) { throw "App publish failed: $LASTEXITCODE" }
-          dotnet publish src/NetLights.UpdateAgent/NetLights.UpdateAgent.csproj -c Release -r win-x64 --self-contained true -p:Version=$v -p:RestoreLockedMode=false -p:PublishSingleFile=true -p:DebugType=none -o artifacts/publish
-          if ($LASTEXITCODE -ne 0) { throw "Update agent publish failed: $LASTEXITCODE" }
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Installer
@@ -61,7 +63,8 @@ jobs:
           )
           $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $iscc) { throw "Inno Setup compiler (ISCC.exe) was not found." }
-          & $iscc "/DMyAppVersion=$v" /Oartifacts "/FNetLights-Setup-win-x64-$v" installer/net-lights.iss
+          $publish = (Resolve-Path "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/publish").Path
+          & $iscc "/DMyAppVersion=$v" "/DPublishDir=$publish" /Oartifacts "/FNetLights-Setup-win-x64-$v" installer/net-lights.iss
           if ($LASTEXITCODE -ne 0) { throw "Installer build failed: $LASTEXITCODE" }
       - name: GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
@@ -78,4 +81,4 @@ jobs:
             | --- | --- |
             | **Установка** на обычный 64-bit ПК (Intel/AMD) | [NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe) |
 
-            Нужен Windows 11 x64. Сборка self-contained, отдельный .NET Runtime не нужен. Автообновление скачивает Setup и ставит его тихим установщиком.
+            Нужен Windows 11 x64. Нативная сборка на Rust, отдельный .NET Runtime не нужен. Автообновление скачивает Setup и ставит его тихим установщиком.

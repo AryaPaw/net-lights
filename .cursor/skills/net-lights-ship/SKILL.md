@@ -1,82 +1,53 @@
 ---
 name: net-lights-ship
-description: >-
-  Net Lights (C# / .NET 10 / WinForms tray) local verification, CI, version
-  bump, git push, and GitHub Release via tag v*.*.*. Use when running all tests,
-  shipping, releasing, tagging, pushing main, fixing CI flakes, or the user
-  says прогон, все тесты, релиз, пайплайн, CI, or 1.x.x.
+description: Net Lights native Rust verification, local publish, compatibility tests and authorized releases.
 ---
 
-# Net Lights ship
+# Проверка и выпуск Net Lights
 
-This repo already has CI. Do not invent a second pipeline. Local green is required and **not enough** if tests share static process state.
+Основная реализация находится в `native/` и собирается Rust MSVC. Рабочий процесс локальной проверки, CI и выпуска использует одну точку входа. Не создавайте параллельный пайплайн и не пересобирайте другой кандидат после проверки для упаковки релиза.
 
-## Always before "tests pass" or a push of app/test code
+## Обычная проверка
 
-From the repo root, Release, all three projects. Do not skip soak. Do not stop after `dotnet build`.
+Из корня репозитория:
 
 ```ps1
-pwsh -File scripts/verify.ps1
+pwsh -NoProfile -File scripts/verify.ps1
 ```
 
-Local verification, CI and release use `scripts/verify.ps1`: locked restore, Release build, sequential unit/integration/soak smoke and the coverage gate. Publish remains a separate packaging step. Coverage is collected on unit and integration tests, then merged by source line. Sandbox, visual acceptance and long resource runs are separate checks; the default soak is only a short smoke.
+Команда проверяет согласованность версии, формат, строгий Clippy, последовательно запускает тесты рабочего пространства, собирает приложение и агент в новой папке и проверяет настоящие exe в изолированном профиле. Проверяется работа монитора, сигнал готовности после сетевой пробы, две истории, настройки, штатный выход и повторный запуск. Самопроверка анализатора ресурсов не заменяет измерение программы.
 
-If any fail: fix, re-run the failing project, then re-run all three. Do not push.
+Любой `FAIL` останавливает готовность. Повторный прогон относится только к текущему содержимому исходников. Изменение входных файлов во время проверки блокирует её итоговый `PASS`. Сохраняйте исходные логи и отличайте отказ теста от отсутствия среды.
 
-## Integration tests vs GitHub runners
+## Проверка интерфейса и длительной работы
 
-xUnit on CI runs test classes **in parallel**. `SettingsStore.RootDirectory` is a **static** path. Tests that assign it and then `Load`/`Save`/`LoadPool` will flake if they run together.
-
-Any test class that writes `SettingsStore.RootDirectory` must be in:
-
-```csharp
-[CollectionDefinition("SettingsFiles", DisableParallelization = true)]
-public sealed class SettingsFilesCollection;
-
-[Collection("SettingsFiles")]
-public sealed class TheTestClass
+```ps1
+pwsh -NoProfile -File scripts/verify.ps1 -NativeUI
+pwsh -NoProfile -File scripts/verify.ps1 -ResourceRun
 ```
 
-Current members: `GeoCountryTrayTests`, `UiRendererTests`, `LocationHistoryTests`, `StateHistoryAndExportTests`. Add new writers to the same collection. Do not "fix" a flake by asserting less.
+Для UI-автоматизации нужен `uv`; версии Python-зависимостей указаны в `scripts/native-ui-smoke.py`. Скрипт работает с собственным HWND через UI Automation и сообщения окна. Полный интерактивный прогон разрешён только на одноразовой GitHub-hosted VM после проверки реальной учётной записи и окружения CI. Локальный запуск через подключённую Windows Sandbox заблокирован до создания VM: RDP синхронизирует курсор, поэтому гостевой токен и nonce не гарантируют отсутствие влияния на мышь пользователя. `SetCursorPos` и `SendInput` в Sandbox запрещены отдельно, повторное наведение при смещении курсора удалено. Это ограничение также блокирует локальную функциональную UI-часть coverage gate; её нельзя отмечать `PASS` или обходить. Проверяются пять страниц на двух языках, восемь периодов, Debug, селекторы, прокрутка, клавиатурная навигация, «О программе», скрытие в трей и физическая геометрия после сброса и перезапуска. Снимки относятся к реальному DPI сеанса. Проверка на одном DPI не подтверждает остальные масштабы.
 
-Wait for async work (`Letters`, `Visible`), not a side counter that increments before the UI/state updates.
+`-ResourceRun` использует максимальную историю и две настоящие базы. Неполная загрузка баз не считается измерением с базами. Часовой CSV одного процесса проверяется строгим анализатором `test-resource-stability.ps1`; `FAIL` и `INCONCLUSIVE` блокируют готовность. Короткий smoke не называйте проверкой утечек.
 
-`NotifyIcon` / WinForms tests can still flake on a headless runner. Prefer waiting on observable state with a timeout, not `Task.Delay` only.
+Отдельно запускайте `scripts/test-sandbox-update.ps1` с двумя настоящими Inno-установщиками и агентом кандидата. Он проверяет обновление, частичный отказ, откат, сохранность данных и оба значка после настоящего перезапуска Проводника в собственной Sandbox. Не используйте и не закрывайте чужую среду. Host-режим `-Guest` обязан завершаться до любых изменений.
 
-## Do not commit
+## Прежняя реализация
 
-- `TODO.md`
-- `docs/images/tray-mock.html` unless README uses it
-- Unintended `packages.lock.json` churn from `dotnet publish -r win-x64` (ILLink / `win-x64` graphs). Preserve pre-existing lockfile edits; inspect the diff and remove only task-owned unintended churn. Never blindly restore user changes. Verify the current CI publish settings before relying on them.
+C# остаётся в `src/` как источник совместимых контрактов. Для её отдельных unit, integration, smoke и coverage проверок используется `scripts/verify-legacy.ps1` либо `scripts/verify.ps1 -Legacy`. Эти результаты не являются покрытием Rust и не заменяют проверку нативного UI или агента. Не ослабляйте пороги прежних тестов при переносе и не выдавайте пропущенный набор за прошедший.
 
-## Local exe
+## Локальный exe
 
-Owner runs `artifacts/publish/NetLights.exe`. After tray/UI/updater/version changes: `scripts/run-local.ps1`, then confirm that process path and `ProductVersion` match `Directory.Build.props`.
+Пользовательская локальная копия находится в `artifacts/publish/NetLights.exe`. После проверки изменений интерфейса, трея или обновления используйте `scripts/run-local.ps1`, затем подтвердите точный путь и ProductVersion процесса. Скрипт завершает только эту копию, ждёт штатного выхода и заменяет файлы транзакционно. Перед переключением реализации сохраните настройки и обе истории; восстановление проверяйте в отдельной папке, не поверх рабочего профиля.
 
-## Version
+Установленную копию в AppData, релиз и версию не меняйте без отдельного разрешения.
 
-Only when a version proposal or release is requested, propose `x.y.Z` with a brief reason if the exact version is missing and wait before editing version metadata. An already specified exact version needs no second confirmation. Don't interrupt ordinary fixes, tests, or pushes with an unsolicited version bump.
+## Версия и публикация
 
-Default: patch for tray/copy/CI; minor for user-visible features; major only when explicitly requested. The project root `AGENTS.md` owns this convention.
+Каноническая версия находится в `Cargo.toml`; совместимая метаинформация `Directory.Build.props` проверяется тем же gate. Номер меняется только по запросу версии или выпуска. Точный номер пользователя повторно согласовывать не нужно; если номера нет, предложите конкретный и дождитесь ответа. Соглашение patch/minor/major определено в корневом `AGENTS.md`.
 
-## Push
+Коммит, push, тег и публикация требуют соответствующего разрешения по действующему `AGENTS.md`. Перед разрешённой публикацией примените `ap-release-prep` и независимое ревью; перед push – `ap-deploy`. Не переносите существующий тег без отдельного разрешения. Тег `v*.*.*` запускает `.github/workflows/release.yml` и публикует GitHub Release, поэтому разрешение должно охватывать этот результат.
 
-Only when the active task explicitly authorizes push to the intended target. Authorization persists for that same task/action/target unless revoked; a status question or new message doesn't reset it. No force-push without specific authorization. Follow the global publication gate.
+Упаковывайте проверенный и просмотренный кандидат. Исправления, генерация и изменения hooks должны войти в окончательные файлы и проверки. После разрешённого push следите только за соответствующими CI runs; локальный `PASS` не доказывает удалённый CI или установленное обновление.
 
-## Release
-
-Only when the active task explicitly authorizes the release/tag action and target. Pushing `main` alone doesn't authorize a release. Keep version metadata in the final verified and reviewed candidate before tagging.
-
-1. User confirmed the version number; it is in `Directory.Build.props`.
-2. All three test projects passed locally.
-3. Create a coherent intended commit only if authorized or necessary for the specifically requested publication workflow; preserve unrelated staging. Record its SHA/tree. Inspect commit-hook changes and rerun the affected verification/review before treating it as the final candidate.
-4. Push `main` only when that branch push is explicitly authorized or unambiguously included in the requested documented release workflow. Use `ap-deploy` with the recorded verified SHA and valid gate evidence, not an unchecked current branch tip. A local tag request alone doesn't authorize a branch push.
-5. Create `vX.Y.Z` at the recorded verified SHA only when tag creation is authorized; verify the tag resolves to that SHA and the version matches metadata. Push that exact tag only when remote tag publication is authorized. Don't replace an existing tag, implicitly use a later `HEAD`, or treat a local tag request as permission to push it.
-6. Inspect the current `.github/workflows/release.yml` before sending a tag: this repository's `v*.*.*` workflow builds and publishes a GitHub Release. Require authorization for that publication outcome; don't add `gh release create` unless the user authorizes that separate fallback after a workflow failure.
-7. Watch only the CI/release runs triggered by authorized actions. Distinguish main CI, tag CI, and release status. Investigate failures and rerun affected gates; don't push a fix or create another tag without authorization for that action/target in the active task.
-
-Release notes body is already Russian in `release.yml`. User-facing product text stays Russian.
-
-## After a push
-
-`gh run list --limit 8`. Subscribe or watch until `ci` on `main` is green. If integration fails, read `--log-failed` before guessing.
+Сохраняйте посторонние staged/unstaged изменения. Не включайте в коммит `TODO.md`, `docs/images/tray-mock.html`, приватные профили, логи, сборки и случайный churn прежних lock-файлов. Не восстанавливайте файлы вслепую после сборки.

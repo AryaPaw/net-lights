@@ -1,0 +1,24 @@
+[package]
+name = "netlights-update-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "netlights-update-agent"
+path = "src/main.rs"
+
+[dependencies]
+netlights-core = { path = "../core" }
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[build-dependencies]
+winresource = "0.1"

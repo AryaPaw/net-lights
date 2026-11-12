@@ -1,6 +1,8 @@
 bin/
 obj/
 artifacts/
+target/
+__pycache__/
 .vs/
 .idea/
 .cursor/*

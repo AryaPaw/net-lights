@@ -10,24 +10,52 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 90
     env:
       CI: true
+      CARGO_LLVM_COV_SETUP: "no"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+      - name: Functional UI test tools
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          global-json-file: global.json
-      - name: Verify
+          version: "0.11.7"
+          enable-cache: false
+      - name: Python for offline UI controls
         shell: pwsh
-        run: scripts/verify.ps1 -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
-      - name: Publish
         run: |
-          dotnet publish src/NetLights.App/NetLights.App.csproj -c Release -r win-x64 --self-contained true -p:RestoreLockedMode=false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o artifacts/publish
-          if ($LASTEXITCODE -ne 0) { throw "App publish failed: $LASTEXITCODE" }
-          dotnet publish src/NetLights.UpdateAgent/NetLights.UpdateAgent.csproj -c Release -r win-x64 --self-contained true -p:RestoreLockedMode=false -p:PublishSingleFile=true -p:DebugType=none -o artifacts/publish
-          if ($LASTEXITCODE -ne 0) { throw "Update agent publish failed: $LASTEXITCODE" }
-      - name: Upload TRX
+          uv python install 3.11
+          if ($LASTEXITCODE -ne 0) { throw 'Python bootstrap failed.' }
+      - name: Verify disposable desktop identity
+        shell: pwsh
+        run: |
+          . scripts/ci-environment.ps1
+          Assert-HostedRunner
+          powershell.exe -NoProfile -NonInteractive -Command 'Set-DisplayResolution -Width 1920 -Height 1440 -Force -ErrorAction Stop'
+          if ($LASTEXITCODE -ne 0) { throw 'Disposable desktop resolution setup failed.' }
+          Add-Type -AssemblyName System.Windows.Forms
+          $desktop = [ordered]@{
+            os = [Environment]::OSVersion.VersionString
+            identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+            screens = @([Windows.Forms.Screen]::AllScreens | ForEach-Object {
+              @{bounds=$_.Bounds.ToString(); workArea=$_.WorkingArea.ToString(); primary=$_.Primary}
+            })
+          }
+          New-Item -ItemType Directory -Path TestResults -Force | Out-Null
+          $desktop | ConvertTo-Json -Depth 5 | Set-Content TestResults/hosted-desktop.json
+          $work = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+          if ($work.Width -lt 1450 -or $work.Height -lt 1300) { throw 'Hosted desktop cannot fit the required UI matrix.' }
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          $channel = [regex]::Match((Get-Content rust-toolchain.toml -Raw), '(?m)^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$').Groups[1].Value
+          if (-not $channel) { throw 'Rust toolchain must be pinned in rust-toolchain.toml.' }
+          rustup toolchain install $channel --profile minimal --component rustfmt --component clippy --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain setup failed.' }
+      - name: Verify build, tests and mandatory offline coverage
+        shell: pwsh
+        run: scripts/verify.ps1 -FunctionalUI -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Upload verification results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

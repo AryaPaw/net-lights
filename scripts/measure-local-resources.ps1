@@ -1,7 +1,8 @@
 param(
     [ValidateRange(2, 3600)][int]$Seconds = 30,
     [ValidateRange(1, 30)][int]$IntervalSeconds = 1,
-    [string]$OutputPath = 'artifacts/evidence/netlights-resources.csv'
+    [string]$OutputPath = 'artifacts/evidence/netlights-resources.csv',
+    [int]$TargetProcessId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,9 +17,13 @@ public static class NetLightsResourcesNative {
 '@
 
 $expected = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\artifacts\publish\NetLights.exe'))
-$process = Get-Process NetLights -ErrorAction Stop | Where-Object {
+$process = if ($TargetProcessId -gt 0) {
+    $selected = Get-Process -Id $TargetProcessId -ErrorAction Stop
+    if (-not $selected.Path -or [IO.Path]::GetFileName($selected.Path) -ne 'NetLights.exe') { throw 'Target must be an inspected NetLights executable.' }
+    $selected
+} else { Get-Process NetLights -ErrorAction Stop | Where-Object {
     $_.Path -and [string]::Equals($_.Path, $expected, [StringComparison]::OrdinalIgnoreCase)
-} | Select-Object -First 1
+} | Select-Object -First 1 }
 if (-not $process) { throw "Local Net Lights process not found at $expected" }
 $nativeHandle = [NetLightsResourcesNative]::OpenProcess(0x1000, $false, [uint32]$process.Id)
 if ($nativeHandle -eq [IntPtr]::Zero) { throw "Unable to open process $($process.Id) for resource counters" }

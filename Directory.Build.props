@@ -5,9 +5,10 @@
     <LangVersion>latest</LangVersion>
     <Deterministic>true</Deterministic>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetLockFilePath Condition="'$(PublishSingleFile)' == 'true'">$(MSBuildProjectDirectory)/packages.publish.lock.json</NuGetLockFilePath>
     <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
     <NuGetAudit>true</NuGetAudit>
-    <Version>1.6.0</Version>
+    <Version>1.7.0</Version>
     <Authors>AryaPaw</Authors>
     <Company>AryaPaw</Company>
     <Product>Net Lights</Product>

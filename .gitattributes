@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Preserve the exact upstream license checksums and the reviewed bridge patch.
+native/licenses/** -text whitespace=-blank-at-eol,-blank-at-eof,cr-at-eol
+compat/*.patch -text whitespace=-blank-at-eol
