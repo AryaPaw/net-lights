@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   release:
+    if: github.ref_name != 'v1.6.1'
     runs-on: windows-2022
     timeout-minutes: 60
     env:
@@ -73,7 +74,7 @@ jobs:
             artifacts/NetLights-Setup-win-x64-*.exe
           generate_release_notes: false
           fail_on_unmatched_files: true
-          make_latest: true
+          make_latest: 'false'
           body: |
             Если не уверены, скачайте **NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe** и запустите его. Права администратора не нужны.
 

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AryaPaw/net-lights/releases/latest"><img src="https://img.shields.io/github/v/release/AryaPaw/net-lights?label=release" alt="Release" /></a>
+  <a href="https://github.com/AryaPaw/net-lights/releases"><img src="https://img.shields.io/github/v/release/AryaPaw/net-lights?label=release&sort=semver" alt="Release" /></a>
   <a href="https://github.com/AryaPaw/net-lights/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/AryaPaw/net-lights/ci.yml?branch=main" alt="CI" /></a>
   <img src="https://img.shields.io/badge/Windows-11%20x64-0078D4?logo=windows&logoColor=white" alt="Windows 11 x64" />
   <img src="https://img.shields.io/badge/Rust-GPUI%20Kit-CE422B?logo=rust&logoColor=white" alt="Rust и GPUI Kit" />
@@ -65,11 +65,13 @@ Net Lights проверяет заданные контрольные адрес
 
 ## Как пользуются
 
-1. Скачайте установщик со страницы [Releases](https://github.com/AryaPaw/net-lights/releases/latest).
+1. Скачайте установщик нужной версии со страницы [Releases](https://github.com/AryaPaw/net-lights/releases).
 2. Запустите его. Права администратора не нужны.
 3. Значок появляется в трее. По умолчанию программа запускается вместе с Windows; автозапуск можно выключить в «Параметрах».
 
 Если включено автообновление, программа получает установщик с GitHub и запускает его в фоне. Настройка «Автообновление» находится в «Параметрах».
+
+Переход на нативную версию выполняется через 1.6.1 с исправленным обновлятором. Адрес GitHub `releases/latest` закрепляется за 1.6.1 для старых клиентов. Версия 1.6.1 и нативные версии выбирают последний стабильный выпуск от 1.7.0 из ограниченного списка релизов; предварительные выпуски игнорируются. Скачивание новой версии вручную доступно на общей странице Releases.
 
 ## Установка
 

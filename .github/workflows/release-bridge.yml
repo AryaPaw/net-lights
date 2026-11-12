@@ -1,0 +1,50 @@
+name: release-bridge
+on:
+  push:
+    tags:
+      - v1.6.1
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  bridge:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.204'
+      - name: Verify and package the compatibility updater
+        shell: pwsh
+        run: scripts/prepare-bridge.ps1 -Verify -Publish -Installer -OutputDirectory artifacts/bridge-1.6.1-release
+      - name: Upload bridge verification results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bridge-release-verification
+          path: |
+            artifacts/bridge-1.6.1-release/*.log
+            artifacts/bridge-1.6.1-release/bridge.json
+            artifacts/bridge-1.6.1-release/tests
+      - name: Publish the permanent legacy update entry
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: artifacts/bridge-1.6.1-release/setup/NetLights-Setup-win-x64-1.6.1.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+          make_latest: 'true'
+          body: |
+            Исправление обновлятора перед переходом на нативный интерфейс Net Lights.
+
+            - Восстановление файлов, регистрации и ярлыка при неудачной установке.
+            - Ограничение повторных попыток неудачного обновления.
+            - Переход на отдельный канал стабильных нативных версий.
+
+            Если не уверены, скачайте **NetLights-Setup-win-x64-1.6.1.exe** и запустите его. Права администратора не нужны.
+
+            Новые нативные версии доступны на [странице Releases](https://github.com/AryaPaw/net-lights/releases). Этот выпуск остаётся точкой перехода для старых установок.

@@ -14,6 +14,8 @@ jobs:
     env:
       CI: true
       CARGO_LLVM_COV_SETUP: "no"
+    outputs:
+      native_package: ${{ steps.package.outputs.built }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Functional UI test tools
@@ -28,24 +30,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Python bootstrap failed.' }
       - name: Verify disposable desktop identity
         shell: pwsh
-        run: |
-          . scripts/ci-environment.ps1
-          Assert-HostedRunner
-          powershell.exe -NoProfile -NonInteractive -Command 'Set-DisplayResolution -Width 1920 -Height 1440 -Force -ErrorAction Stop'
-          if ($LASTEXITCODE -ne 0) { throw 'Disposable desktop resolution setup failed.' }
-          Add-Type -AssemblyName System.Windows.Forms
-          $desktop = [ordered]@{
-            os = [Environment]::OSVersion.VersionString
-            identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-            screens = @([Windows.Forms.Screen]::AllScreens | ForEach-Object {
-              @{bounds=$_.Bounds.ToString(); workArea=$_.WorkingArea.ToString(); primary=$_.Primary}
-            })
-          }
-          New-Item -ItemType Directory -Path TestResults -Force | Out-Null
-          $desktop | ConvertTo-Json -Depth 5 | Set-Content TestResults/hosted-desktop.json
-          $work = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-          if ($work.Width -lt 1450 -or $work.Height -lt 1300) { throw 'Hosted desktop cannot fit the required UI matrix.' }
+        run: scripts/prepare-ci-desktop.ps1 -ResultsDirectory TestResults/desktop
       - name: Rust toolchain
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $channel = [regex]::Match((Get-Content rust-toolchain.toml -Raw), '(?m)^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$').Groups[1].Value
@@ -53,11 +40,124 @@ jobs:
           rustup toolchain install $channel --profile minimal --component rustfmt --component clippy --no-self-update
           if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain setup failed.' }
       - name: Verify build, tests and mandatory offline coverage
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: scripts/verify.ps1 -FunctionalUI -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Compile installer for isolated upgrade checks
+        id: package
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          . scripts/ci-environment.ps1
+          Assert-HostedRunner
+          $publish = (Resolve-Path "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/publish").Path
+          $setup = Join-Path (Split-Path $publish) 'setup'
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) { throw 'Hosted Inno Setup compiler is missing.' }
+          [xml]$props = Get-Content Directory.Build.props
+          $version = [string]$props.Project.PropertyGroup.Version
+          & $iscc "/DMyAppVersion=$version" "/DPublishDir=$publish" "/O$setup" installer/net-lights.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Native CI installer build failed.' }
+          'built=true' >> $env:GITHUB_OUTPUT
+      - name: Upload native upgrade payload
+        if: ${{ !cancelled() && steps.package.outputs.built == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-upgrade-payload
+          path: |
+            TestResults/${{ github.run_id }}-${{ github.run_attempt }}/publish
+            TestResults/${{ github.run_id }}-${{ github.run_attempt }}/setup
+          if-no-files-found: error
       - name: Upload verification results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-results
           path: TestResults
+  bridge:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    outputs:
+      bridge_package: ${{ steps.package.outputs.built }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.204'
+      - name: Build and verify bridge from the published baseline
+        id: package
+        shell: pwsh
+        run: |
+          scripts/prepare-bridge.ps1 -Verify -Publish -Installer -DownloadBaseline -OutputDirectory artifacts/bridge-1.6.1-ci
+          'built=true' >> $env:GITHUB_OUTPUT
+      - name: Upload verified bridge payload
+        if: ${{ success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bridge-upgrade-payload
+          path: |
+            artifacts/bridge-1.6.1-ci/publish
+            artifacts/bridge-1.6.1-ci/setup
+            artifacts/bridge-1.6.1-ci/NetLights-Setup-win-x64-1.6.0.exe
+            artifacts/bridge-1.6.1-ci/bridge.json
+            artifacts/bridge-1.6.1-ci/source.json
+          if-no-files-found: error
+      - name: Upload bridge verification results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bridge-test-results
+          path: |
+            artifacts/bridge-1.6.1-ci/*.log
+            artifacts/bridge-1.6.1-ci/bridge.json
+            artifacts/bridge-1.6.1-ci/tests
+  upgrade:
+    needs: [windows, bridge]
+    if: ${{ !cancelled() && needs.windows.outputs.native_package == 'true' && needs.bridge.outputs.bridge_package == 'true' }}
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      CI: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: Direct
+            release: v1.6.0
+          - scenario: Bridge
+            release: v1.6.0
+          - scenario: LegacyFailures
+            release: v1.6.0
+          - scenario: Direct
+            release: v1.4.2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: native-upgrade-payload
+          path: artifacts/native-ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: bridge-upgrade-payload
+          path: artifacts/bridge-1.6.1-ci
+      - name: Real installed upgrade and recovery
+        shell: pwsh
+        run: |
+          $baseline = 'artifacts/bridge-1.6.1-ci/NetLights-Setup-win-x64-1.6.0.exe'
+          $extra = @{}
+          if ('${{ matrix.release }}' -eq 'v1.4.2') {
+            $baseline = 'artifacts/NetLights-Setup-win-x64-1.4.2.exe'
+            & curl.exe --fail --location --proto '=https' --max-time 120 --max-redirs 5 --max-filesize 59084561 --output $baseline 'https://github.com/AryaPaw/net-lights/releases/download/v1.4.2/NetLights-Setup-win-x64-1.4.2.exe'
+            if ($LASTEXITCODE -ne 0) { throw 'Pinned historical installer download failed.' }
+            $extra = @{BaselineSha256='31695b0eabb66fa52b69ac71a177c1a95480e2516678fdb8d519914e39639197'; BaselineBytes=59084561}
+          }
+          $releasePath = '${{ matrix.release }}'.Replace('.','-')
+          scripts/test-ci-upgrade.ps1 -Scenario '${{ matrix.scenario }}' -ReleaseTag '${{ matrix.release }}' @extra -BaselineInstaller $baseline -BridgeInstaller artifacts/bridge-1.6.1-ci/setup/NetLights-Setup-win-x64-1.6.1.exe -BridgePublishDirectory artifacts/bridge-1.6.1-ci/publish -NativeInstaller artifacts/native-ci/setup/NetLights-Setup-win-x64-1.7.0.exe -NativePublishDirectory artifacts/native-ci/publish -ResultsDirectory "artifacts/ci-upgrade-${{ matrix.scenario }}-$releasePath"
+      - name: Upload upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: upgrade-${{ matrix.scenario }}-${{ matrix.release }}
+          path: artifacts/ci-upgrade-*

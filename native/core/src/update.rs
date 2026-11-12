@@ -12,7 +12,12 @@ use std::{
 };
 use url::Url;
 
-pub const MAX_MANIFEST: usize = 64 * 1024;
+pub const MAX_MANIFEST: usize = 512 * 1024;
+pub const NATIVE_RELEASES_API: &str =
+    "https://api.github.com/repos/AryaPaw/net-lights/releases?per_page=20";
+const MAX_RELEASES: usize = 20;
+const MAX_RELEASE_PAGES: usize = 5;
+const FIRST_NATIVE_VERSION: [u32; 4] = [1, 7, 0, 0];
 pub const MAX_INSTALLER: u64 = 80 * 1024 * 1024;
 pub const ASSET_PREFIX: &str = "NetLights-Setup-win-x64-";
 pub const PRODUCT_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{7C2B1A9E-4F31-4A6D-9C2E-1B8E5D2A0F11}_is1";
@@ -110,41 +115,86 @@ pub fn allowed_download(url: &Url, redirect: bool) -> bool {
 }
 pub async fn find_update(transport: &Transport, current: &str) -> Result<Option<Release>> {
     let current = version(current).context("Invalid current version")?;
-    let response = transport
-        .get(
-            &Url::parse("https://api.github.com/repos/AryaPaw/net-lights/releases/latest")?,
-            MAX_MANIFEST,
-            Duration::from_secs(20),
-        )
-        .await?;
-    if response.status == 404 {
-        return Ok(None);
+    let started = std::time::Instant::now();
+    let mut releases = Vec::new();
+    for page in 1..=MAX_RELEASE_PAGES {
+        let remaining = Duration::from_secs(20).saturating_sub(started.elapsed());
+        ensure!(!remaining.is_zero(), "Release channel query timed out");
+        let mut url = Url::parse(NATIVE_RELEASES_API)?;
+        url.query_pairs_mut().append_pair("page", &page.to_string());
+        let response = transport.get(&url, MAX_MANIFEST, remaining).await?;
+        if response.status == 404 && page == 1 {
+            return Ok(None);
+        }
+        ensure!(response.status == 200, "Release query failed");
+        let entries = parse_release_page(&response.body)?;
+        let complete = entries.len() < MAX_RELEASES;
+        releases.extend(entries);
+        if complete {
+            return select_native_release(&releases, current);
+        }
     }
-    ensure!(response.status == 200, "Release query failed");
-    parse_release(&response.body, current)
+    bail!("Release channel exceeded its bounded page window")
 }
-fn parse_release(bytes: &[u8], current: [u32; 4]) -> Result<Option<Release>> {
+fn parse_release_page(bytes: &[u8]) -> Result<Vec<serde_json::Value>> {
     ensure!(
         bytes.len() <= MAX_MANIFEST,
         "Manifest exceeds its size limit"
     );
-    let doc: serde_json::Value = serde_json::from_slice(bytes)?;
-    if doc
-        .get("prerelease")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true)
-        || doc.get("draft").and_then(|v| v.as_bool()).unwrap_or(false)
-    {
-        return Ok(None);
+    let releases: Vec<serde_json::Value> = serde_json::from_slice(bytes)?;
+    ensure!(releases.len() <= MAX_RELEASES, "Too many channel releases");
+    Ok(releases)
+}
+#[cfg(test)]
+fn parse_releases(bytes: &[u8], current: [u32; 4]) -> Result<Option<Release>> {
+    select_native_release(&parse_release_page(bytes)?, current)
+}
+fn select_native_release(
+    releases: &[serde_json::Value],
+    current: [u32; 4],
+) -> Result<Option<Release>> {
+    ensure!(
+        releases.len() <= MAX_RELEASES * MAX_RELEASE_PAGES,
+        "Too many channel releases"
+    );
+    let mut eligible = std::collections::BTreeMap::new();
+    for release in releases {
+        ensure!(release.is_object(), "Invalid release entry");
+        let prerelease = release
+            .get("prerelease")
+            .and_then(|v| v.as_bool())
+            .context("Release prerelease flag is missing")?;
+        let draft = release
+            .get("draft")
+            .and_then(|v| v.as_bool())
+            .context("Release draft flag is missing")?;
+        if prerelease || draft {
+            continue;
+        }
+        let tag = release
+            .get("tag_name")
+            .and_then(|v| v.as_str())
+            .context("Release version is missing")?;
+        let next = version(tag).context("Invalid release version")?;
+        if next < FIRST_NATIVE_VERSION || next <= current {
+            continue;
+        }
+        ensure!(
+            !tag.contains('+'),
+            "Release tag cannot contain build metadata"
+        );
+        ensure!(
+            eligible.insert(next, release).is_none(),
+            "Duplicate native release version"
+        );
     }
+    let Some((_, doc)) = eligible.last_key_value() else {
+        return Ok(None);
+    };
     let tag = doc
         .get("tag_name")
         .and_then(|v| v.as_str())
         .context("Release version is missing")?;
-    let next = version(tag).context("Invalid release version")?;
-    if next <= current {
-        return Ok(None);
-    }
     let version = tag.trim_start_matches(['v', 'V']).to_owned();
     // A release build suffix isn't part of the package identity.
     ensure!(
@@ -2257,21 +2307,134 @@ mod tests {
     }
     #[test]
     fn manifest_selects_exact_verified_candidate_and_rejects_duplicates() {
-        let asset = serde_json::json!({"name":"NetLights-Setup-win-x64-1.6.1.exe","size":10,"browser_download_url":"https://github.com/AryaPaw/net-lights/releases/download/v1.6.1/NetLights-Setup-win-x64-1.6.1.exe","digest":format!("sha256:{}", "a".repeat(64))});
+        let asset = serde_json::json!({"name":"NetLights-Setup-win-x64-1.7.0.exe","size":10,"browser_download_url":"https://github.com/AryaPaw/net-lights/releases/download/v1.7.0/NetLights-Setup-win-x64-1.7.0.exe","digest":format!("sha256:{}", "a".repeat(64))});
         let manifest = |assets| {
             serde_json::to_vec(
-                &serde_json::json!({"tag_name":"v1.6.1","prerelease":false,"assets":assets}),
+                &serde_json::json!([{"tag_name":"v1.7.0","prerelease":false,"draft":false,"assets":assets}]),
             )
             .unwrap()
         };
         assert_eq!(
-            parse_release(&manifest(vec![asset.clone()]), [1, 6, 0, 0])
+            parse_releases(&manifest(vec![asset.clone()]), [1, 6, 0, 0])
                 .unwrap()
                 .unwrap()
                 .version,
-            "1.6.1"
+            "1.7.0"
         );
-        assert!(parse_release(&manifest(vec![asset.clone(), asset]), [1, 6, 0, 0]).is_err());
+        assert!(parse_releases(&manifest(vec![asset.clone(), asset]), [1, 6, 0, 0]).is_err());
+    }
+    fn channel_release(number: &str) -> serde_json::Value {
+        serde_json::json!({"tag_name":format!("v{number}"),"prerelease":false,"draft":false,"assets":[{
+            "name":format!("{ASSET_PREFIX}{number}.exe"),"size":10,
+            "browser_download_url":format!("https://github.com/AryaPaw/net-lights/releases/download/v{number}/{ASSET_PREFIX}{number}.exe"),
+            "digest":format!("sha256:{}", "a".repeat(64))
+        }]})
+    }
+    #[test]
+    fn native_channel_uses_numeric_order_and_never_consumes_the_bridge() {
+        let releases = serde_json::to_vec(&vec![
+            channel_release("1.6.1"),
+            channel_release("1.9.0"),
+            channel_release("1.10.0"),
+            channel_release("1.7.0"),
+        ])
+        .unwrap();
+        assert_eq!(
+            parse_releases(&releases, [1, 7, 0, 0])
+                .unwrap()
+                .unwrap()
+                .version,
+            "1.10.0"
+        );
+        assert!(parse_releases(&releases, [1, 10, 0, 0]).unwrap().is_none());
+        let bridge = serde_json::to_vec(&vec![channel_release("1.6.1")]).unwrap();
+        assert!(parse_releases(&bridge, [1, 6, 0, 0]).unwrap().is_none());
+        assert!(!NATIVE_RELEASES_API.contains("/latest"));
+    }
+    #[test]
+    fn native_channel_rejects_prereleases_drafts_and_ambiguous_versions() {
+        let mut preview = channel_release("2.0.0");
+        preview["prerelease"] = true.into();
+        let mut draft = channel_release("3.0.0");
+        draft["draft"] = true.into();
+        let releases = serde_json::to_vec(&vec![preview, draft, channel_release("1.7.0")]).unwrap();
+        assert_eq!(
+            parse_releases(&releases, [1, 6, 1, 0])
+                .unwrap()
+                .unwrap()
+                .version,
+            "1.7.0"
+        );
+        let duplicate =
+            serde_json::to_vec(&vec![channel_release("1.7.0"), channel_release("1.7.0.0")])
+                .unwrap();
+        assert!(parse_releases(&duplicate, [1, 6, 1, 0]).is_err());
+        let mut incomplete = channel_release("2.0.0");
+        incomplete.as_object_mut().unwrap().remove("draft");
+        assert!(
+            parse_releases(
+                &serde_json::to_vec(&vec![incomplete]).unwrap(),
+                [1, 6, 1, 0]
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn native_channel_does_not_hide_a_broken_newest_installer() {
+        for field in ["digest", "browser_download_url", "size", "name"] {
+            let mut broken = channel_release("1.8.0");
+            broken["assets"][0][field] = match field {
+                "digest" => "sha256:bad".into(),
+                "browser_download_url" => {
+                    "https://github.com/other/repo/releases/download/v1/setup.exe".into()
+                }
+                "size" => (MAX_INSTALLER + 1).into(),
+                _ => "wrong.exe".into(),
+            };
+            let releases = serde_json::to_vec(&vec![broken, channel_release("1.7.0")]).unwrap();
+            assert!(parse_releases(&releases, [1, 6, 1, 0]).is_err(), "{field}");
+        }
+    }
+    #[test]
+    fn native_channel_bounds_the_body_and_release_count() {
+        assert!(parse_releases(&vec![b' '; MAX_MANIFEST + 1], [1, 6, 1, 0]).is_err());
+        assert!(
+            parse_releases(
+                &serde_json::to_vec(&vec![channel_release("1.6.1"); MAX_RELEASES + 1]).unwrap(),
+                [1, 6, 1, 0]
+            )
+            .is_err()
+        );
+        assert!(parse_releases(b"{}", [1, 6, 1, 0]).is_err());
+        assert!(parse_releases(b"[null]", [1, 6, 1, 0]).is_err());
+        assert!(parse_releases(b"[]", [1, 6, 1, 0]).unwrap().is_none());
+    }
+    #[test]
+    fn native_channel_finds_stable_results_beyond_a_full_preview_page() {
+        let mut preview = channel_release("2.0.0");
+        preview["prerelease"] = true.into();
+        let mut entries =
+            parse_release_page(&serde_json::to_vec(&vec![preview; MAX_RELEASES]).unwrap()).unwrap();
+        entries.extend(
+            parse_release_page(&serde_json::to_vec(&vec![channel_release("1.7.0")]).unwrap())
+                .unwrap(),
+        );
+        assert_eq!(
+            select_native_release(&entries, [1, 6, 1, 0])
+                .unwrap()
+                .unwrap()
+                .version,
+            "1.7.0"
+        );
+        entries.push(channel_release("1.7.0"));
+        assert!(select_native_release(&entries, [1, 6, 1, 0]).is_err());
+        assert!(
+            select_native_release(
+                &vec![channel_release("1.6.1"); MAX_RELEASES * MAX_RELEASE_PAGES + 1],
+                [1, 6, 1, 0]
+            )
+            .is_err()
+        );
     }
     #[test]
     fn interrupted_transaction_or_missing_agent_blocks_preflight_without_mutating_or_staging() {

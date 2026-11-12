@@ -42,10 +42,12 @@ function Assert-ScopedPatch([string]$Path) {
         'src/NetLights.Updates/InstallationSnapshot.cs','src/NetLights.Updates/OwnedInstallationMetadata.cs',
         'src/NetLights.Updates/PendingUpdateStore.cs','src/NetLights.Updates/UpdateRetryStore.cs',
         'src/NetLights.Updates/UpdatePolicy.cs',
+        'src/NetLights.Updates/GitHubReleaseFeed.cs',
         'src/NetLights.Updates/SilentSetupLauncher.cs','src/NetLights.Updates/SilentUpdateCoordinator.cs',
         'tests/NetLights.UnitTests/UpdateRetryStoreTests.cs','tests/NetLights.UnitTests/OwnedInstallationMetadataTests.cs',
         'tests/NetLights.UnitTests/AgentSilentSetupInstallerTests.cs','tests/NetLights.UnitTests/SilentUpdateCoordinatorTests.cs',
         'tests/NetLights.UnitTests/BridgeSnapshotTests.cs','tests/NetLights.IntegrationTests/UpdateAgentProgramTests.cs',
+        'tests/NetLights.UnitTests/GitHubReleaseFeedTests.cs','tests/NetLights.UnitTests/UpdateCoordinatorTests.cs',
         'tests/NetLights.TestApp/Program.cs','tests/NetLights.TestInstaller/Program.cs'
     ) + @('App','Core','Networking','Updates','UpdateAgent' | ForEach-Object { "src/NetLights.$_/packages.publish.lock.json" })
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
