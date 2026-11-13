@@ -118,6 +118,8 @@ function Get-CompletedGeoPid($Evidence,[int]$Seconds) {
 }
 function Assert-FunctionalEvidence($Evidence,[string]$ExpectedHash,[string]$EndpointFile,[switch]$RequireLocale) {
     if($Evidence.metadata.evidenceLevel -cne 'functional' -or $Evidence.metadata.visualAcceptance -cne 'NOT RUN') {throw 'Functional UI evidence must explicitly leave visual acceptance NOT RUN.'}
+    if($Evidence.metadata.coverage_instrumented -isnot [bool] -or -not $Evidence.metadata.coverage_instrumented -or
+        $Evidence.metadata.navigation_smoothness -cne 'NOT RUN') {throw 'Coverage UI must identify instrumentation and leave navigation smoothness NOT RUN.'}
     if([int]$Evidence.metadata.windows_build -lt 1 -or [int]$Evidence.metadata.windows_product_type -notin @(1,2,3)) {throw 'Actual Windows environment metadata is missing.'}
     if($Evidence.metadata.country_measurement_requested -isnot [bool] -or $Evidence.metadata.country_measurement_requested -or [int]$Evidence.metadata.measured_seconds -ne 0) {throw 'Offline functional UI cannot include a live Geo or resource measurement.'}
     if($Evidence.metadata.assertions_enabled -isnot [bool] -or -not $Evidence.metadata.assertions_enabled) {throw 'Functional UI assertions must be enabled.'}
@@ -155,6 +157,8 @@ function Assert-FunctionalEvidence($Evidence,[string]$ExpectedHash,[string]$Endp
         $matchingChecks=@($Evidence.checks|Where-Object {$_.check -ceq $name})
         if($matchingChecks.Count -ne 1 -or $matchingChecks[0].result -cne 'PASS') {throw "Functional UI mandatory check is missing, duplicated or failed: $name"}
     }
+    $navigation=@($Evidence.checks|Where-Object check -CEQ 'fluent-tabs-about-and-settings-navigation')
+    if($navigation[0].detail.navigation_motion.smoothness -cne 'NOT RUN') {throw 'Instrumented navigation detail cannot claim smoothness acceptance.'}
     if(@($Evidence.checks|Where-Object {$_.result -cne 'PASS' -and -not($_.check -ceq 'resource-measurement' -and $_.result -ceq 'NOT RUN')}).Count) {throw 'Functional UI contains failed or incomplete checks.'}
     $resource=@($Evidence.checks|Where-Object {$_.check -ceq 'resource-measurement'})
     if($resource.Count -ne 1 -or $resource[0].result -cne 'NOT RUN' -or @($Evidence.cleanup_errors).Count -or @($Evidence.resource_errors).Count -or [int]$Evidence.resource_samples -lt 1) {throw 'Functional UI cleanup or resource evidence is incomplete.'}
@@ -241,12 +245,25 @@ function Invoke-RunnerControls {
     @{geoCountryDetectionEnabled=$false;geoCountryIconEnabled=$false;autoStart=$false;autoUpdateEnabled=$false}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $probe 'settings.json') -Encoding utf8
     $functionalEndpoints=@(foreach($group in @('Ru','World')) {foreach($i in 0..6) {@{id="$group-$i";group=$group;uri="https://127.0.0.1:1/$group-$i";infrastructureId="local-$group-$i"}}})
     $functionalEndpoints|ConvertTo-Json|Set-Content -LiteralPath $functionalEndpointFile -Encoding utf8
-    $functional=@{metadata=@{fixture=@{offline_availability_endpoints=$true};locale_required=$false;evidenceLevel='functional';visualAcceptance='NOT RUN';windows_build=20348;windows_product_type=3;country_measurement_requested=$false;measured_seconds=0;assertions_enabled=$true;exe_sha256=$fixtureHash;pids=@(123,124,125,126)};checks=@();cleanup_errors=@();resource_errors=@();resource_samples=1}
+    $functional=@{metadata=@{fixture=@{offline_availability_endpoints=$true};coverage_instrumented=$true;navigation_smoothness='NOT RUN';locale_required=$false;evidenceLevel='functional';visualAcceptance='NOT RUN';windows_build=20348;windows_product_type=3;country_measurement_requested=$false;measured_seconds=0;assertions_enabled=$true;exe_sha256=$fixtureHash;pids=@(123,124,125,126)};checks=@();cleanup_errors=@();resource_errors=@();resource_samples=1}
     Assert-Throws {Assert-FunctionalEvidence $functional $fixtureHash $functionalEndpointFile}
     foreach($name in @('overview-linked-selection-zoom-and-addresses','fluent-tabs-about-and-settings-navigation','physical-outer-geometry-reset-and-restart','native-caption-controls-and-hittest','default-debug-off','dropdown-wheel-does-not-change-settings','X-hide-and-show-local-same-PID','Debug-on-and-off-survive-restart','history-end-and-single-scroll-owner')) {$functional.checks+=@{check=$name;result='PASS'}}
     foreach($page in @('Состояние','Локации')) {foreach($hours in @(1,3,6,12,24,72,120,168)) {$functional.checks+=@{check="$page-${hours}h";result='PASS'}}}
     $functional.checks+=@{check='resource-measurement';result='NOT RUN'}
+    $functional.checks[1].detail=@{navigation_motion=@{smoothness='NOT RUN'}}
     $validatedPids=@(Assert-FunctionalEvidence $functional $fixtureHash $functionalEndpointFile)
+    foreach($kind in @('instrumented-false','instrumented-type','smoothness','motion-smoothness','missing-mode','missing-smoothness')) {
+        $bad=ConvertFrom-Json (ConvertTo-Json $functional -Depth 12)
+        switch($kind) {
+            'instrumented-false'{$bad.metadata.coverage_instrumented=$false}
+            'instrumented-type'{$bad.metadata.coverage_instrumented='true'}
+            'smoothness'{$bad.metadata.navigation_smoothness='PASS'}
+            'motion-smoothness'{$bad.checks[1].detail.navigation_motion.smoothness='PASS'}
+            'missing-mode'{$bad.metadata.PSObject.Properties.Remove('coverage_instrumented')}
+            'missing-smoothness'{$bad.metadata.PSObject.Properties.Remove('navigation_smoothness')}
+        }
+        Assert-Throws {Assert-FunctionalEvidence $bad $fixtureHash $functionalEndpointFile}
+    }
     $overviewEvidence=$functional.checks[0]
     $functional.checks=$functional.checks[1..($functional.checks.Count-1)]
     Assert-Throws {Assert-FunctionalEvidence $functional $fixtureHash $functionalEndpointFile}
@@ -354,7 +371,7 @@ try {
     if($NativeUI -or $FunctionalUI) {
         $hash=(Get-FileHash -LiteralPath (Join-Path $published 'NetLights.exe')).Hash
         $uiArguments=@('-NoProfile','-File',(Join-Path $PSScriptRoot 'test-native-ui.ps1'),'-Executable',(Join-Path $published 'NetLights.exe'),
-            '-ResultsDirectory',(Join-Path $results 'native-ui'),'-ExpectedSha256',$hash,'-RawProfileDirectory',$target)
+            '-ResultsDirectory',(Join-Path $results 'native-ui'),'-ExpectedSha256',$hash,'-RawProfileDirectory',$target,'-CoverageInstrumented')
         if($FunctionalUI) {$uiArguments+='-FunctionalUI'}
         if($GeoMeasurementSeconds -gt 0) {$uiArguments+=@('-MeasureSeconds',[string]$GeoMeasurementSeconds,'-EnableCountryForMeasurement')}
         # The wrapper owns a VM, not a child process. Allow its runner deadline,
@@ -365,7 +382,7 @@ try {
             if($functionalFile.Length -gt 1MB) {throw 'Functional UI evidence exceeds its size bound.'}
             $uiPids=@(Assert-FunctionalEvidence (Get-Content -LiteralPath $functionalFile.FullName -Raw|ConvertFrom-Json) $hash (Join-Path $results 'native-ui/ui/profile/endpoints.json') -RequireLocale:(Test-Path -LiteralPath (Join-Path $root 'native/core/src/locale.rs')))
             Assert-FreshProfiles $target $uiPids
-            Write-Host 'RUN - PASS: offline functional UI; Windows 11 visual acceptance: NOT RUN.'
+            Write-Host 'RUN - PASS: instrumented offline functional UI; navigation smoothness and Windows 11 visual acceptance: NOT RUN.'
         }
         if($GeoMeasurementSeconds -gt 0) {
             $evidenceFile=Get-Item -LiteralPath (Join-Path $results 'native-ui/ui/results.json')

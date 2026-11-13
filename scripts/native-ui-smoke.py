@@ -48,6 +48,22 @@ def rectangle_inside(rect, bounds):
     return a<=rect[0]<rect[2]<=c and b<=rect[1]<rect[3]<=d
 
 
+def navigation_frame_evidence(initial, finish, frames, scale, coverage_instrumented=False):
+    assert frames and all(math.isfinite(t) and math.isfinite(x) and t>=0 for t,x in frames), "Invalid navigation samples"
+    assert all(a[0]<=b[0] for a,b in zip(frames,frames[1:])), "Navigation timestamps reversed"
+    assert abs(frames[-1][1]-finish)<=3*scale, "Indicator didn't reach the selected tab"
+    lower,upper=sorted((initial,finish))
+    intermediate={round(x) for _,x in frames if lower+3*scale<x<upper-3*scale}
+    moved=next((elapsed for elapsed,x in frames if abs(x-initial)>3*scale),None)
+    assert moved is not None, "The navigation indicator never moved"
+    if not coverage_instrumented:
+        assert len(intermediate)>=3, "Insufficient intermediate positions to confirm smooth navigation"
+        assert moved<.5, "Navigation response exceeded 500 ms"
+    return dict(first_visible_change_ms=round(moved*1000,1),
+                distinct_intermediate_positions=len(intermediate),frames=len(frames),
+                smoothness="NOT RUN" if coverage_instrumented else "PASS")
+
+
 def fitted_outer(original, work, width, height):
     x,y,w,h=work
     width,height=min(int(width),w),min(int(height),h)
@@ -1040,7 +1056,7 @@ def normalize_resources(source, destination, pid, started, ended, requested_seco
 
 
 class Runner:
-    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None):
+    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None, coverage_instrumented=False):
         if not __debug__:
             raise RuntimeError("Проверки требуют включённых assert: уберите -O и PYTHONOPTIMIZE")
         if functional_evidence and (measure_seconds or enable_country):
@@ -1049,6 +1065,7 @@ class Runner:
         self.api, self.process, self.uia = Win32(), None, None
         self.measure_seconds, self.results, self.captures = measure_seconds, [], []
         self.functional_evidence=functional_evidence
+        self.coverage_instrumented=coverage_instrumented
         self.enable_country, self.country_enabled, self.measurement_blocked = enable_country, False, False
         self.input_policy = input_policy
         self.private_captures = []
@@ -1063,6 +1080,8 @@ class Runner:
             assertions_enabled=__debug__)
         self.meta["evidenceLevel"] = "functional" if functional_evidence else "Windows 11 native visual"
         self.meta["visualAcceptance"] = "NOT RUN" if functional_evidence else "requires screenshot review"
+        self.meta["coverage_instrumented"] = coverage_instrumented
+        self.meta["navigation_smoothness"] = "NOT RUN" if coverage_instrumented else "PENDING"
         self.meta["country_measurement_requested"] = enable_country
         self.meta["locale_required"] = (pathlib.Path(__file__).resolve().parents[1]/"native/core/src/locale.rs").is_file()
         self.meta["input_isolation"] = input_policy.evidence if input_policy else dict(scope="host-owned HWND messages", guard="no-real-pointer-input")
@@ -1513,17 +1532,11 @@ class Runner:
                 json.dumps(dict(initial=initial,target=finish,samples=[dict(seconds=t,x=x) for t,x,_ in frames]),indent=2),encoding="utf-8")
             for index,(_,_,image) in enumerate(frames):
                 image.save(self.output/f"navigation-motion-{len(results)}-frame-{index:02}.png")
-            assert abs(frames[-1][1]-finish)<=3*scale, f"Indicator didn't reach {target}"
-            lower,upper=sorted((initial,finish))
-            intermediate={round(position) for _,position,_ in frames if lower+3*scale<position<upper-3*scale}
-            assert len(intermediate)>=3, f"Indicator jumped instead of moving: {target}"
-            moved=next(elapsed for elapsed,position,_ in frames if abs(position-initial)>3*scale)
-            assert moved<.5, f"Navigation response exceeded 500 ms: {target}"
+            evidence=navigation_frame_evidence(initial,finish,[(t,x) for t,x,_ in frames],scale,self.coverage_instrumented)
             for label,index in (("first",0),("middle",len(frames)//4),("last",len(frames)-1)):
                 destination=self.output/f"navigation-motion-{len(results)}-{label}.png"
                 frames[index][2].save(destination)
-            results.append(dict(target=target,first_visible_change_ms=round(moved*1000,1),
-                                distinct_intermediate_positions=len(intermediate),frames=len(frames)))
+            results.append(dict(target=target,**evidence))
         for target in ("О программе","Локации","Параметры"):
             click(target)
             time.sleep(.06)
@@ -1533,7 +1546,9 @@ class Runner:
         assert abs(position-center("Параметры"))<=3*scale, "Interrupted indicator missed the last target"
         self.page("Состояние")
         time.sleep(.3)
-        return dict(switches=results,rapid_reversal=True,foreground_owned_sandbox_only=True)
+        self.meta["navigation_smoothness"] = "NOT RUN" if self.coverage_instrumented else "PASS"
+        return dict(switches=results,rapid_reversal=True,foreground_owned_sandbox_only=True,
+                    smoothness=self.meta["navigation_smoothness"])
 
     def fluent_controls(self):
         assert self.input_policy, "Fluent interaction requires the isolated input policy"
@@ -2338,6 +2353,7 @@ def uia_retry_selftest():
     pointer_capture_selftest()
     adaptive_viewport_selftest()
     profile_snapshot_selftest()
+    navigation_motion_selftest()
     policy=IsolatedInput.__new__(IsolatedInput)
     policy.ci=False
     with patch.object(policy,"assert_identity"):
@@ -2504,6 +2520,31 @@ def profile_snapshot_selftest():
     print("RUN - PASS: bounded profile snapshots share read/write/delete, reject invalid paths and close handles on every outcome; no OS calls")
 
 
+def navigation_motion_selftest():
+    smooth=[(0.,10.),(.05,30.),(.1,60.),(.15,90.),(.25,110.)]
+    sparse=[(0.,10.),(.312,37.),(.437,87.),(.531,110.)]
+    late=[(0.,10.),(.51,30.),(.56,60.),(.61,90.),(.7,110.)]
+    assert navigation_frame_evidence(10,110,smooth,1)["smoothness"]=="PASS"
+    assert navigation_frame_evidence(10,110,sparse,1,True)["smoothness"]=="NOT RUN"
+    assert navigation_frame_evidence(10,110,late,1,True)["smoothness"]=="NOT RUN"
+    for frames in (sparse,late,[(0,10),(.1,110)]):
+        try:
+            navigation_frame_evidence(10,110,frames,1)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("The ordinary executable lost its strict motion gate")
+    for instrumented in (False,True):
+        for frames in ([],[(0,10),(.2,60)],[(0,10),(.2,10)],[(.2,30),(.1,110)],[(0,float("nan")),(.2,110)]):
+            try:
+                navigation_frame_evidence(10,110,frames,1,instrumented)
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("Instrumented mode bypassed functional navigation evidence")
+    print("RUN - PASS: ordinary motion thresholds and instrumented functional evidence stay separate; no OS calls")
+
+
 def pointer_capture_selftest():
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -2586,6 +2627,8 @@ def main():
     parser.add_argument("--maximum-history", action="store_true", help="70 000 наблюдений, 70 000 периодов стран и 10 000 интервалов доступности")
     parser.add_argument("--functional-evidence", action="store_true",
                         help="Функциональные native UI-проверки на Windows Server; визуальная приёмка Windows 11 остаётся NOT RUN")
+    parser.add_argument("--coverage-instrumented", action="store_true",
+                        help="Сборка с покрытием: плавность проверяется отдельно на обычном exe")
     parser.add_argument("--enable-country-for-measurement", action="store_true",
                         help="После synthetic-снимков включить настоящий IP-опрос и обе базы для ресурсного прогона")
     args = parser.parse_args()
@@ -2602,7 +2645,7 @@ def main():
     except (OSError, ValueError) as error:
         parser.error(str(error))
     output.mkdir(parents=True, exist_ok=False)
-    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy)
+    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy, args.coverage_instrumented)
     runner.run(args.inventory_only)
     print(json.dumps(dict(result="NOT RUN" if runner.measurement_blocked else "PASS", output=str(output), screenshots=len(runner.captures), resource_seconds=args.measure_seconds), ensure_ascii=False), flush=True)
     if runner.measurement_blocked:

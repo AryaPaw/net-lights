@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($NativeUI -and $FunctionalUI) { throw 'Select visual NativeUI or FunctionalUI evidence, not both.' }
+if ($ResourceRun -and $FunctionalUI) { throw 'ResourceRun requires visual UI evidence, not offline FunctionalUI.' }
 $root = Split-Path -Parent $PSScriptRoot
 $savedRustupToolchain = [Environment]::GetEnvironmentVariable('RUSTUP_TOOLCHAIN','Process')
 $savedPythonOptimize = [Environment]::GetEnvironmentVariable('PYTHONOPTIMIZE','Process')
@@ -127,22 +128,22 @@ try {
     & (Join-Path $PSScriptRoot 'test-native-coverage.ps1') -ResultsDirectory (Join-Path $results 'coverage') -FunctionalUI
     Assert-SourceUnchanged
     if ($Legacy) { & (Join-Path $PSScriptRoot 'verify-legacy.ps1') -ResultsDirectory (Join-Path $results 'legacy') }
-    if ($NativeUI -or $FunctionalUI -or $ResourceRun) {
-        $candidateHash=(Get-FileHash -LiteralPath (Join-Path $published 'NetLights.exe') -Algorithm SHA256).Hash
-        $uiArguments = @('-NoProfile','-File',(Join-Path $PSScriptRoot 'test-native-ui.ps1'),
-            '-Executable',(Join-Path $published 'NetLights.exe'),'-ResultsDirectory',(Join-Path $results 'native-ui'),'-ExpectedSha256',$candidateHash)
-        if ($FunctionalUI) { $uiArguments += '-FunctionalUI' }
-        if ($ResourceRun) { $uiArguments += @('-MeasureSeconds','3600','-EnableCountryForMeasurement','-MaximumHistory') }
-        & pwsh @uiArguments *> (Join-Path $results 'native-ui.log')
-        if ($LASTEXITCODE -ne 0) { throw 'Native UI/resource verification FAIL.' }
-        if ($ResourceRun) {
-            $resourceCsv = Join-Path $results 'native-ui/ui/resource-measurement.csv'
-            if (-not (Test-Path -LiteralPath $resourceCsv -PathType Leaf)) { throw 'Final-PID resource evidence is missing.' }
-            & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-resource-stability.ps1') -InputPath $resourceCsv *> (Join-Path $results 'resource-stability.log')
-            if ($LASTEXITCODE -ne 0) { throw 'Hour-long resource trend gate FAIL/INCONCLUSIVE; see resource-stability.log.' }
-            Write-Host 'RUN - PASS: hour-long maximum history and both GeoIP databases resource gate.'
-        }
-    } else { Write-Host 'Normal-payload UI and hour resource verification: NOT RUN (use -FunctionalUI / -NativeUI / -ResourceRun).' }
+    # Always exercise the normal payload, separately from coverage instrumentation.
+    # Visual Windows 11/resource acceptance remains an explicit requested mode.
+    $candidateHash=(Get-FileHash -LiteralPath (Join-Path $published 'NetLights.exe') -Algorithm SHA256).Hash
+    $uiArguments = @('-NoProfile','-File',(Join-Path $PSScriptRoot 'test-native-ui.ps1'),
+        '-Executable',(Join-Path $published 'NetLights.exe'),'-ResultsDirectory',(Join-Path $results 'native-ui'),'-ExpectedSha256',$candidateHash)
+    if (-not $NativeUI -and -not $ResourceRun) { $uiArguments += '-FunctionalUI' }
+    if ($ResourceRun) { $uiArguments += @('-MeasureSeconds','3600','-EnableCountryForMeasurement','-MaximumHistory') }
+    & pwsh @uiArguments *> (Join-Path $results 'native-ui.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Native UI/resource verification FAIL.' }
+    if ($ResourceRun) {
+        $resourceCsv = Join-Path $results 'native-ui/ui/resource-measurement.csv'
+        if (-not (Test-Path -LiteralPath $resourceCsv -PathType Leaf)) { throw 'Final-PID resource evidence is missing.' }
+        & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-resource-stability.ps1') -InputPath $resourceCsv *> (Join-Path $results 'resource-stability.log')
+        if ($LASTEXITCODE -ne 0) { throw 'Hour-long resource trend gate FAIL/INCONCLUSIVE; see resource-stability.log.' }
+        Write-Host 'RUN - PASS: hour-long maximum history and both GeoIP databases resource gate.'
+    }
     Write-Host 'Real Inno update/rollback in Windows Sandbox is a separate required cutover check.'
     Assert-SourceUnchanged
     Write-Host "RUN - PASS: Rust $Configuration build, tests and mandatory offline coverage. Logs: $results"
