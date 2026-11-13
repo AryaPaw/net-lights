@@ -654,7 +654,9 @@ class NavigationFrames:
         self.guard()
         guarded=time.perf_counter()
         left,top,_,_=self.band
-        if not self.gdi.BitBlt(self.memory,0,0,self.width,self.height,self.screen,left,top,0x40CC0020):
+        # SRCCOPY is enough for this guarded foreground ROI; layered windows
+        # above the owned navigation mustn't be included in its pixels.
+        if not self.gdi.BitBlt(self.memory,0,0,self.width,self.height,self.screen,left,top,0x00CC0020):
             raise ct.WinError(ct.get_last_error())
         copied=time.perf_counter()
         self.gdi.SelectObject(self.memory,self.original)
