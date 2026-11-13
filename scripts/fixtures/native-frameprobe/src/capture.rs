@@ -6,6 +6,18 @@ pub struct Spec {
     pid: u32,
     roi: [i32; 4],
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Geometry {
+    client: [i32; 4],
+    raw: [i32; 4],
+    extended: [i32; 4],
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct FrameLayout {
+    size: (i32, i32),
+    bounds: [i32; 4],
+    local: [u32; 4],
+}
 pub fn parse(arguments: &[String]) -> Option<Spec> {
     if arguments.len() != 7 || arguments[0] != "--capture-roi" {
         return None;
@@ -74,6 +86,27 @@ fn local_roi(
         result[3].ok()?,
     ];
     (result[2] <= size.0 as u32 && result[3] <= size.1 as u32).then_some(result)
+}
+fn bind_frame_layout(
+    roi: [i32; 4],
+    initial: Geometry,
+    current: Geometry,
+    size: (i32, i32),
+    previous: Option<FrameLayout>,
+) -> Option<FrameLayout> {
+    if initial != current {
+        return None;
+    }
+    let bounds = capture_bounds(current.raw, current.extended, size)?;
+    let layout = FrameLayout {
+        size,
+        bounds,
+        local: local_roi(roi, current.client, bounds, size)?,
+    };
+    if previous.is_some_and(|previous| previous != layout) {
+        return None;
+    }
+    Some(layout)
 }
 struct Frame {
     qpc: i64,
@@ -146,6 +179,46 @@ mod win;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn first_actual_frame_binds_without_dropping_and_later_geometry_is_frozen() {
+        let initial = Geometry {
+            client: [100, 100, 1100, 890],
+            raw: [90, 80, 1110, 900],
+            extended: [98, 88, 1102, 892],
+        };
+        let roi = [100, 100, 110, 110];
+        assert!(capture_bounds(initial.raw, initial.extended, (1020, 820)).is_some());
+        let first = bind_frame_layout(roi, initial, initial, (1004, 804), None).unwrap();
+        assert_eq!(first.bounds, initial.extended);
+        assert_eq!(first.local, [2, 12, 12, 22]);
+        assert_eq!(
+            bind_frame_layout(roi, initial, initial, (1004, 804), Some(first)),
+            Some(first)
+        );
+        assert!(bind_frame_layout(roi, initial, initial, (1020, 820), Some(first)).is_none());
+        assert!(bind_frame_layout(roi, initial, initial, (0, 0), None).is_none());
+        assert!(bind_frame_layout(roi, initial, initial, (999, 999), None).is_none());
+        for changed in [
+            Geometry {
+                client: [101, 100, 1100, 890],
+                ..initial
+            },
+            Geometry {
+                raw: [91, 80, 1111, 900],
+                ..initial
+            },
+            Geometry {
+                extended: [99, 88, 1103, 892],
+                ..initial
+            },
+        ] {
+            assert!(bind_frame_layout(roi, initial, changed, (1004, 804), None).is_none());
+            assert!(bind_frame_layout(roi, initial, changed, (1004, 804), Some(first)).is_none());
+        }
+        assert!(
+            bind_frame_layout([99, 100, 110, 110], initial, initial, (1004, 804), None).is_none()
+        );
+    }
     #[test]
     fn capture_shape_selects_only_an_unambiguous_os_rectangle() {
         let raw = [90, 80, 1110, 900];

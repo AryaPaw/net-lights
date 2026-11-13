@@ -44,12 +44,9 @@ type Result<T> = std::result::Result<T, Failure>;
 fn checked<T>(value: windows::core::Result<T>, code: &'static str) -> Result<T> {
     value.map_err(|error| Failure(code, error.code().0))
 }
-struct Geometry {
-    client: [i32; 4],
-    raw: [i32; 4],
-    extended: [i32; 4],
-}
 fn geometry(spec: Spec) -> Result<Geometry> {
+    // FrameArrived runs on a WGC worker, not on the capture setup thread.
+    let _dpi = Dpi::enter()?;
     let hwnd = HWND(spec.hwnd as *mut _);
     let mut pid = 0;
     unsafe {
@@ -103,6 +100,16 @@ impl Drop for Apartment {
     }
 }
 struct Dpi(DPI_AWARENESS_CONTEXT);
+impl Dpi {
+    fn enter() -> Result<Self> {
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        if previous.0.is_null() {
+            return Err(Failure("dpi_context", 0));
+        }
+        Ok(Self(previous))
+    }
+}
 impl Drop for Dpi {
     fn drop(&mut self) {
         unsafe { SetThreadDpiAwarenessContext(self.0) };
@@ -151,19 +158,14 @@ struct State {
     context: ID3D11DeviceContext,
     staging: ID3D11Texture2D,
     spec: Spec,
-    bounds: [i32; 4],
-    size: (i32, i32),
-    local: [u32; 4],
+    initial: Geometry,
+    layout: Option<FrameLayout>,
     frequency: i64,
 }
 impl State {
     fn receive(&mut self, pool: &Direct3D11CaptureFramePool) -> Result<()> {
         let geometry = geometry(self.spec)?;
-        let bounds = capture_bounds(geometry.raw, geometry.extended, self.size)
-            .ok_or(Failure("capture_bounds_changed", 0))?;
-        if bounds != self.bounds
-            || local_roi(self.spec.roi, geometry.client, bounds, self.size) != Some(self.local)
-        {
+        if geometry != self.initial {
             return Err(Failure("geometry_changed", 0));
         }
         let frame = FrameGuard(checked(pool.TryGetNextFrame(), "next_frame")?);
@@ -175,9 +177,15 @@ impl State {
         )?;
         let qpc = captured_qpc(duration, self.frequency, received_qpc, self.queue.last_qpc)?;
         let size = checked(frame.0.ContentSize(), "frame_size")?;
-        if (size.Width, size.Height) != self.size {
-            return Err(Failure("capture_size_changed", 0));
-        }
+        let layout = bind_frame_layout(
+            self.spec.roi,
+            self.initial,
+            geometry,
+            (size.Width, size.Height),
+            self.layout,
+        )
+        .ok_or(Failure("frame_layout_unmatched", 0))?;
+        self.layout = Some(layout);
         let access: IDirect3DDxgiInterfaceAccess = checked(
             checked(frame.0.Surface(), "surface")?.cast(),
             "surface_interface",
@@ -185,18 +193,18 @@ impl State {
         let source: ID3D11Texture2D = checked(unsafe { access.GetInterface() }, "source_texture")?;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { source.GetDesc(&mut desc) };
-        if desc.Width < self.local[2]
-            || desc.Height < self.local[3]
+        if desc.Width < layout.local[2]
+            || desc.Height < layout.local[3]
             || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM
         {
             return Err(Failure("source_layout", 0));
         }
         let region = D3D11_BOX {
-            left: self.local[0],
-            top: self.local[1],
+            left: layout.local[0],
+            top: layout.local[1],
             front: 0,
-            right: self.local[2],
-            bottom: self.local[3],
+            right: layout.local[2],
+            bottom: layout.local[3],
             back: 1,
         };
         unsafe {
@@ -251,12 +259,7 @@ impl State {
     }
 }
 fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write) -> Result<()> {
-    let previous =
-        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    if previous.0.is_null() {
-        return Err(Failure("dpi_context", 0));
-    }
-    let _dpi = Dpi(previous);
+    let _dpi = Dpi::enter()?;
     let geometry = geometry(spec)?;
     checked(unsafe { RoInitialize(RO_INIT_MULTITHREADED) }, "winrt")?;
     let _apartment = Apartment;
@@ -275,7 +278,7 @@ fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write) -> Result
     let shape = (size.Width, size.Height);
     let bounds = capture_bounds(geometry.raw, geometry.extended, shape)
         .ok_or(Failure("capture_bounds_unmatched", 0))?;
-    let local = local_roi(spec.roi, geometry.client, bounds, shape)
+    local_roi(spec.roi, geometry.client, bounds, shape)
         .ok_or(Failure("roi_or_capture_bounds", 0))?;
     let mut device = None;
     let mut context = None;
@@ -344,9 +347,8 @@ fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write) -> Result
         context,
         staging: staging.ok_or(Failure("missing_staging", 0))?,
         spec,
-        bounds,
-        size: shape,
-        local,
+        initial: geometry,
+        layout: None,
         frequency,
     }));
     let pool = checked(
