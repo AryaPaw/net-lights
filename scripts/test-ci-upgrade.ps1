@@ -32,6 +32,13 @@ function Assert-Condition([bool]$Value, [string]$Message) {
     if (-not $Value) { throw $Message }
 }
 
+function Get-SafeErrorLines([string]$Trace) {
+    $bounded = $Trace.Substring(0,[Math]::Min($Trace.Length,65536))
+    # Only source line numbers leave the stack; paths and exception text don't.
+    @([regex]::Matches($bounded,'(?m): line ([1-9][0-9]{0,6})\s*$') |
+        Select-Object -First 16 | ForEach-Object { [int]$_.Groups[1].Value })
+}
+
 function Assert-Sha([string]$Value) {
     Assert-Condition ($Value -cmatch '^[a-fA-F0-9]{64}$') 'Expected an exact SHA-256 digest.'
 }
@@ -164,6 +171,9 @@ function Test-Negative([scriptblock]$Body, [string]$Message) {
 }
 
 if ($SelfTest) {
+    $frames = @(Get-SafeErrorLines "at Assert-Condition, C:\private\token-secret.ps1: line 32`nat Run, C:\private\token-secret.ps1: line 130")
+    if ($frames.Count -ne 2 -or $frames[0] -ne 32 -or $frames[1] -ne 130) { throw 'Safe assertion frames lost source positions.' }
+    if (@(Get-SafeErrorLines 'https://private.invalid/?token=secret').Count) { throw 'A non-stack secret became diagnostic output.' }
     Assert-Condition (-not $BaselineInstaller -and -not $BridgeInstaller -and -not $NativeInstaller) 'SelfTest can''t be combined with installer execution inputs.'
     Assert-Sha ('a' * 64)
     Test-Negative { Assert-Sha 'not-a-digest' } 'Digest negative control didn''t reject.'
@@ -212,7 +222,7 @@ if ($ReleaseTag -ceq 'v1.6.0') {
 } else {
     Assert-Sha $BaselineSha256
     Assert-Condition ($BaselineBytes -gt 0 -and $BaselineBytes -le 80MB) 'Historical input needs the exact published asset digest and size.'
-    Assert-Condition ($Scenario -ceq 'Direct') 'Historical no-ready agents are tested by the Direct scenario; they don''t implement bridge safety.'
+    Assert-Condition ($Scenario -in @('Direct','Bridge')) 'Historical no-ready agents support success-route checks only; their failure safety isn''t claimed.'
 }
 $baselineVersion = $ReleaseTag.Substring(1)
 Assert-Unlinked $BaselineInstaller
@@ -408,7 +418,10 @@ function New-Seed {
             }
         }
     } else {
-        $settings.settingsVersion = 4
+        # Published 1.4.2 already migrates its own settings through version 7.
+        # Seeding version 4 would let that old executable change the fixture
+        # before the upgrade under test has even started.
+        $settings.settingsVersion = 7
         $settings.Remove('availabilityPollingSeconds'); $settings.Remove('countryPollingSeconds')
         $settingFields = @('windowWidth','windowHeight','emphasizeShortStatuses','autoUpdateEnabled')
     }
@@ -528,6 +541,19 @@ function Invoke-InstalledAgent([string]$Setup, [string]$ExpectedAgentHash, [stri
     }
 }
 
+function Confirm-InstalledMonitorRestart {
+    Assert-HostedRunner
+    Assert-Condition (@(Get-Process NetLights -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $app }).Count -eq 0) 'An external monitor restart requires the owned application to be stopped.'
+    $healthName = 'Local\NetLights.UpdateHealth.' + [Guid]::NewGuid().ToString('N')
+    $health = [Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$healthName)
+    try {
+        $owner = Start-Owned $app @('--update-health-event',$healthName)
+        Assert-Condition ($health.WaitOne(25000)) 'Installed monitoring didn''t acknowledge the external health restart.'
+        Assert-Live $owner
+    } finally { $health.Dispose() }
+    return @{ externalMonitorSignal = 'PASS'; stablePidSeconds = 4 }
+}
+
 function Assert-Native([object]$Attempt) {
     Assert-Condition ($Attempt.exitCode -eq 0 -and $Attempt.success) 'The installed agent didn''t report native upgrade success.'
     Assert-ExactFile $app $native.appSha256 160MB
@@ -540,13 +566,7 @@ function Assert-Native([object]$Attempt) {
     Assert-Seed
     # For pre-ready agents this is explicitly an external verification restart,
     # not a claim that the historical agent implemented monitor confirmation.
-    $healthName = 'Local\NetLights.UpdateHealth.' + [Guid]::NewGuid().ToString('N')
-    $health = [Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$healthName)
-    try {
-        $owner = Start-Owned $app @('--update-health-event',$healthName)
-        Assert-Condition ($health.WaitOne(25000)) 'Native monitoring didn''t acknowledge the external health restart.'
-        Assert-Live $owner
-    } finally { $health.Dispose() }
+    $null = Confirm-InstalledMonitorRestart
     Stop-App
     Assert-Seed
     return @{ externalNativeMonitorSignal = 'PASS'; stablePidSeconds = 4; exactAppAndAgentDigests = 'PASS'; settingsAndBothHistories = 'PASS' }
@@ -689,7 +709,7 @@ function Invoke-Case([string]$Name, [scriptblock]$Body) {
     try { & $Body }
     catch {
         $caseError = 'The case failed its protocol or preservation assertion.'
-        Add-Check ($Name + '-execution') 'FAIL' @{ error = $caseError; errorType = $_.Exception.GetType().Name }
+        Add-Check ($Name + '-execution') 'FAIL' @{ error = $caseError; errorType = $_.Exception.GetType().Name; sourceLines = @(Get-SafeErrorLines $_.ScriptStackTrace) }
     } finally {
         try { Reset-OwnedFixture $Name }
         catch {
@@ -738,9 +758,13 @@ try {
             Assert-Condition ($transition.exitCode -eq 0 -and $transition.success) 'The actual old agent didn''t install bridge 1.6.1.'
             Assert-ExactFile $app $bridge.appSha256 160MB
             Assert-ExactFile (Join-Path $install 'NetLights.UpdateAgent.exe') $bridge.agentSha256 160MB
+            $bridgeRegistration = @(Get-RegistrySnapshot | Where-Object { $_.name -ceq 'DisplayVersion' })
+            Assert-Condition ($bridgeRegistration.Count -eq 1 -and $bridgeRegistration[0].value -ceq '1.6.1') 'The bridge transition didn''t register version 1.6.1.'
             Stop-App; Assert-Seed
-            $null = Start-Owned $app; $null = Wait-App
-            Add-Check 'published-old-agent-verified-bridge-success' 'PASS' $transition
+            # A pre-ready baseline doesn't implement this protocol. Record our
+            # independent bridge restart separately from its historical handoff.
+            $bridgeMonitor = Confirm-InstalledMonitorRestart
+            Add-Check 'published-old-agent-verified-bridge-success' 'PASS' @{ transition = $transition; externalBridgeMonitor = $bridgeMonitor }
             $before = Get-InstallationState
             foreach ($mode in @('partial','health','wrong-version')) {
                 $setup = if ($mode -ceq 'wrong-version') {

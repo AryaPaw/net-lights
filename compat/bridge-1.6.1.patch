@@ -3515,3 +3515,94 @@ new file mode 100644
 +        if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
 +    }
 +}
+diff --git a/src/NetLights.App/Persistence/SettingsStore.cs b/src/NetLights.App/Persistence/SettingsStore.cs
+index df28f95..d99b1f2 100644
+--- a/src/NetLights.App/Persistence/SettingsStore.cs
++++ b/src/NetLights.App/Persistence/SettingsStore.cs
+@@ -64,7 +64,8 @@ internal static class SettingsStore
+         if (settings.SettingsVersion >= 5)
+             return false;
+ 
+-        settings.EmphasizeShortStatuses = true;
++        // Keep the value loaded from disk, including an explicit false. The
++        // compatibility updater must not change this preference during a hop.
+         settings.SettingsVersion = 5;
+         return true;
+     }
+diff --git a/tests/NetLights.IntegrationTests/GeoCountryTrayTests.cs b/tests/NetLights.IntegrationTests/GeoCountryTrayTests.cs
+index 2737951..daed9eb 100644
+--- a/tests/NetLights.IntegrationTests/GeoCountryTrayTests.cs
++++ b/tests/NetLights.IntegrationTests/GeoCountryTrayTests.cs
+@@ -122,7 +122,7 @@ public sealed class GeoCountryTrayTests
+ 
+         var previousReleaseSettings = new AppSettings { SettingsVersion = 4, WindowWidth = 1040, WindowHeight = 920, EmphasizeShortStatuses = false };
+         Assert.True(SettingsStore.MigrateToSettingsVersion5(previousReleaseSettings));
+-        Assert.True(previousReleaseSettings.EmphasizeShortStatuses);
++        Assert.False(previousReleaseSettings.EmphasizeShortStatuses);
+         Assert.True(SettingsStore.MigrateToSettingsVersion6(previousReleaseSettings));
+         Assert.Equal(UiTheme.WindowDefaultWidth, previousReleaseSettings.WindowWidth);
+         Assert.Equal(UiTheme.WindowDefaultHeight, previousReleaseSettings.WindowHeight);
+diff --git a/tests/NetLights.IntegrationTests/BridgeSettingsMigrationTests.cs b/tests/NetLights.IntegrationTests/BridgeSettingsMigrationTests.cs
+new file mode 100644
+index 0000000..1bf6034
+--- /dev/null
++++ b/tests/NetLights.IntegrationTests/BridgeSettingsMigrationTests.cs
+@@ -0,0 +1,58 @@
++using System.Text.Json;
++using NetLights.App;
++using Xunit;
++
++namespace NetLights.IntegrationTests;
++
++[Collection("SettingsFiles")]
++public sealed class BridgeSettingsMigrationTests
++{
++    [Theory]
++    [InlineData(false)]
++    [InlineData(true)]
++    public void ExplicitShortStatusChoiceSurvivesLegacyMigrationAndReload(bool emphasize)
++    {
++        string previous = SettingsStore.RootDirectory;
++        string root = Path.Combine(Path.GetTempPath(), "NetLightsBridgeSettings-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(root);
++        try
++        {
++            SettingsStore.RootDirectory = root;
++            File.WriteAllText(SettingsStore.SettingsPath, JsonSerializer.Serialize(new
++            {
++                settingsVersion = 4, emphasizeShortStatuses = emphasize,
++                autoStart = false, autoUpdateEnabled = false,
++                windowWidth = 1234, windowHeight = 987
++            }));
++
++            (AppSettings migrated, SettingsLoadStatus status) = SettingsStore.LoadDetailed();
++            Assert.Equal(SettingsLoadStatus.Loaded, status);
++            Assert.Equal(emphasize, migrated.EmphasizeShortStatuses);
++            Assert.True(SettingsStore.MigrateToSettingsVersion5(migrated));
++            SettingsStore.MigrateToSettingsVersion6(migrated);
++            SettingsStore.MigrateToSettingsVersion7(migrated);
++            SettingsStore.MigrateToSettingsVersion8(migrated);
++            SettingsStore.Save(migrated);
++
++            // Discard and deliberately change the old in-memory object. The
++            // assertions below must observe the saved file, not cached state.
++            migrated.EmphasizeShortStatuses = !emphasize;
++            AppSettings reloaded = SettingsStore.Load();
++            Assert.NotSame(migrated, reloaded);
++            Assert.Equal(8, reloaded.SettingsVersion);
++            Assert.Equal(emphasize, reloaded.EmphasizeShortStatuses);
++            Assert.Equal(1234, reloaded.WindowWidth);
++            Assert.Equal(987, reloaded.WindowHeight);
++            Assert.False(reloaded.AutoStart);
++            Assert.False(reloaded.AutoUpdateEnabled);
++            Assert.False(SettingsStore.MigrateToSettingsVersion5(reloaded));
++            SettingsStore.Save(reloaded);
++            Assert.Equal(emphasize, SettingsStore.Load().EmphasizeShortStatuses);
++        }
++        finally
++        {
++            SettingsStore.RootDirectory = previous;
++            Directory.Delete(root, true);
++        }
++    }
++}
