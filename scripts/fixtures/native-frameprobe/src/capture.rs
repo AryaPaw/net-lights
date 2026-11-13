@@ -28,6 +28,20 @@ fn dimensions(rect: [i32; 4]) -> Option<(u32, u32)> {
     (width > 0 && height > 0 && u64::from(width) * u64::from(height) <= 65536)
         .then_some((width, height))
 }
+fn capture_bounds(raw: [i32; 4], extended: [i32; 4], size: (i32, i32)) -> Option<[i32; 4]> {
+    let matches = |rect: [i32; 4]| {
+        size.0 > 0
+            && size.1 > 0
+            && i64::from(rect[2]) - i64::from(rect[0]) == i64::from(size.0)
+            && i64::from(rect[3]) - i64::from(rect[1]) == i64::from(size.1)
+    };
+    match (matches(raw), matches(extended)) {
+        (true, false) => Some(raw),
+        (false, true) => Some(extended),
+        (true, true) if raw == extended => Some(raw),
+        _ => None,
+    }
+}
 fn local_roi(
     roi: [i32; 4],
     client: [i32; 4],
@@ -132,6 +146,36 @@ mod win;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn capture_shape_selects_only_an_unambiguous_os_rectangle() {
+        let raw = [90, 80, 1110, 900];
+        let extended = [98, 88, 1102, 892];
+        assert_eq!(capture_bounds(raw, extended, (1020, 820)), Some(raw));
+        assert_eq!(capture_bounds(raw, extended, (1004, 804)), Some(extended));
+        assert_eq!(capture_bounds(raw, raw, (1020, 820)), Some(raw));
+        assert!(capture_bounds(raw, [91, 80, 1111, 900], (1020, 820)).is_none());
+        assert!(capture_bounds(raw, extended, (1000, 800)).is_none());
+        assert!(capture_bounds(raw, extended, (0, 0)).is_none());
+        let client = [100, 100, 1100, 890];
+        assert_eq!(
+            local_roi([100, 100, 110, 110], client, raw, (1020, 820)),
+            Some([10, 20, 20, 30])
+        );
+        assert_eq!(
+            local_roi([100, 100, 110, 110], client, extended, (1004, 804)),
+            Some([2, 12, 12, 22])
+        );
+        assert!(
+            local_roi(
+                [90, 90, 100, 100],
+                [80, 80, 1110, 900],
+                extended,
+                (1004, 804)
+            )
+            .is_none()
+        );
+        assert!(local_roi([99, 100, 110, 110], client, raw, (1020, 820)).is_none());
+    }
     #[test]
     fn compositor_clock_conversion_preserves_qpc_units_and_rejects_invalid_times() {
         assert_eq!(

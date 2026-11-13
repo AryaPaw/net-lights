@@ -35,7 +35,8 @@ use windows::Win32::UI::{
         SetThreadDpiAwarenessContext,
     },
     WindowsAndMessaging::{
-        GetClientRect, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
+        GetClientRect, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
+        IsWindowVisible,
     },
 };
 use windows::core::{IInspectable, Interface, factory};
@@ -43,7 +44,12 @@ type Result<T> = std::result::Result<T, Failure>;
 fn checked<T>(value: windows::core::Result<T>, code: &'static str) -> Result<T> {
     value.map_err(|error| Failure(code, error.code().0))
 }
-fn geometry(spec: Spec) -> Result<([i32; 4], [i32; 4])> {
+struct Geometry {
+    client: [i32; 4],
+    raw: [i32; 4],
+    extended: [i32; 4],
+}
+fn geometry(spec: Spec) -> Result<Geometry> {
     let hwnd = HWND(spec.hwnd as *mut _);
     let mut pid = 0;
     unsafe {
@@ -58,6 +64,8 @@ fn geometry(spec: Spec) -> Result<([i32; 4], [i32; 4])> {
     let mut client = RECT::default();
     let mut origin = POINT::default();
     let mut bounds = RECT::default();
+    let mut raw = RECT::default();
+    checked(unsafe { GetWindowRect(hwnd, &mut raw) }, "window_rect")?;
     checked(unsafe { GetClientRect(hwnd, &mut client) }, "client_rect")?;
     checked(
         unsafe { ClientToScreen(hwnd, &mut origin) }.ok(),
@@ -82,10 +90,11 @@ fn geometry(spec: Spec) -> Result<([i32; 4], [i32; 4])> {
         .y
         .checked_add(client.bottom)
         .ok_or(Failure("client_overflow", 0))?;
-    Ok((
-        [origin.x, origin.y, x, y],
-        [bounds.left, bounds.top, bounds.right, bounds.bottom],
-    ))
+    Ok(Geometry {
+        client: [origin.x, origin.y, x, y],
+        raw: [raw.left, raw.top, raw.right, raw.bottom],
+        extended: [bounds.left, bounds.top, bounds.right, bounds.bottom],
+    })
 }
 struct Apartment;
 impl Drop for Apartment {
@@ -149,9 +158,11 @@ struct State {
 }
 impl State {
     fn receive(&mut self, pool: &Direct3D11CaptureFramePool) -> Result<()> {
-        let (client, bounds) = geometry(self.spec)?;
+        let geometry = geometry(self.spec)?;
+        let bounds = capture_bounds(geometry.raw, geometry.extended, self.size)
+            .ok_or(Failure("capture_bounds_changed", 0))?;
         if bounds != self.bounds
-            || local_roi(self.spec.roi, client, bounds, self.size) != Some(self.local)
+            || local_roi(self.spec.roi, geometry.client, bounds, self.size) != Some(self.local)
         {
             return Err(Failure("geometry_changed", 0));
         }
@@ -246,7 +257,7 @@ fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write) -> Result
         return Err(Failure("dpi_context", 0));
     }
     let _dpi = Dpi(previous);
-    let (client, bounds) = geometry(spec)?;
+    let geometry = geometry(spec)?;
     checked(unsafe { RoInitialize(RO_INIT_MULTITHREADED) }, "winrt")?;
     let _apartment = Apartment;
     if !checked(GraphicsCaptureSession::IsSupported(), "capture_support")? {
@@ -262,8 +273,10 @@ fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write) -> Result
     )?;
     let size = checked(item.Size(), "item_size")?;
     let shape = (size.Width, size.Height);
-    let local =
-        local_roi(spec.roi, client, bounds, shape).ok_or(Failure("roi_or_capture_bounds", 0))?;
+    let bounds = capture_bounds(geometry.raw, geometry.extended, shape)
+        .ok_or(Failure("capture_bounds_unmatched", 0))?;
+    let local = local_roi(spec.roi, geometry.client, bounds, shape)
+        .ok_or(Failure("roi_or_capture_bounds", 0))?;
     let mut device = None;
     let mut context = None;
     let create = |driver,

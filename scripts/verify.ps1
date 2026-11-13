@@ -123,11 +123,6 @@ try {
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-sandbox-update.ps1') -SelfTest *> (Join-Path $results 'sandbox-controls.log')
     if ($LASTEXITCODE -ne 0) { throw 'Sandbox identity and safety controls FAIL.' }
     Assert-SourceUnchanged
-    # This gate is unconditional. Live public services and visual UI acceptance
-    # are separate opt-in checks; neither can replace missing offline coverage.
-    & (Join-Path $PSScriptRoot 'test-native-coverage.ps1') -ResultsDirectory (Join-Path $results 'coverage') -FunctionalUI
-    Assert-SourceUnchanged
-    if ($Legacy) { & (Join-Path $PSScriptRoot 'verify-legacy.ps1') -ResultsDirectory (Join-Path $results 'legacy') }
     # Always exercise the normal payload, separately from coverage instrumentation.
     # Visual Windows 11/resource acceptance remains an explicit requested mode.
     $candidateHash=(Get-FileHash -LiteralPath (Join-Path $published 'NetLights.exe') -Algorithm SHA256).Hash
@@ -144,6 +139,12 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Hour-long resource trend gate FAIL/INCONCLUSIVE; see resource-stability.log.' }
         Write-Host 'RUN - PASS: hour-long maximum history and both GeoIP databases resource gate.'
     }
+    Assert-SourceUnchanged
+    # This gate is unconditional. Live public services and visual UI acceptance
+    # are separate opt-in checks; neither can replace missing offline coverage.
+    & (Join-Path $PSScriptRoot 'test-native-coverage.ps1') -ResultsDirectory (Join-Path $results 'coverage') -FunctionalUI
+    Assert-SourceUnchanged
+    if ($Legacy) { & (Join-Path $PSScriptRoot 'verify-legacy.ps1') -ResultsDirectory (Join-Path $results 'legacy') }
     Write-Host 'Real Inno update/rollback in Windows Sandbox is a separate required cutover check.'
     Assert-SourceUnchanged
     Write-Host "RUN - PASS: Rust $Configuration build, tests and mandatory offline coverage. Logs: $results"
