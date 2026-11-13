@@ -708,6 +708,25 @@ def checked_frameprobe(path,digest):
     return path
 
 
+def native_clock_diagnostic(raw):
+    if not raw:
+        return None
+    if len(raw)>8192:
+        raise RuntimeError("Native clock diagnostic exceeded its bound")
+    try:
+        if not raw.strip().startswith(b"{") or not raw.strip().endswith(b"}"):
+            raise ValueError()
+        pairs=json.loads(raw.decode("ascii"),object_pairs_hook=lambda pairs:pairs)
+        expected={"duration","frequency","received_qpc","previous_qpc"}
+        if not isinstance(pairs,list) or len(pairs)!=4 or {key for key,_ in pairs}!=expected:
+            raise ValueError()
+        if any(type(value) is not int or not -(2**63)<=value<2**63 for _,value in pairs):
+            raise ValueError()
+        return dict(pairs)
+    except (UnicodeError,ValueError,TypeError):
+        raise RuntimeError("Malformed native clock diagnostic") from None
+
+
 class NavigationFrames:
     """One owned native WGC producer per transition, without GDI fallback."""
     def __init__(self,api,policy,hwnd,pid,band,helper,digest,reports,clock):
@@ -720,6 +739,20 @@ class NavigationFrames:
         self.frames=[]
         self.report=None
         self.finished=False
+        self.diagnostics_read=False
+
+    def read_diagnostics(self):
+        if getattr(self,"diagnostics_read",False):
+            return
+        if self.process.poll() is None:
+            raise RuntimeError("Cannot read native diagnostics before owned process exit")
+        try:
+            diagnostic=native_clock_diagnostic(self.process.stderr.read(8193))
+            if diagnostic is not None:
+                self.report["clock_diagnostic"]=diagnostic
+        finally:
+            self.diagnostics_read=True
+            self.process.stderr.close()
 
     def guard(self):
         self.policy.assert_identity()
@@ -768,7 +801,7 @@ class NavigationFrames:
         for key in ("LLVM_PROFILE_FILE","LLVM_PROFILE_FILE_NAME","RUSTFLAGS","CARGO_ENCODED_RUSTFLAGS"):
             environment.pop(key,None)
         self.process=subprocess.Popen([str(helper),"--capture-roi",str(self.hwnd),str(self.pid),*map(str,self.band)],
-            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env=environment,
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=environment,
             creationflags=NO_CONSOLE,bufsize=64*1024)
         self.report=dict(pid=self.process.pid,sha256=self.digest,mode="Windows.Graphics.Capture",cleanup="PENDING")
         self.reports.append(self.report)
@@ -818,6 +851,7 @@ class NavigationFrames:
                     raise RuntimeError("Native capture omitted its graceful end")
                 break
         code=self.process.wait(timeout=max(.001,deadline-time.monotonic()))
+        self.read_diagnostics()
         self.reader.join(timeout=max(.001,deadline-time.monotonic()))
         if code!=0 or self.reader.is_alive() or self.reader_error is not None:
             raise RuntimeError("Native capture worker didn't exit cleanly")
@@ -833,6 +867,11 @@ class NavigationFrames:
             if self.process.poll() is None:
                 self.process.kill()
             self.process.wait(timeout=2)
+            diagnostic_error=None
+            try:
+                self.read_diagnostics()
+            except Exception as error:
+                diagnostic_error=error
             if self.reader and self.reader.ident is not None:
                 self.reader.join(timeout=2)
             if self.reader and self.reader.is_alive():
@@ -844,6 +883,8 @@ class NavigationFrames:
                     pipe.close()
             if self.report is not None:
                 self.report.update(cleanup="FAIL",exit_code=self.process.returncode)
+            if diagnostic_error is not None:
+                raise diagnostic_error
 
     def __exit__(self,kind,*_):
         if not self.finished:
@@ -1794,6 +1835,9 @@ class Runner:
     def fluent_controls(self):
         assert self.input_policy, "Fluent interaction requires the isolated input policy"
         self.input_policy.assert_identity()
+        cursors=self.cursor_affordances()
+        self.meta["cursor_affordances"]=cursors
+        self.page("Состояние")
         from pywinauto import clipboard
         pid, hwnd = self.process.pid, self.uia.hwnd
         original = self.api.outer(hwnd)
@@ -1872,7 +1916,6 @@ class Runner:
             time.sleep(.5)
             wait_for(lambda:self.api.outer(hwnd)==original,5,"Fluent test restored exact owned window geometry")
             wait_for(lambda:self.setting("windowWidth")==original_width and self.setting("windowHeight")==original_height,5,"Restored window dimensions persisted")
-        cursors=self.cursor_affordances()
         self.page("Состояние")
         assert self.process.pid==pid and self.process.poll() is None
         return dict(tabs=heights,compact_buttons=24,arrow_home_end=True,about_version=version,clipboard_in_guest=True,settings_anchors=True,narrow=True,navigation_motion=motion,cursor_affordances=cursors)
@@ -2858,8 +2901,8 @@ def navigation_motion_selftest():
     assert clock.frequency==1000 and clock.now()==1234
     rejected(lambda:QpcClock(SimpleNamespace(QueryPerformanceCounter=Function(0),QueryPerformanceFrequency=Function(0))))
     class Process:
-        def __init__(self,payload,code=0,hang=False):
-            self.pid=77;self.stdin=io.BytesIO();self.stdout=io.BytesIO(payload)
+        def __init__(self,payload,code=0,hang=False,diagnostic=b""):
+            self.pid=77;self.stdin=io.BytesIO();self.stdout=io.BytesIO(payload);self.stderr=io.BytesIO(diagnostic)
             self.returncode=None;self.code,self.hang=code,hang;self.killed=False
         def poll(self):return self.returncode
         def wait(self,timeout):
@@ -2871,8 +2914,8 @@ def navigation_motion_selftest():
         def __init__(self,**_):pass
         def start(self):raise RuntimeError("Injected reader start failure")
         def is_alive(self):return False
-    def scenario(records,success,code=0,hang=False,queue_size=256,start_failure=False):
-        process=Process(b"".join(encode(record) for record in records),code,hang)
+    def scenario(records,success,code=0,hang=False,queue_size=256,start_failure=False,diagnostic=b""):
+        process=Process(b"".join(encode(record) for record in records),code,hang,diagnostic)
         reports=[]
         capture=NavigationFrames(None,None,23,17,(0,0,16,1),"owned-helper","a"*64,reports,
                                  SimpleNamespace(frequency=1000,now=lambda:10000))
@@ -2880,7 +2923,7 @@ def navigation_motion_selftest():
         def launch(arguments,**options):
             assert arguments[1:]==["--capture-roi","23","17","0","0","16","1"]
             assert all(key not in options["env"] for key in ("LLVM_PROFILE_FILE","LLVM_PROFILE_FILE_NAME","RUSTFLAGS","CARGO_ENCODED_RUSTFLAGS"))
-            assert options["stderr"]==subprocess.DEVNULL
+            assert options["stderr"]==subprocess.PIPE
             return process
         with patch.object(capture,"guard"),patch(__name__+".checked_frameprobe",return_value="owned-helper"),patch.object(subprocess,"Popen",launch),patch.object(threading,"Thread",FailingThread if start_failure else threading.Thread),patch.dict(os.environ,{"LLVM_PROFILE_FILE":"secret-profile","LLVM_PROFILE_FILE_NAME":"secret-name","RUSTFLAGS":"coverage","CARGO_ENCODED_RUSTFLAGS":"coverage"}):
             try:
@@ -2891,8 +2934,10 @@ def navigation_motion_selftest():
             else:
                 assert success and observed[0][1]["qpc"]==300
         assert reports[0]["cleanup"]==("PASS" if success else "FAIL")
-        assert not capture.reader.is_alive() and process.stdin.closed and process.stdout.closed
+        assert not capture.reader.is_alive() and process.stdin.closed and process.stdout.closed and process.stderr.closed
         assert process.returncode is not None
+        if diagnostic and len(diagnostic)<=8192:
+            assert reports[0]["clock_diagnostic"]==json.loads(diagnostic)
     complete=[ready,frame,dict(frame,qpc=300),end]
     scenario(complete,True)
     scenario([ready,frame],False)
@@ -2902,6 +2947,15 @@ def navigation_motion_selftest():
     scenario(complete,False,start_failure=True)
     scenario([dict(ready,frequency=999),frame,end],False)
     scenario([ready,dict(frame,qpc=10001),dict(end,qpc=10002)],False)
+    diagnostic=dict(duration=-1,frequency=1000,received_qpc=123,previous_qpc=124)
+    assert native_clock_diagnostic(encode(diagnostic))==diagnostic
+    assert native_clock_diagnostic(b"") is None
+    for invalid in (b"x"*8193,encode(dict(diagnostic,frequency=True)),encode(dict(diagnostic,duration=2**63)),
+                    encode(dict(diagnostic,path="secret")),encode(diagnostic)+encode(diagnostic),b'{"duration":1,"duration":2}\n'):
+        rejected(lambda:native_clock_diagnostic(invalid))
+    scenario(complete,True,diagnostic=encode(diagnostic))
+    scenario(complete,False,code=7,diagnostic=encode(diagnostic))
+    scenario(complete,False,diagnostic=b"x"*8193)
     capture=NavigationFrames.__new__(NavigationFrames)
     capture.process=Process(b"")
     capture.reader=SimpleNamespace(ident=1,join=lambda **_:None,is_alive=lambda:True)

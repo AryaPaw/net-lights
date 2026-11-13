@@ -161,6 +161,7 @@ struct State {
     initial: Geometry,
     layout: Option<FrameLayout>,
     frequency: i64,
+    clock_diagnosed: bool,
 }
 impl State {
     fn receive(&mut self, pool: &Direct3D11CaptureFramePool) -> Result<()> {
@@ -175,7 +176,19 @@ impl State {
             unsafe { QueryPerformanceCounter(&mut received_qpc) },
             "frame_qpc",
         )?;
-        let qpc = captured_qpc(duration, self.frequency, received_qpc, self.queue.last_qpc)?;
+        let qpc = match captured_qpc(duration, self.frequency, received_qpc, self.queue.last_qpc) {
+            Ok(value) => value,
+            Err(error) => {
+                if !self.clock_diagnosed {
+                    self.clock_diagnosed = true;
+                    eprintln!(
+                        "{{\"duration\":{duration},\"frequency\":{},\"received_qpc\":{received_qpc},\"previous_qpc\":{}}}",
+                        self.frequency, self.queue.last_qpc
+                    );
+                }
+                return Err(error);
+            }
+        };
         let size = checked(frame.0.ContentSize(), "frame_size")?;
         let layout = bind_frame_layout(
             self.spec.roi,
@@ -350,6 +363,7 @@ fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write) -> Result
         initial: geometry,
         layout: None,
         frequency,
+        clock_diagnosed: false,
     }));
     let pool = checked(
         Direct3D11CaptureFramePool::CreateFreeThreaded(

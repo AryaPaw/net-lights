@@ -146,15 +146,24 @@ fn captured_qpc(
     previous: i64,
 ) -> Result<i64, Failure> {
     if duration <= 0 || frequency <= 0 || received_qpc <= 0 {
-        return Err(Failure("capture_timestamp", 0));
+        return Err(Failure("capture_timestamp_invalid", 0));
     }
     // SystemRelativeTime is compositor QPC time expressed in 100 ns units.
     let value = i128::from(duration)
         .checked_mul(i128::from(frequency))
         .and_then(|ticks| i64::try_from(ticks / 10_000_000).ok())
-        .ok_or(Failure("capture_timestamp", 0))?;
-    if value <= 0 || value <= previous || value > received_qpc {
-        return Err(Failure("capture_timestamp", 0));
+        .ok_or(Failure("capture_timestamp_overflow", 0))?;
+    if value <= 0 {
+        return Err(Failure("capture_timestamp_invalid", 0));
+    }
+    if value < previous {
+        return Err(Failure("capture_timestamp_reversed", 0));
+    }
+    if value == previous {
+        return Err(Failure("capture_timestamp_equal", 0));
+    }
+    if value > received_qpc {
+        return Err(Failure("capture_timestamp_future", 0));
     }
     Ok(value)
 }
