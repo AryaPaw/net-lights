@@ -101,7 +101,19 @@ try {
     if (-not $version -or $version -ne $props.Project.PropertyGroup.Version) { throw 'Canonical and compatibility versions differ.' }
     Invoke-Cargo 'format' @('fmt','--all','--','--check')
     Invoke-Cargo 'lint' (@('clippy','--all-targets') + $common + @('--','-D','warnings'))
-    Invoke-Cargo 'tests' (@('test') + $common + @('--','--test-threads=1'))
+    # Run every workspace package once, with critical headless paths first.
+    # A core failure shouldn't wait for the large GPUI test executable to link.
+    $workspaceFile = Join-Path $results 'workspace.json'
+    & cargo metadata --locked --no-deps --format-version 1 1> $workspaceFile 2> (Join-Path $results 'workspace-inventory.stderr.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Workspace test inventory failed.' }
+    $workspace = Get-Content -LiteralPath $workspaceFile -Raw | ConvertFrom-Json
+    $packages = @($workspace.packages | Where-Object { $_.id -cin $workspace.workspace_members } |
+        Sort-Object @{Expression={ if ($_.name -ceq 'netlights-core') { 0 } elseif ($_.name -ceq 'netlights-update-agent') { 1 } else { 2 } }}, name)
+    if (-not $packages.Count -or $packages.Count -ne @($workspace.workspace_members).Count) { throw 'Workspace test inventory is incomplete.' }
+    $packageArguments = @($common | Where-Object { $_ -cne '--workspace' })
+    foreach ($package in $packages) {
+        Invoke-Cargo ("tests-" + $package.name) (@('test','--package',$package.name) + $packageArguments + @('--','--test-threads=1'))
+    }
     Assert-SourceUnchanged
     $published = Join-Path $results 'publish'
     & (Join-Path $PSScriptRoot 'publish.ps1') -OutputDirectory $published -Configuration $Configuration

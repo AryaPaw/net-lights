@@ -43,6 +43,55 @@ WM_CLOSE, WM_MOUSEMOVE, WM_MOUSEWHEEL = 0x0010, 0x0200, 0x020A
 NO_CONSOLE = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def rectangle_inside(rect, bounds):
+    a,b,c,d=bounds
+    return a<=rect[0]<rect[2]<=c and b<=rect[1]<rect[3]<=d
+
+
+def fitted_outer(original, work, width, height):
+    x,y,w,h=work
+    width,height=min(int(width),w),min(int(height),h)
+    if width<=0 or height<=0:
+        raise ValueError("Invalid fitted window dimensions")
+    return [min(max(original[0],x),x+w-width), min(max(original[1],y),y+h-height),width,height]
+
+
+def distinct_custom_size(expected, work, scale):
+    custom=[max(round(640*scale),expected[0]-70),max(round(480*scale),expected[1]-70)]
+    if custom==expected or custom[0]>work[2] or custom[1]>work[3]:
+        raise ValueError("Desktop cannot exercise a distinct valid saved size")
+    return custom
+
+
+def visible_endpoint_ids(controls, bounds):
+    result=set()
+    for item in controls:
+        if item["kind"]=="Button" and item["name"]=="Проверить сейчас" and item["visible"] and rectangle_inside(item["rect"],bounds):
+            identity=tuple(item["runtime_id"] or ())
+            if not identity:
+                raise RuntimeError("Endpoint button has no stable UIA identity")
+            result.add(identity)
+    return result
+
+
+def stable_endpoint_inventory(controls, toolbar_id, expected=None):
+    identities=set()
+    targets=toolbar_count=0
+    for item in controls:
+        if item["kind"]=="Button" and item["name"]=="Проверить сейчас":
+            identity=tuple(item["runtime_id"] or ())
+            if not identity:
+                raise RuntimeError("Endpoint inventory has no stable UIA identity")
+            if identity!=toolbar_id:
+                targets+=1
+                identities.add(identity)
+            else:
+                toolbar_count+=1
+    if toolbar_count!=1 or targets!=7 or len(identities)!=targets or (expected is not None and identities!=expected):
+        raise RuntimeError("The seven endpoint identities changed or were not present in the expanded provider")
+    return identities
+
+
 def token_username():
     """Win32 token identity, not an environment variable supplied by a caller."""
     function = ct.WinDLL("advapi32", use_last_error=True).GetUserNameW
@@ -740,6 +789,7 @@ class Automation:
                         for control in window.descendants():
                             info, rectangle = control.element_info, control.rectangle()
                             value.append(dict(name=info.name, kind=info.control_type, id=info.automation_id,
+                                runtime_id=[int(part) for part in info.element.GetRuntimeId()] if info.control_type=="Button" else None,
                                 rect=[rectangle.left, rectangle.top, rectangle.right, rectangle.bottom], visible=control.is_visible()))
                     else:
                         name = arguments[0]
@@ -957,6 +1007,7 @@ class Runner:
         self.exe, self.output, self.profile = exe, output, output/"profile"
         self.api, self.process, self.uia = Win32(), None, None
         self.measure_seconds, self.results, self.captures = measure_seconds, [], []
+        self.functional_evidence=functional_evidence
         self.enable_country, self.country_enabled, self.measurement_blocked = enable_country, False, False
         self.input_policy = input_policy
         self.private_captures = []
@@ -1035,6 +1086,12 @@ class Runner:
         self.meta.setdefault("uia_connections", []).append(self.uia.call("connection-diagnostics"))
         assert self.api.owner(self.uia.hwnd) == self.process.pid
         self.meta["dpi"] = self.api.user.GetDpiForWindow(self.uia.hwnd)
+        work=self.api.work_area(self.uia.hwnd)
+        required_height=1000 if self.functional_evidence else 1300
+        if work[2]<1450 or work[3]<required_height:
+            raise RuntimeError("Actual work area cannot exercise the required functional/visual UI matrix")
+        self.meta.setdefault("viewports",[]).append(dict(pid=self.process.pid,work_area=work,
+            outer=self.api.outer(self.uia.hwnd),compact_functional=self.functional_evidence and work[3]<1300))
         expected_navigation = startup_navigation_label(self.setting("language"))
         self.meta.setdefault("startup_navigation", []).append(dict(pid=self.process.pid,
             saved_language=self.setting("language"), expected_label=expected_navigation))
@@ -1237,13 +1294,13 @@ class Runner:
         self.api.click(self.uia.hwnd, point)
         time.sleep(0.18)
 
-    def visible_control(self, name):
+    def visible_control(self, name, extra_below=0):
         for _ in range(35):
             direction=-480
             try:
                 r = self.uia.call("rect", name)
                 a, b, c, d = self.content_bounds()
-                if a <= r[0] < r[2] <= c and b <= r[1] < r[3] <= d:
+                if rectangle_inside([r[0],r[1],r[2],r[3]+extra_below],(a,b,c,d)):
                     return r
                 if r[1] < b:
                     direction=480
@@ -1252,6 +1309,16 @@ class Runner:
             self.api.wheel(self.uia.hwnd, self.content_point(), direction)
             time.sleep(0.12)
         raise RuntimeError(f"Не удалось прокрутить до контрола: {name}")
+
+    def resize_fitted(self, width, height):
+        hwnd=self.uia.hwnd
+        assert self.api.owner(hwnd)==self.process.pid
+        target=fitted_outer(self.api.outer(hwnd),self.api.work_area(hwnd),width,height)
+        if not self.api.user.SetWindowPos(hwnd,None,*target,0x0014):
+            raise ct.WinError(ct.get_last_error())
+        wait_for(lambda:self.api.outer(hwnd)==target,description="own window fits actual work area")
+        self.meta.setdefault("viewport_operations",[]).append(dict(target=target,work_area=self.api.work_area(hwnd)))
+        return target
 
     def history_end(self):
         from PIL import Image
@@ -1472,8 +1539,8 @@ class Runner:
         self.capture("fluent-about-licenses")
         try:
             assert self.api.owner(hwnd)==pid
-            if not self.api.user.SetWindowPos(hwnd,None,0,0,round(1000*scale),original_height,0x16):
-                raise ct.WinError(ct.get_last_error())
+            wide=self.resize_fitted(round(1000*scale),original_height)
+            assert wide[2]/scale>924, "Actual desktop cannot exercise the wide settings rail"
             time.sleep(.5)
             self.page("Параметры")
             for anchor,target in (("Приложение","Язык интерфейса"),("Локация","Размер букв"),("Проверки и трафик","Интервал доступности")):
@@ -1490,8 +1557,8 @@ class Runner:
             self.capture("fluent-settings-wide")
             self.api.wheel(hwnd,self.content_point(),-3840)
             wait_for(lambda:self.uia.call("exists","Приложение, текущий раздел"),5,"anchor follows manual bottom scroll")
-            if not self.api.user.SetWindowPos(hwnd,None,0,0,round(680*scale),original_height,0x16):
-                raise ct.WinError(ct.get_last_error())
+            narrow=self.resize_fitted(round(680*scale),original_height)
+            assert narrow[2]/scale<=924, "Narrow settings fixture did not cross the actual breakpoint"
             time.sleep(.5)
             self.page("Параметры")
             assert not any(r["kind"]=="Button" and ", текущий раздел" in r["name"] for r in self.uia.call("inventory")), "Narrow settings rail should be hidden"
@@ -1503,7 +1570,7 @@ class Runner:
             self.capture("fluent-settings-narrow")
         finally:
             assert self.api.owner(hwnd)==pid
-            if not self.api.user.SetWindowPos(hwnd,None,0,0,original_width,original_height,0x16):
+            if not self.api.user.SetWindowPos(hwnd,None,*original,0x14):
                 raise ct.WinError(ct.get_last_error())
             time.sleep(.5)
             wait_for(lambda:self.api.outer(hwnd)==original,5,"Fluent test restored exact owned window geometry")
@@ -1523,29 +1590,37 @@ class Runner:
         self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,safe)
         self.api.hover(self.uia.hwnd,safe)
         wait_for(lambda:not any(r["kind"]=="Text" and "Провайдер:" in r["name"] and "Мир:" in r["name"] for r in self.uia.call("inventory")),description="подсказка не перекрывает измеряемую полосу")
-        before = self.capture("overview-one-hour")
-        with Image.open(before).convert("RGB") as picture:
-            green = []
-            for y in range(180, picture.height-30):
-                xs = [x for x in range(25, picture.width-25) if picture.getpixel((x,y)) == (42,168,122)]
-                if len(xs) > picture.width*.35:
-                    green.append((y,min(xs),max(xs)))
-            clusters = []
-            for item in green:
-                if not clusters or item[0] > clusters[-1][-1][0]+1:
-                    clusters.append([])
-                clusters[-1].append(item)
-            assert len(clusters) == 2, f"Expected two painted availability lanes: {len(clusters)}"
-            row = clusters[0][len(clusters[0])//2]
-            palette={(42,168,122),(230,80,96),(233,179,60),(152,165,181),(139,123,193)}
-            painted=[x for x in range(25,picture.width-25) if picture.getpixel((x,row[0])) in palette]
-            row=(row[0],min(painted),max(painted)+1)
-            assert row[2]-row[1]>picture.width*.85, "A popup or clipping obscures the measured lane"
-            world_y=clusters[1][len(clusters[1])//2][0]
-            red = [x for x in range(row[1],row[2]) if picture.getpixel((x,row[0])) == (230,80,96)
-                   and picture.getpixel((x,world_y))==(42,168,122)]
-            assert red, "A recorded provider outage with the world online must be painted in the fixture"
-            point = (red[len(red)//2],row[0])
+        def lanes(name):
+            scale=self.api.user.GetDpiForWindow(self.uia.hwnd)/96.
+            self.visible_control("Провайдер",extra_below=round(300*scale))
+            outer=self.api.outer(self.uia.hwnd)
+            clear=(outer[0]+100,outer[1]+100)
+            self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,clear)
+            self.api.hover(self.uia.hwnd,clear)
+            time.sleep(.15)
+            with Image.open(self.capture(name)).convert("RGB") as picture:
+                green = []
+                for y in range(120, picture.height-30):
+                    xs = [x for x in range(25, picture.width-25) if picture.getpixel((x,y)) == (42,168,122)]
+                    if len(xs) > picture.width*.35:
+                        green.append((y,min(xs),max(xs)))
+                clusters = []
+                for item in green:
+                    if not clusters or item[0] > clusters[-1][-1][0]+1:
+                        clusters.append([])
+                    clusters[-1].append(item)
+                assert len(clusters) == 2, f"Expected two painted availability lanes: {len(clusters)}"
+                row = clusters[0][len(clusters[0])//2]
+                palette={(42,168,122),(230,80,96),(233,179,60),(152,165,181),(139,123,193)}
+                painted=[x for x in range(25,picture.width-25) if picture.getpixel((x,row[0])) in palette]
+                row=(row[0],min(painted),max(painted)+1)
+                assert row[2]-row[1]>picture.width*.85, "A popup or clipping obscures the measured lane"
+                world_y=clusters[1][len(clusters[1])//2][0]
+                red = [x for x in range(row[1],row[2]) if picture.getpixel((x,row[0])) == (230,80,96)
+                       and picture.getpixel((x,world_y))==(42,168,122)]
+                assert red, "A recorded provider outage with the world online must be painted in the fixture"
+                return row,(red[len(red)//2],row[0])
+        row,point=lanes("overview-one-hour")
         outer = self.api.outer(self.uia.hwnd)
         target = (outer[0]+point[0],outer[1]+point[1])
         assert self.input_policy, "Overview interaction requires the isolated real-input policy"
@@ -1556,21 +1631,24 @@ class Runner:
         tooltip = wait_for(readout, description="общая подсказка различает два направления в один момент")
         self.capture("overview-linked-tooltip")
         self.api.click(self.uia.hwnd,target)
-        wait_for(lambda:self.uia.call("exists","Выбранное событие"), description="выбран реальный участок сбоя")
+        self.visible_control("Выбранное событие")
         self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,(target[0],outer[1]+100))
         history = json.loads((self.profile/"availability-history.json").read_text(encoding="utf-8"))
         local = lambda value: dt.datetime.fromisoformat(value.replace("Z","+00:00")).astimezone().strftime("%d.%m %H:%M:%S")
         expected = next(local(s["startedUtc"])+" – "+local(s["endedUtc"]) for s in history["spans"]
                         if s["group"]=="Ru" and s["state"]=="Offline" and s["endedUtc"]
                         and local(s["startedUtc"])+" – "+local(s["endedUtc"]) in tooltip)
-        wait_for(lambda:self.uia.call("exists",expected), description="карточка содержит точный сохранённый интервал")
+        self.visible_control(expected)
+        assert self.uia.call("exists",expected), "Selected event lost its exact saved interval"
+        self.visible_control("Диагностика сейчас")
         self.uia.call("invoke","Диагностика сейчас")
-        wait_for(lambda:self.uia.call("exists","Текущая диагностика"),description="ручная проверка явно отделена от истории")
+        self.visible_control("Текущая диагностика")
+        self.capture("overview-current-diagnostics")
+        self.visible_control(expected)
         assert self.uia.call("exists",expected), "Current diagnostics changed the historical interval"
         self.capture("overview-selected-outage")
+        self.visible_control("Закрыть")
         self.uia.call("invoke","Закрыть")
-        left,right = outer[0]+row[1],outer[0]+row[2]
-        y = target[1]
         zoom_ranges=[]
         now=dt.datetime.now().astimezone()
         def parse_bound(value):
@@ -1584,6 +1662,10 @@ class Runner:
             return min(options,key=lambda v:abs((v-now).total_seconds()))
         for a,b in ((.28,.67),(.82,.44)):
             wait_for(lambda:int(time.time())%10<=3,8,"выделение не пересекает обновление живой оси")
+            row,point=lanes("overview-drag-forward-ready" if a<b else "overview-drag-reverse-ready")
+            outer=self.api.outer(self.uia.hwnd)
+            left,right=outer[0]+row[1],outer[0]+row[2]
+            y=outer[1]+point[1]
             self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,(outer[0]+100,outer[1]+100))
             self.api.hover(self.uia.hwnd,(outer[0]+100,outer[1]+100))
             axis_names=[r["name"] for r in self.uia.call("inventory") if r["kind"]=="Text" and r["visible"] and re.fullmatch(r"\d{2}\.\d{2} \d{2}:\d{2}:\d{2}",r["name"])]
@@ -1613,20 +1695,37 @@ class Runner:
             assert abs((last-expected_last).total_seconds())<5, f"Wrong zoom end: {names[0]}"
             zoom_ranges.append(names[0])
             self.capture("overview-zoom-forward" if a<b else "overview-zoom-reverse")
+            self.visible_control("Весь период")
             self.uia.call("invoke","Весь период")
             wait_for(lambda:not self.uia.call("exists","Весь период"), description="вернулась общая временная область")
+        self.visible_control("Провайдер")
         controls = self.uia.call("inventory")
+        bounds=self.content_bounds()
+        toolbar=next(r for r in controls if r["kind"]=="Button" and r["name"]=="Проверить сейчас" and r["visible"] and r["rect"][3]<bounds[1])
+        toolbar_id=tuple(toolbar["runtime_id"] or ())
+        assert toolbar_id, "Toolbar button has no stable UIA identity"
         expander = next(r for r in controls if r["kind"]=="Button" and r["visible"] and r["name"].endswith("Адреса"))
         self.uia.call("invoke",expander["name"])
-        wait_for(lambda:sum(r["kind"]=="Button" and r["visible"] and r["name"]=="Проверить сейчас" for r in self.uia.call("inventory"))>=8,
-                 description="раскрыты семь текущих проверок без отдельного окна")
+        expected_ids=wait_for(lambda:stable_endpoint_inventory(self.uia.call("inventory"),toolbar_id),description="expanded provider exposes exactly seven fixed endpoint identities")
+        seen=set()
+        for _ in range(35):
+            bounds=self.content_bounds()
+            controls=self.uia.call("inventory")
+            stable_endpoint_inventory(controls,toolbar_id,expected_ids)
+            seen.update(visible_endpoint_ids(controls,bounds))
+            assert seen<=expected_ids, "An unrelated control was counted as a provider endpoint"
+            if seen==expected_ids:
+                break
+            self.api.wheel(self.uia.hwnd,self.content_point(),-240)
+            time.sleep(.15)
+        assert seen==expected_ids, f"Not all seven actual endpoint controls were visible: {len(seen)}"
         self.capture("overview-expanded-addresses")
+        self.visible_control("Провайдер")
         closer=next(r for r in self.uia.call("inventory") if r["kind"]=="Button" and r["visible"] and "Скрыть адреса" in r["name"])
         self.uia.call("invoke",closer["name"])
         initial=self.api.outer(self.uia.hwnd)
         try:
-            assert self.api.user.SetWindowPos(self.uia.hwnd,None,initial[0],initial[1],1000,1100,0x0014)
-            wait_for(lambda:self.api.outer(self.uia.hwnd)[2:]==[1000,1100],description="узкое собственное окно")
+            narrow=self.resize_fitted(1000,1100)
             self.page("Состояние")
             self.state_heading_counts()
             a,b,c,d=self.api.client_rect(self.uia.hwnd)
@@ -1639,7 +1738,7 @@ class Runner:
             wait_for(lambda:self.api.outer(self.uia.hwnd)==initial,description="восстановлен размер своего окна")
         self.period(original,next(label for h,label in PERIODS if h==original))
         return dict(common_readout=tooltip, exact_selected_interval=expected, drag_both_directions=True,
-                    zoom_preserves_period=True, exact_zoom_ranges=zoom_ranges,current_addresses=7, narrow_outer=[1000,1100])
+                    zoom_preserves_period=True, exact_zoom_ranges=zoom_ranges,current_addresses=7, endpoint_runtime_ids=sorted(seen), narrow_outer=narrow)
 
     def state_heading_counts(self, english=False):
         names = ("Provider", "World") if english else ("Провайдер", "Мир")
@@ -1653,7 +1752,8 @@ class Runner:
         return counts
 
     def select_index(self, label, index, key, expected):
-        self.visible_control(label)
+        scale=self.api.user.GetDpiForWindow(self.uia.hwnd)/96.
+        self.visible_control(label,extra_below=round((index+2)*32*scale))
         self.uia.call("invoke", label)
         def options():
             rows = [row for row in self.uia.call("inventory") if row["kind"] == "ListItem" and row["visible"]]
@@ -1676,7 +1776,7 @@ class Runner:
             raise RuntimeError("Isolated tooltip capture lost its actual pointer position or window; no cursor retry performed")
         return shot
 
-    def capture_chart_tooltip(self, name, color, minimum_y=150):
+    def capture_chart_tooltip(self, name, color, minimum_y=150, section=None, section_height=110):
         from PIL import Image
         def cursor():
             position = wt.POINT()
@@ -1686,7 +1786,8 @@ class Runner:
 
         def bar_point(path):
             with Image.open(path).convert("RGB") as picture:
-                for y in range(minimum_y, picture.height-30):
+                lower,upper=(max(0,region[0]),min(picture.height-30,region[1])) if region else (minimum_y,picture.height-30)
+                for y in range(lower,upper):
                     xs = [x for x in range(300, picture.width-30) if picture.getpixel((x, y)) == color]
                     if xs:
                         a, b = xs[0], xs[0]+1
@@ -1725,6 +1826,20 @@ class Runner:
         evidence = dict(name=name, pid=self.process.pid, physical_input=self.input_policy is not None,
                         own_window_placement=False)
         self.meta.setdefault("tooltip_probes", []).append(evidence)
+        region=None
+        if section:
+            scale=self.api.user.GetDpiForWindow(self.uia.hwnd)/96.
+            heading=self.visible_control(section,extra_below=round(section_height*scale))
+            outer=self.api.outer(self.uia.hwnd)
+            region=(heading[3]-outer[1],heading[3]-outer[1]+round(section_height*scale))
+            evidence["section"]=section
+            evidence["visible_plot_region"]=list(region)
+        if self.input_policy:
+            a,b,c,d=self.api.client_rect(self.uia.hwnd)
+            clear=(a+min(100,(c-a)//2),b+min(60,(d-b)//2))
+            self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,clear)
+            move(clear)
+            time.sleep(.15)
         point = bar_point(self.capture(name+"-before", evidence=False))
         outer = self.api.outer(self.uia.hwnd)
         target = outer[0]+point[0], outer[1]+point[1]
@@ -1772,10 +1887,12 @@ class Runner:
                     self.period(hours, label)
                     self.capture(f"en-{page.lower()}-{hours:03d}h")
                     if hours == 1:
-                        point = self.capture_chart_tooltip("en-availability-tooltip" if page == "Status" else "en-country-tooltip",
-                                                          (42,168,122) if page == "Status" else (220,0,0))
+                        self.capture_chart_tooltip("en-availability-tooltip" if page == "Status" else "en-country-tooltip",
+                                                  (42,168,122) if page == "Status" else (220,0,0),
+                                                  section="Provider" if page=="Status" else "Country history",
+                                                  section_height=90 if page=="Status" else 110)
                         if page == "Locations":
-                            self.capture_chart_tooltip("en-frequency-tooltip", (76,194,255), point[1]+80)
+                            self.capture_chart_tooltip("en-frequency-tooltip", (76,194,255),section="Country change frequency",section_height=210)
                 if page == "Locations":
                     self.period(1, "1 h")
                     self.visible_control("Debug: detection sources")
@@ -1783,7 +1900,7 @@ class Runner:
                     wait_for(lambda:self.setting("showLocationDebugSources") is True)
                     for attempt in range(15):
                         try:
-                            self.capture_chart_tooltip("en-source-tooltip", (200,120,36))
+                            self.capture_chart_tooltip("en-source-tooltip", (200,120,36),section="Debug: V2Fly")
                             break
                         except RuntimeError as error:
                             if "не найдена" not in str(error):
@@ -1952,7 +2069,8 @@ class Runner:
         work = self.api.work_area(self.uia.hwnd)
         expected = [min(1450, work[2]), min(1300, work[3])]
         assert initial[2:] == expected, f"Неверный стартовый физический размер: {initial[2:]} вместо {expected}"
-        custom = [min(1380, work[2]), min(1150, work[3])]
+        scale=self.api.user.GetDpiForWindow(self.uia.hwnd)/96.
+        custom=distinct_custom_size(expected,work,scale)
         if not self.api.user.SetWindowPos(self.uia.hwnd, None, initial[0], initial[1], *custom, 0x0014):
             raise ct.WinError(ct.get_last_error())
         wait_for(lambda: self.api.outer(self.uia.hwnd)[2:] == custom,
@@ -2177,6 +2295,7 @@ def uia_retry_selftest():
     run("inventory", [RuntimeError("unrelated failure")], RuntimeError, 1)
     run("inventory", [removed], TimeoutError, 1, timeout=1, clock=[10, 10, 11.01])
     pointer_capture_selftest()
+    adaptive_viewport_selftest()
     policy=IsolatedInput.__new__(IsolatedInput)
     policy.ci=False
     with patch.object(policy,"assert_identity"):
@@ -2198,6 +2317,70 @@ def uia_retry_selftest():
         else:
             raise AssertionError("CI pointer policy skipped actual identity verification")
     print("RUN - PASS: bounded read-only UIA retry and four failure controls; no COM or input")
+
+
+def adaptive_viewport_selftest():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    bounds=(0,100,1000,900)
+    assert rectangle_inside([10,110,100,140],bounds)
+    for rect in ([-1,110,100,140],[10,99,100,140],[10,110,1001,140],[10,110,100,901]):
+        assert not rectangle_inside(rect,bounds)
+    assert fitted_outer([-1500,200,1450,1300],[-1600,0,1600,1160],1000,1100)==[-1500,60,1000,1100]
+    assert fitted_outer([100,100,1450,1300],[0,0,1600,1160],1450,1300)==[100,0,1450,1160]
+    assert distinct_custom_size([1024,728],[0,0,1024,728],1.)==[954,658]
+    try:
+        distinct_custom_size([640,480],[0,0,640,480],1.)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Saved-size test silently reused the reset size")
+    owner=Runner.__new__(Runner)
+    position=[1100]
+    owner.uia=SimpleNamespace(hwnd=1,call=lambda *_:[10,position[0],100,position[0]+32])
+    def wheel(*args):
+        position[0]+=120 if args[-1]>0 else -120
+    owner.api=SimpleNamespace(wheel=wheel)
+    owner.content_bounds=lambda:bounds
+    owner.content_point=lambda:(500,500)
+    with patch.object(time,"sleep"):
+        result=owner.visible_control("owned",extra_below=210)
+    assert rectangle_inside([*result[:3],result[3]+210],bounds)
+    owner.uia.call=lambda *_:[10,110,1001,140]
+    with patch.object(time,"sleep"):
+        try:
+            owner.visible_control("too-wide")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Horizontal clipping was accepted after scrolling")
+    def button(identity,rect=(10,110,100,140)):
+        return dict(kind="Button",name="Проверить сейчас",visible=True,rect=rect,runtime_id=identity)
+    visited=set()
+    complete=[button([identity]) for identity in range(1,8)]+[button([99],(10,10,100,40))]
+    expected=stable_endpoint_inventory(complete,(99,))
+    for identities in ((1,2,3),(3,4,5),(5,6,7)):
+        visited.update(visible_endpoint_ids([button([identity]) for identity in identities]+[button([99],(10,10,100,40))],bounds))
+    assert visited==expected
+    toolbar=button([99],(10,10,100,40))
+    for churn in ([button([41]),button([42]),button([43]),toolbar],
+                  [button([identity+10]) for identity in range(1,8)]+[toolbar],
+                  complete+[button([1])],
+                  [button([1]),button([1])]+[button([identity]) for identity in range(2,7)]+[toolbar]):
+        try:
+            stable_endpoint_inventory(churn,(99,),expected)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Recreated controls were counted as previously unvisited endpoints")
+    assert not visible_endpoint_ids([button([8],(10,890,100,920))],bounds)
+    try:
+        visible_endpoint_ids([button([])],bounds)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("Endpoint identity was replaced by its duplicated label")
+    print("RUN - PASS: adaptive rectangles, distinct geometry, bounded scrolling and seven independent endpoint identities; no OS calls")
 
 
 def pointer_capture_selftest():
@@ -2308,7 +2491,8 @@ def main():
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
-    set_dpi_awareness()
+    if sys.argv[1:] not in (["--self-test-uia"], ["--runtime-info"]):
+        set_dpi_awareness()
     if len(sys.argv) == 5 and sys.argv[1] == "--capture-hwnd":
         capture_native(int(sys.argv[2]), int(sys.argv[3]), pathlib.Path(sys.argv[4]))
     elif len(sys.argv) == 6 and sys.argv[1] == "--capture-sandbox-desktop":

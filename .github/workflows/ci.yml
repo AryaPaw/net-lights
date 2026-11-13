@@ -30,7 +30,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Python bootstrap failed.' }
       - name: Verify disposable desktop identity
         shell: pwsh
-        run: scripts/prepare-ci-desktop.ps1 -ResultsDirectory TestResults/desktop
+        run: scripts/prepare-ci-desktop.ps1 -FunctionalUI -ResultsDirectory TestResults/desktop
       - name: Rust toolchain
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -39,6 +39,20 @@ jobs:
           if (-not $channel) { throw 'Rust toolchain must be pinned in rust-toolchain.toml.' }
           rustup toolchain install $channel --profile minimal --component rustfmt --component clippy --no-self-update
           if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain setup failed.' }
+      - name: Restore build cache
+        id: cache
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: native-win22-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'scripts/verify.ps1') }}-${{ github.sha }}
+          restore-keys: native-win22-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'scripts/verify.ps1') }}-
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            artifacts/tools
+            artifacts/rust-target
+            artifacts/rust-coverage-target
       - name: Verify build, tests and mandatory offline coverage
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -74,6 +88,18 @@ jobs:
         with:
           name: test-results
           path: TestResults
+      - name: Save build cache
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: native-win22-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'scripts/verify.ps1') }}-${{ github.sha }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            artifacts/tools
+            artifacts/rust-target
+            artifacts/rust-coverage-target
   bridge:
     runs-on: windows-2022
     timeout-minutes: 45

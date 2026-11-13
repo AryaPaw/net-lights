@@ -1,6 +1,7 @@
 #requires -Version 7.5
 param(
     [string]$ResultsDirectory = 'TestResults/hosted-desktop',
+    [switch]$FunctionalUI,
     [switch]$SelfTest
 )
 
@@ -9,18 +10,21 @@ Set-StrictMode -Version Latest
 $repository = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'ci-environment.ps1')
 
-function Select-CiDesktopMode($Modes, [int]$ReservedWidth, [int]$ReservedHeight) {
+function Select-CiDesktopMode($Modes, [int]$ReservedWidth, [int]$ReservedHeight, [int]$WorkHeight = 1300, [switch]$PreferHeight) {
     # Mode dimensions are physical pixels. Preserve space currently reserved by
     # the shell; the actual resulting work area is checked again after applying.
     $minimumWidth = 1450 + [Math]::Max(0, $ReservedWidth)
-    $minimumHeight = 1300 + [Math]::Max(0, $ReservedHeight)
-    return @($Modes | Where-Object {
+    $minimumHeight = $WorkHeight + [Math]::Max(0, $ReservedHeight)
+    $fitting = @($Modes | Where-Object {
         $_.Width -ge $minimumWidth -and $_.Height -ge $minimumHeight -and
         $_.Width -le 8192 -and $_.Height -le 8192 -and
         ([long]$_.Width * $_.Height) -le 32000000 -and
         $_.BitsPerPixel -eq 32 -and ($_.Flags -band 2) -eq 0
-    } | Sort-Object @{Expression = {[long]$_.Width * $_.Height}}, Width, Height |
-        Select-Object -First 1)
+    })
+    if ($PreferHeight) {
+        return @($fitting | Sort-Object @{Expression='Height';Descending=$true}, @{Expression = {[long]$_.Width * $_.Height}}, Width | Select-Object -First 1)
+    }
+    return @($fitting | Sort-Object @{Expression = {[long]$_.Width * $_.Height}}, Width, Height | Select-Object -First 1)
 }
 
 if ($SelfTest) {
@@ -36,6 +40,10 @@ if ($SelfTest) {
     if (@(Select-CiDesktopMode @() 0 0).Count) { throw 'An absent display mode was invented.' }
     $selected = @(Select-CiDesktopMode @((Mode 1450 1300)) 0 0)
     if ($selected.Count -ne 1) { throw 'The exact physical minimum was rejected without a shell reservation.' }
+    $selected = @(Select-CiDesktopMode @((Mode 1920 1080),(Mode 1600 1200)) 0 40 1000 -PreferHeight)
+    if ($selected.Count -ne 1 -or $selected[0].Width -ne 1600 -or $selected[0].Height -ne 1200) { throw 'Compact functional selection did not preserve the tallest supported viewport.' }
+    if (@(Select-CiDesktopMode @((Mode 1920 1080),(Mode 1600 1200)) 0 40).Count) { throw 'Compact functional modes weakened the default visual requirement.' }
+    if (@(Select-CiDesktopMode @((Mode 1920 1000)) 0 40 1000 -PreferHeight).Count) { throw 'Compact functional selection ignored the shell reservation.' }
     Write-Output 'RUN - PASS: supported-mode selection and five negative/boundary controls. No display or input API was called.'
     return
 }
@@ -117,8 +125,18 @@ public static class NetLightsCiDisplay {
     $modes = @([NetLightsCiDisplay]::Supported($before.Device))
     $receipt.before = $before
     $receipt.supportedModes = $modes
-    if ($before.WorkArea.Width -lt 1450 -or $before.WorkArea.Height -lt 1300) {
-        $selected = @(Select-CiDesktopMode $modes ($before.Bounds.Width-$before.WorkArea.Width) ($before.Bounds.Height-$before.WorkArea.Height))
+    $requiredHeight=1300
+    $selected = @(Select-CiDesktopMode $modes ($before.Bounds.Width-$before.WorkArea.Width) ($before.Bounds.Height-$before.WorkArea.Height))
+    if ($FunctionalUI -and -not $selected.Count -and ($before.WorkArea.Width -lt 1450 -or $before.WorkArea.Height -lt 1300)) {
+        $requiredHeight=1000
+        $selected = @(Select-CiDesktopMode $modes ($before.Bounds.Width-$before.WorkArea.Width) ($before.Bounds.Height-$before.WorkArea.Height) 1000 -PreferHeight)
+    }
+    $receipt.evidenceLevel=$(if($FunctionalUI){'functional'}else{'visual-desktop-prerequisite'})
+    $receipt.compactFunctional=$FunctionalUI -and $requiredHeight -eq 1000
+    $receipt.minimumWorkArea.height=$requiredHeight
+    $alreadyFits=$before.WorkArea.Width -ge 1450 -and $before.WorkArea.Height -ge $requiredHeight
+    $preferSelected=$receipt.compactFunctional -and $selected.Count -eq 1 -and $selected[0].Height -gt $before.Bounds.Height
+    if (-not $alreadyFits -or $preferSelected) {
         if ($selected.Count -ne 1) { throw 'The primary virtual display has no supported mode that fits the required UI matrix.' }
         $receipt.selected = $selected[0]
         $receipt.displayChangeAttempted=$true
@@ -143,11 +161,11 @@ public static class NetLightsCiDisplay {
     $deadline=[DateTimeOffset]::UtcNow.AddSeconds(10)
     do {
         $after=[NetLightsCiDisplay]::Read()
-        if ($after.Device -ceq $before.Device -and $after.WorkArea.Width -ge 1450 -and $after.WorkArea.Height -ge 1300) { break }
+        if ($after.Device -ceq $before.Device -and $after.WorkArea.Width -ge 1450 -and $after.WorkArea.Height -ge $requiredHeight) { break }
         Start-Sleep -Milliseconds 200
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
     $receipt.after=$after
-    if ($after.Device -cne $before.Device -or $after.WorkArea.Width -lt 1450 -or $after.WorkArea.Height -lt 1300) { throw 'The actual primary work area still cannot fit the required UI matrix.' }
+    if ($after.Device -cne $before.Device -or $after.WorkArea.Width -lt 1450 -or $after.WorkArea.Height -lt $requiredHeight) { throw 'The actual primary work area still cannot fit the required UI matrix.' }
     $receipt.status='PASS'
     Write-Output "RUN - PASS: hosted primary work area $($after.WorkArea.Width)x$($after.WorkArea.Height); no pointer input."
 } catch {
