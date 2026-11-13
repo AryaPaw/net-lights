@@ -213,6 +213,18 @@ function Assert-UiEvidence($Evidence,[string]$Scope,[string]$Nonce,[string]$AppH
     $navigation=@($Evidence.checks|Where-Object check -CEQ 'fluent-tabs-about-and-settings-navigation')
     if($navigation[0].detail.navigation_motion.smoothness -cne $smoothness) {throw 'Navigation detail contradicts the requested smoothness evidence.'}
 }
+function Assert-FrameprobeEvidence($Evidence,[string]$ExpectedHash) {
+    if($ExpectedHash -cnotmatch '^[A-Fa-f0-9]{64}$' -or $Evidence.metadata.navigation_frameprobe_sha256 -ine $ExpectedHash) {throw 'Native frame producer identity differs.'}
+    $workers=@($Evidence.metadata.navigation_capture_workers)
+    if($workers.Count -ne 3 -or @($workers.pid|Sort-Object -Unique).Count -ne 3) {throw 'Three owned native frame producers are required.'}
+    foreach($worker in $workers) {
+        foreach($field in @('pid','exit_code','frames','frequency','end_qpc')) {
+            if($worker.$field -isnot [long] -and $worker.$field -isnot [int]) {throw 'Native frame producer numeric evidence is invalid.'}
+        }
+        if($worker.pid -lt 1 -or $worker.sha256 -ine $ExpectedHash -or $worker.mode -cne 'Windows.Graphics.Capture' -or
+           $worker.cleanup -cne 'PASS' -or $worker.exit_code -ne 0 -or $worker.frames -lt 1 -or $worker.frames -gt 512 -or $worker.frequency -le 0 -or $worker.frequency -gt 10000000000 -or $worker.end_qpc -lt 1) {throw 'Native frame producer cleanup or clock evidence is incomplete.'}
+    }
+}
 
 if($SelfTest) {
     if($Executable -or $ExpectedSha256 -or $RawProfileDirectory -or $FunctionalUI -or $CoverageInstrumented -or $MeasureSeconds -or $EnableCountryForMeasurement -or $MaximumHistory) {throw 'SelfTest cannot be combined with a UI run.'}
@@ -273,6 +285,21 @@ if($SelfTest) {
         }
         $rejected=$false;try{Assert-UiEvidence $bad 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64) $true}catch{$rejected=$true}
         if(-not $rejected){throw "Invalid instrumented $kind evidence was accepted."}
+    }
+    $capture=@{metadata=@{navigation_frameprobe_sha256=('d'*64);navigation_capture_workers=@(1..3|ForEach-Object {@{pid=$_;sha256=('d'*64);mode='Windows.Graphics.Capture';cleanup='PASS';exit_code=0;frames=3;frequency=1000;end_qpc=10000}})}}
+    Assert-FrameprobeEvidence $capture ('d'*64)
+    foreach($kind in @('hash','missing','duplicate','cleanup','exit','clock')) {
+        $bad=ConvertFrom-Json (ConvertTo-Json $capture -Depth 12)
+        switch($kind) {
+            'hash'{$bad.metadata.navigation_frameprobe_sha256=('e'*64)}
+            'missing'{$bad.metadata.navigation_capture_workers=$bad.metadata.navigation_capture_workers[0..1]}
+            'duplicate'{$bad.metadata.navigation_capture_workers[1].pid=1}
+            'cleanup'{$bad.metadata.navigation_capture_workers[0].cleanup='PENDING'}
+            'exit'{$bad.metadata.navigation_capture_workers[0].exit_code=7}
+            'clock'{$bad.metadata.navigation_capture_workers[0].frequency=0}
+        }
+        $rejected=$false;try{Assert-FrameprobeEvidence $bad ('d'*64)}catch{$rejected=$true}
+        if(-not $rejected){throw "Invalid native capture $kind evidence was accepted."}
     }
     $fixture=Join-Path $repository ('artifacts/ui-runtime-controls-'+[Guid]::NewGuid().ToString('N'))
     $alias=Join-Path $fixture 'cpython-3.11-windows-x86_64-none'
@@ -555,6 +582,21 @@ try {
 '@
 
 try {
+    # The observer mustn't inherit the application's coverage instrumentation.
+    # These pure helper tests don't create a window or invoke capture APIs.
+    Assert-HostedRunner
+    $frameManifest=Join-Path $repository 'scripts/fixtures/native-frameprobe/Cargo.toml'
+    Assert-Unlinked $frameManifest
+    $frameTarget=Assert-ArtifactPath (Join-Path $repository 'artifacts/frameprobe-target')
+    $frameBuildEnvironment=@{RUSTFLAGS=$null;CARGO_ENCODED_RUSTFLAGS=$null;LLVM_PROFILE_FILE=$null;LLVM_PROFILE_FILE_NAME=$null}
+    $cargo=(Get-Command cargo -CommandType Application -ErrorAction Stop).Source
+    Invoke-CommandBounded 'frameprobe-guard-tests' $cargo @('test','--manifest-path',$frameManifest,'--locked','--release','--target-dir',$frameTarget,'--','--test-threads=1') 240 -Environment $frameBuildEnvironment|Out-Null
+    Invoke-CommandBounded 'frameprobe-build' $cargo @('build','--manifest-path',$frameManifest,'--locked','--release','--target-dir',$frameTarget) 240 -Environment $frameBuildEnvironment|Out-Null
+    $frameprobe=Join-Path $frameTarget 'x86_64-pc-windows-msvc/release/netlights-native-frameprobe.exe'
+    Assert-Unlinked $frameprobe
+    Assert-Amd64Pe $frameprobe
+    $frameprobeHash=(Get-FileHash -LiteralPath $frameprobe -Algorithm SHA256).Hash
+    $receipt.frameprobeSha256=$frameprobeHash
     $uv=(Get-Command uv.exe -CommandType Application -ErrorAction Stop).Source
     # A clean CI image may bootstrap the pinned PEP dependencies into this
     # task cache. The guest receives the finished runtime and stays offline.
@@ -571,7 +613,7 @@ try {
         $environment.LLVM_PROFILE_FILE=Join-Path $rawTarget ('netlights-%p-%m-'+$nonce+'.profraw')
         $environment.LLVM_PROFILE_FILE_NAME='netlights-%p-%m-'+$nonce+'.profraw'
         $ui=Join-Path $results 'ui'
-        $arguments=$uvPrefix+@('--exe',$app,'--output',$ui,'--expected-sha256',$ExpectedSha256,'--isolated-ci-input','--measure-seconds',[string]$MeasureSeconds)
+        $arguments=$uvPrefix+@('--exe',$app,'--output',$ui,'--expected-sha256',$ExpectedSha256,'--isolated-ci-input','--measure-seconds',[string]$MeasureSeconds,'--frameprobe',$frameprobe,'--frameprobe-sha256',$frameprobeHash)
         if($FunctionalUI){$arguments+='--functional-evidence'}
         if($CoverageInstrumented){$arguments+='--coverage-instrumented'}
         if($MaximumHistory){$arguments+='--maximum-history'}
@@ -579,6 +621,7 @@ try {
         Invoke-CommandBounded 'isolated-ci-ui' $uv $arguments $timeout -Environment $environment|Out-Null
         $evidence=Get-Content -LiteralPath (Join-Path $ui 'results.json') -Raw|ConvertFrom-Json
         Assert-UiEvidence $evidence 'GitHub-hosted Windows VM' $nonce $ExpectedSha256 $runnerHash ([bool]$CoverageInstrumented)
+        Assert-FrameprobeEvidence $evidence $frameprobeHash
         $receipt.uiResults=Join-Path $ui 'results.json'
     }else {
         if(@(Sandbox-Ids).Count){throw 'Another Sandbox exists; no environment will be reused, reconnected or stopped.'}

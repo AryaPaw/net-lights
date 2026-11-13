@@ -71,17 +71,15 @@ def navigation_frame_evidence(initial, finish, frames, scale, coverage_instrumen
                 smoothness="NOT RUN" if coverage_instrumented else "PASS")
 
 
-def sample_navigation_frames(sample, started):
-    frames=[]
-    while time.monotonic()-started<.8:
-        position,image=sample()
-        frames.append((time.monotonic()-started,position,image))
-        time.sleep(.012)
-    # Scheduling can leave the last loop frame before the observation boundary.
-    # Read that boundary once; don't retry or wait for the desired position.
-    position,image=sample()
-    frames.append((time.monotonic()-started,position,image))
-    return frames
+def navigation_observation_frames(frames, epoch, frequency):
+    if type(epoch) is not int or type(frequency) is not int or epoch<0 or frequency<=0:
+        raise ValueError("Invalid navigation QPC epoch")
+    observed=[frame for frame in frames if epoch<=frame["qpc"]<=epoch+frequency*.8]
+    if frames and frames[-1]["qpc"]>epoch+frequency*.8:
+        observed.append(frames[-1])
+    if not observed:
+        raise RuntimeError("No real navigation frames were captured after the click epoch")
+    return [((frame["qpc"]-epoch)/frequency,frame) for frame in observed]
 
 
 def fitted_outer(original, work, width, height):
@@ -605,23 +603,123 @@ class Win32:
         self.post(hwnd, 0x0202, 0, position)
 
 
+class NavigationProtocol:
+    """Bounded native WGC stream; timestamps belong to the captured frames."""
+    MAX_LINE=65536*8+256
+    def __init__(self,width,height):
+        if type(width) is not int or type(height) is not int or not 0<width<=8192 or not 0<height<=256 or width*height>65536:
+            raise ValueError("Invalid navigation ROI")
+        self.width,self.height=width,height
+        self.frequency=None
+        self.last_qpc=-1
+        self.ended=False
+        self.count=self.byte_count=0
+
+    def accept(self,line):
+        if not line or len(line)>self.MAX_LINE or not line.endswith(b"\n"):
+            raise RuntimeError("Invalid native capture record length")
+        def unique(pairs):
+            result={}
+            for key,value in pairs:
+                if key in result:
+                    raise ValueError("Duplicate native capture field")
+                result[key]=value
+            return result
+        try:
+            record=json.loads(line.decode("ascii"),object_pairs_hook=unique)
+        except (UnicodeError,ValueError) as error:
+            raise RuntimeError("Malformed native capture JSON") from error
+        if not isinstance(record,dict) or self.ended:
+            raise RuntimeError("Unexpected native capture record")
+        kind=record.get("kind")
+        if kind=="error":
+            if set(record)!={"kind","code","hresult"} or not isinstance(record["code"],str) or not re.fullmatch(r"[a-z0-9_-]{1,64}",record["code"]) or type(record["hresult"]) is not int or not -(2**31)<=record["hresult"]<2**31:
+                raise RuntimeError("Malformed native capture error")
+            raise RuntimeError(f"Native capture failed: {record['code']} ({record['hresult']})")
+        if kind=="ready":
+            if self.frequency is not None or set(record)!={"kind","frequency"} or type(record["frequency"]) is not int or not 0<record["frequency"]<=10**10:
+                raise RuntimeError("Invalid native capture readiness")
+            self.frequency=record["frequency"]
+        elif kind in ("frame","end"):
+            expected={"kind","qpc","width","height","pixels"} if kind=="frame" else {"kind","qpc"}
+            qpc=record.get("qpc")
+            if self.frequency is None or set(record)!=expected or type(qpc) is not int or not 0<=qpc<2**63 or qpc<self.last_qpc or (kind=="frame" and qpc==self.last_qpc):
+                raise RuntimeError("Invalid native capture clock or fields")
+            if kind=="frame":
+                if type(record["width"]) is not int or type(record["height"]) is not int or (record["width"],record["height"])!=(self.width,self.height):
+                    raise RuntimeError("Native capture ROI changed")
+                pixels=record["pixels"]
+                if not isinstance(pixels,str) or len(pixels)!=self.width*self.height*8 or not re.fullmatch(r"[0-9a-f]+",pixels):
+                    raise RuntimeError("Invalid native capture pixels")
+                record["pixels"]=bytes.fromhex(pixels)
+                self.count+=1
+                self.byte_count+=len(record["pixels"])
+                if self.count>512 or self.byte_count>32*1024*1024:
+                    raise RuntimeError("Native capture stream exceeded its bounds")
+            else:
+                self.ended=True
+            self.last_qpc=qpc
+        else:
+            raise RuntimeError("Unknown native capture record")
+        return record
+
+    def eof(self):
+        if self.frequency is None or not self.ended or not self.count:
+            raise RuntimeError("Native capture ended without a complete frame stream")
+
+
+def navigation_frame_pixels(frame,left,scale):
+    raw,width=frame["pixels"],frame["width"]
+    positions=[index//4%width+left for index in range(0,len(raw),4)
+               if max(abs(raw[index+2]-76),abs(raw[index+1]-194),abs(raw[index]-255))<=10]
+    assert len(positions)>=round(10*scale), "The visible navigation indicator disappeared"
+    return sum(positions)/len(positions)
+
+
+class QpcClock:
+    def __init__(self,kernel):
+        self.counter=kernel.QueryPerformanceCounter
+        self.counter.argtypes,self.counter.restype=[ct.POINTER(ct.c_int64)],wt.BOOL
+        frequency=ct.c_int64()
+        kernel.QueryPerformanceFrequency.argtypes,kernel.QueryPerformanceFrequency.restype=[ct.POINTER(ct.c_int64)],wt.BOOL
+        if not kernel.QueryPerformanceFrequency(ct.byref(frequency)) or not 0<frequency.value<=10**10:
+            raise RuntimeError("Navigation QPC frequency is unavailable")
+        self.frequency=frequency.value
+
+    def now(self):
+        value=ct.c_int64()
+        if not self.counter(ct.byref(value)) or value.value<0:
+            raise RuntimeError("Navigation QPC counter is unavailable")
+        return value.value
+
+
+def checked_frameprobe(path,digest):
+    if not path or not digest or not re.fullmatch(r"[a-fA-F0-9]{64}",digest):
+        raise ValueError("Supply the exact frameprobe executable and SHA-256")
+    path=pathlib.Path(os.path.abspath(path))
+    artifact=pathlib.Path(__file__).resolve().parents[1]/"artifacts"
+    if not path.is_relative_to(artifact) or path.name!="netlights-native-frameprobe.exe":
+        raise ValueError("Native capture helper must be the owned artifact executable")
+    for part in (path,*path.parents):
+        if part.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError("Native capture helper contains a reparse point")
+    if not path.is_file() or path.stat().st_size>32*1024*1024 or hashlib.sha256(path.read_bytes()).hexdigest()!=digest.lower():
+        raise ValueError("Native capture helper identity differs")
+    return path
+
+
 class NavigationFrames:
-    """Fast foreground ROI capture; only the isolated app's visible tab row."""
-    def __init__(self,api,policy,hwnd,pid,band):
+    """One owned native WGC producer per transition, without GDI fallback."""
+    def __init__(self,api,policy,hwnd,pid,band,helper,digest,reports,clock):
         self.api,self.policy,self.hwnd,self.pid,self.band=api,policy,hwnd,pid,band
-        self.screen=self.memory=self.bitmap=self.original=None
-        self.gdi=ct.WinDLL("gdi32",use_last_error=True)
-        for name,args,result in [
-            ("CreateCompatibleDC",[wt.HDC],wt.HDC),
-            ("CreateCompatibleBitmap",[wt.HDC,ct.c_int,ct.c_int],wt.HBITMAP),
-            ("SelectObject",[wt.HDC,wt.HANDLE],wt.HANDLE),
-            ("BitBlt",[wt.HDC,ct.c_int,ct.c_int,ct.c_int,ct.c_int,wt.HDC,ct.c_int,ct.c_int,wt.DWORD],wt.BOOL),
-            ("GetDIBits",[wt.HDC,wt.HBITMAP,wt.UINT,wt.UINT,ct.c_void_p,ct.c_void_p,wt.UINT],ct.c_int),
-            ("DeleteObject",[wt.HANDLE],wt.BOOL),("DeleteDC",[wt.HDC],wt.BOOL)]:
-            function=getattr(self.gdi,name)
-            function.argtypes,function.restype=args,result
-        api.user.GetDC.argtypes,api.user.GetDC.restype=[wt.HWND],wt.HDC
-        api.user.ReleaseDC.argtypes,api.user.ReleaseDC.restype=[wt.HWND,wt.HDC],ct.c_int
+        self.helper,self.digest,self.reports,self.clock=helper,digest,reports,clock
+        self.process=self.reader=None
+        self.protocol=NavigationProtocol(band[2]-band[0],band[3]-band[1])
+        self.events=queue.Queue(maxsize=256)
+        self.reader_error=None
+        self.frames=[]
+        self.report=None
+        self.finished=False
 
     def guard(self):
         self.policy.assert_identity()
@@ -629,64 +727,134 @@ class NavigationFrames:
         x,y,width,height=self.api.outer(self.hwnd)
         left,top,right,bottom=self.band
         assert x<=left<right<=x+width and y<=top<bottom<=y+height
-        assert 0<right-left<=8192 and 0<bottom-top<=256
+        assert 0<right-left<=8192 and 0<bottom-top<=256 and (right-left)*(bottom-top)<=65536
         for point in ((left,top),(right-1,top),(left,bottom-1),(right-1,bottom-1)):
             assert self.api.owner(self.api.user.WindowFromPoint(wt.POINT(*point)))==self.pid
 
+    def _read(self):
+        try:
+            while True:
+                line=self.process.stdout.readline(self.protocol.MAX_LINE+1)
+                if not line:
+                    self.protocol.eof()
+                    self.events.put_nowait({"kind":"eof"})
+                    return
+                self.events.put_nowait(self.protocol.accept(line))
+        except BaseException as error:
+            self.reader_error=error
+
+    def receive(self,timeout):
+        self.guard()
+        if self.reader_error is not None:
+            raise RuntimeError("Native capture reader failed") from self.reader_error
+        try:
+            record=self.events.get(timeout=max(0,timeout))
+        except queue.Empty:
+            if self.reader_error is not None:
+                raise RuntimeError("Native capture reader failed") from self.reader_error
+            return None
+        if record["kind"]=="ready" and record["frequency"]!=self.clock.frequency:
+            raise RuntimeError("Native capture and input QPC clocks differ")
+        if record["kind"]=="frame":
+            if record["qpc"]>self.clock.now():
+                raise RuntimeError("Native capture timestamp is ahead of the common QPC clock")
+            self.frames.append(record)
+        return record
+
     def __enter__(self):
         self.guard()
-        left,top,right,bottom=self.band
-        self.width,self.height=right-left,bottom-top
+        helper=checked_frameprobe(self.helper,self.digest)
+        environment=os.environ.copy()
+        for key in ("LLVM_PROFILE_FILE","LLVM_PROFILE_FILE_NAME","RUSTFLAGS","CARGO_ENCODED_RUSTFLAGS"):
+            environment.pop(key,None)
+        self.process=subprocess.Popen([str(helper),"--capture-roi",str(self.hwnd),str(self.pid),*map(str,self.band)],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env=environment,
+            creationflags=NO_CONSOLE,bufsize=64*1024)
+        self.report=dict(pid=self.process.pid,sha256=self.digest,mode="Windows.Graphics.Capture",cleanup="PENDING")
+        self.reports.append(self.report)
+        self.reader=threading.Thread(target=self._read,name="navigation-wgc-reader",daemon=True)
         try:
-            self.screen=self.api.user.GetDC(None)
-            self.memory=self.gdi.CreateCompatibleDC(self.screen)
-            self.bitmap=self.gdi.CreateCompatibleBitmap(self.screen,self.width,self.height)
-            if not self.screen or not self.memory or not self.bitmap:
-                raise ct.WinError(ct.get_last_error())
-            self.original=self.gdi.SelectObject(self.memory,self.bitmap)
-            self.buffer=ct.create_string_buffer(self.width*self.height*4)
-            class Header(ct.Structure):
-                _fields_=[("size",wt.DWORD),("width",ct.c_int32),("height",ct.c_int32),
-                    ("planes",wt.WORD),("bits",wt.WORD),("compression",wt.DWORD),("image_size",wt.DWORD),
-                    ("x",ct.c_int32),("y",ct.c_int32),("used",wt.DWORD),("important",wt.DWORD)]
-            self.header=Header(ct.sizeof(Header),self.width,-self.height,1,32,0,len(self.buffer),0,0,0,0)
+            self.reader.start()
+            deadline=time.monotonic()+5
+            while not self.frames:
+                remaining=deadline-time.monotonic()
+                if remaining<=0:
+                    raise TimeoutError("Native capture did not provide an initial real frame")
+                record=self.receive(min(.05,remaining))
+                if record and record["kind"] in ("end","eof"):
+                    raise RuntimeError("Native capture stopped before input")
             return self
         except BaseException:
-            self.__exit__(None,None,None)
+            self.abort()
             raise
 
-    def capture(self):
-        from PIL import Image
-        entered=time.perf_counter()
-        self.guard()
-        guarded=time.perf_counter()
-        left,top,_,_=self.band
-        # SRCCOPY is enough for this guarded foreground ROI; layered windows
-        # above the owned navigation mustn't be included in its pixels.
-        if not self.gdi.BitBlt(self.memory,0,0,self.width,self.height,self.screen,left,top,0x00CC0020):
-            raise ct.WinError(ct.get_last_error())
-        copied=time.perf_counter()
-        self.gdi.SelectObject(self.memory,self.original)
-        try:
-            if self.gdi.GetDIBits(self.screen,self.bitmap,0,self.height,self.buffer,ct.byref(self.header),0)!=self.height:
-                raise ct.WinError(ct.get_last_error())
-        finally:
-            self.gdi.SelectObject(self.memory,self.bitmap)
-        read=time.perf_counter()
-        image=Image.frombuffer("RGB",(self.width,self.height),self.buffer,"raw","BGRX",0,1).copy()
-        self.last_capture_timings=dict(guard_ms=(guarded-entered)*1000,bitblt_ms=(copied-guarded)*1000,
-                                      dib_ms=(read-copied)*1000,image_ms=(time.perf_counter()-read)*1000)
-        return image
+    def observe(self,epoch):
+        boundary=epoch+round(self.clock.frequency*.8)
+        while self.clock.now()<boundary:
+            record=self.receive(.02)
+            if record and record["kind"] in ("end","eof"):
+                raise RuntimeError("Native capture stopped during the observation")
+        self.finish()
+        return navigation_observation_frames(self.frames,epoch,self.clock.frequency)
 
-    def __exit__(self,*_):
-        if self.memory and self.original:
-            self.gdi.SelectObject(self.memory,self.original)
-        if self.bitmap:
-            self.gdi.DeleteObject(self.bitmap)
-        if self.memory:
-            self.gdi.DeleteDC(self.memory)
-        if self.screen:
-            self.api.user.ReleaseDC(None,self.screen)
+    def finish(self):
+        if self.finished:
+            return
+        self.guard()
+        self.process.stdin.write(b"stop\n")
+        self.process.stdin.flush()
+        deadline=time.monotonic()+2
+        ended=False
+        while True:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:
+                raise TimeoutError("Native capture did not drain after stop")
+            record=self.receive(min(.05,remaining))
+            if record and record["kind"]=="end":
+                ended=True
+                self.report["end_qpc"]=record["qpc"]
+            elif record and record["kind"]=="eof":
+                if not ended:
+                    raise RuntimeError("Native capture omitted its graceful end")
+                break
+        code=self.process.wait(timeout=max(.001,deadline-time.monotonic()))
+        self.reader.join(timeout=max(.001,deadline-time.monotonic()))
+        if code!=0 or self.reader.is_alive() or self.reader_error is not None:
+            raise RuntimeError("Native capture worker didn't exit cleanly")
+        self.process.stdin.close()
+        self.process.stdout.close()
+        self.finished=True
+        self.report.update(cleanup="PASS",exit_code=code,frames=len(self.frames),frequency=self.clock.frequency)
+
+    def abort(self):
+        if self.process:
+            if self.report is not None:
+                self.report["cleanup"]="FAIL"
+            if self.process.poll() is None:
+                self.process.kill()
+            self.process.wait(timeout=2)
+            if self.reader and self.reader.ident is not None:
+                self.reader.join(timeout=2)
+            if self.reader and self.reader.is_alive():
+                if self.process.stdin:
+                    self.process.stdin.close()
+                raise RuntimeError("Owned native capture reader didn't close")
+            for pipe in (self.process.stdin,self.process.stdout):
+                if pipe:
+                    pipe.close()
+            if self.report is not None:
+                self.report.update(cleanup="FAIL",exit_code=self.process.returncode)
+
+    def __exit__(self,kind,*_):
+        if not self.finished:
+            if kind is None:
+                try:
+                    self.finish()
+                except BaseException:
+                    self.abort()
+                    raise
+            else:
+                self.abort()
 
 
 def set_dpi_awareness():
@@ -1085,7 +1253,7 @@ def normalize_resources(source, destination, pid, started, ended, requested_seco
 
 
 class Runner:
-    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None, coverage_instrumented=False):
+    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None, coverage_instrumented=False, frameprobe=None, frameprobe_sha=None):
         if not __debug__:
             raise RuntimeError("Проверки требуют включённых assert: уберите -O и PYTHONOPTIMIZE")
         if functional_evidence and (measure_seconds or enable_country):
@@ -1095,6 +1263,7 @@ class Runner:
         self.measure_seconds, self.results, self.captures = measure_seconds, [], []
         self.functional_evidence=functional_evidence
         self.coverage_instrumented=coverage_instrumented
+        self.frameprobe,self.frameprobe_sha=frameprobe,frameprobe_sha
         self.enable_country, self.country_enabled, self.measurement_blocked = enable_country, False, False
         self.input_policy = input_policy
         self.private_captures = []
@@ -1110,6 +1279,8 @@ class Runner:
         self.meta["evidenceLevel"] = "functional" if functional_evidence else "Windows 11 native visual"
         self.meta["visualAcceptance"] = "NOT RUN" if functional_evidence else "requires screenshot review"
         self.meta["coverage_instrumented"] = coverage_instrumented
+        self.meta["navigation_capture_workers"] = []
+        self.meta["navigation_frameprobe_sha256"] = frameprobe_sha
         self.meta["navigation_smoothness"] = "NOT RUN" if coverage_instrumented else "PENDING"
         self.meta["country_measurement_requested"] = enable_country
         self.meta["locale_required"] = (pathlib.Path(__file__).resolve().parents[1]/"native/core/src/locale.rs").is_file()
@@ -1511,6 +1682,7 @@ class Runner:
         return bool(result.value)
 
     def navigation_motion(self, tabs):
+        from PIL import Image
         self.input_policy.assert_identity()
         hwnd,pid=self.uia.hwnd,self.process.pid
         scale=self.api.user.GetDpiForWindow(hwnd)/96.
@@ -1522,28 +1694,10 @@ class Runner:
         left=min(r[0] for r in rectangles.values())
         right=max(r[2] for r in rectangles.values())
         band=(left,top,right,bottom)
-        def sample():
-            entered=time.perf_counter()
-            self.input_policy.assert_identity()
-            assert self.api.owner(hwnd)==pid and self.api.user.GetForegroundWindow()==hwnd
-            x,y,width,height=self.api.outer(hwnd)
-            assert x<=left<right<=x+width and y<=top<bottom<=y+height
-            guarded=time.perf_counter()
-            image=frames_source.capture()
-            captured=time.perf_counter()
-            positions=[index%image.width+left for index,pixel in enumerate(image.getdata())
-                       if max(abs(pixel[i]-channel) for i,channel in enumerate((76,194,255)))<=10]
-            assert len(positions)>=round(10*scale), "The visible navigation indicator disappeared"
-            sample.timings.append(dict(guard_ms=(guarded-entered)*1000,capture_ms=(captured-guarded)*1000,
-                                       scan_ms=(time.perf_counter()-captured)*1000,parts=frames_source.last_capture_timings))
-            return sum(positions)/len(positions),image
-        sample.timings=[]
-        with NavigationFrames(self.api,self.input_policy,hwnd,pid,band) as frames_source:
-            return self.navigation_motion_samples(rectangles,sample)
-
-    def navigation_motion_samples(self,rectangles,sample):
-        hwnd,pid=self.uia.hwnd,self.process.pid
-        scale=self.api.user.GetDpiForWindow(hwnd)/96.
+        clock=QpcClock(self.api.kernel)
+        def source():
+            return NavigationFrames(self.api,self.input_policy,hwnd,pid,band,self.frameprobe,self.frameprobe_sha,
+                                    self.meta["navigation_capture_workers"],clock)
         def click(name):
             r=rectangles[name]
             self.api.click(hwnd,((r[0]+r[2])//2,(r[1]+r[3])//2))
@@ -1554,18 +1708,25 @@ class Runner:
         time.sleep(.3)
         results=[]
         for target in ("О программе","Состояние"):
-            initial,_=sample()
-            sample.timings=[]
-            started=time.monotonic()
-            click(target)
-            frames=sample_navigation_frames(sample,started)
+            with source() as capture:
+                # A real initial frame is available before input. Its pixel
+                # analysis and all image work happen after the producer stops.
+                initial_frame=capture.frames[-1]
+                capture.guard()
+                epoch=clock.now()
+                click(target)
+                observed=capture.observe(epoch)
+            initial=navigation_frame_pixels(initial_frame,left,scale)
+            frames=[(elapsed,navigation_frame_pixels(frame,left,scale),
+                     Image.frombytes("RGB",(frame["width"],frame["height"]),frame["pixels"],"raw","BGRX"),frame["qpc"])
+                    for elapsed,frame in observed]
             finish=center(target)
             (self.output/f"navigation-motion-{len(results)}-trace.json").write_text(
-                json.dumps(dict(initial=initial,target=finish,samples=[dict(seconds=t,x=x) for t,x,_ in frames],
-                                capture_timings=sample.timings),indent=2),encoding="utf-8")
-            for index,(_,_,image) in enumerate(frames):
+                json.dumps(dict(initial=initial,initial_qpc=initial_frame["qpc"],target=finish,epoch_qpc=epoch,frequency=clock.frequency,
+                                source="Windows.Graphics.Capture",samples=[dict(seconds=t,x=x,qpc=qpc) for t,x,_,qpc in frames]),indent=2),encoding="utf-8")
+            for index,(_,_,image,_) in enumerate(frames):
                 image.save(self.output/f"navigation-motion-{len(results)}-frame-{index:02}.png")
-            evidence=navigation_frame_evidence(initial,finish,[(t,x) for t,x,_ in frames],scale,self.coverage_instrumented)
+            evidence=navigation_frame_evidence(initial,finish,[(t,x) for t,x,_,_ in frames],scale,self.coverage_instrumented)
             for label,index in (("first",0),("middle",len(frames)//4),("last",len(frames)-1)):
                 destination=self.output/f"navigation-motion-{len(results)}-{label}.png"
                 frames[index][2].save(destination)
@@ -1575,7 +1736,9 @@ class Runner:
             time.sleep(.06)
         time.sleep(.35)
         assert self.uia.call("selected","Параметры"), "Rapid navigation lost the final selection"
-        position,_=sample()
+        with source() as capture:
+            capture.finish()
+        position=navigation_frame_pixels(capture.frames[-1],left,scale)
         assert abs(position-center("Параметры"))<=3*scale, "Interrupted indicator missed the last target"
         self.page("Состояние")
         time.sleep(.3)
@@ -2575,6 +2738,8 @@ def profile_snapshot_selftest():
 
 def navigation_motion_selftest():
     from unittest.mock import patch
+    from types import SimpleNamespace
+    import io
 
     smooth=[(0.,10.),(.05,30.),(.1,60.),(.15,90.),(.25,110.)]
     sparse=[(0.,10.),(.312,37.),(.437,87.),(.531,110.)]
@@ -2597,28 +2762,109 @@ def navigation_motion_selftest():
                 pass
             else:
                 raise AssertionError("Instrumented mode bypassed functional navigation evidence")
-    for final in (110.,104.):
-        now=[0.]
-        readings=iter([(.1,10.),(.2,30.),(.3,60.),(.718,90.),(.9,final)])
-        captures=[]
-        def sample():
-            now[0],position=next(readings)
-            image=object()
-            captures.append(image)
-            return position,image
-        def pause(_):
-            now[0]=.85 if now[0]>=.7 else now[0]+.012
-        with patch.object(time,"monotonic",lambda:now[0]),patch.object(time,"sleep",pause):
-            frames=sample_navigation_frames(sample,0.)
-        assert len(captures)==5 and frames[-2][0]==.718 and frames[-1][0]==.9
-        assert frames[-1][2] is captures[-1], "The boundary capture lost its actual image"
+    selected=navigation_observation_frames([dict(qpc=t) for t in (900,1000,1200,1800,1850,1900)],1000,1000)
+    assert [frame["qpc"] for _,frame in selected]==[1000,1200,1800,1900]
+    assert [elapsed for elapsed,_ in selected]==[0.,.2,.8,.9]
+    def rejected(operation):
         try:
-            evidence=navigation_frame_evidence(10,110,[(t,x) for t,x,_ in frames],1)
-        except AssertionError:
-            assert final==104., "The observer validated a stale pre-boundary frame"
-        else:
-            assert final==110. and evidence["smoothness"]=="PASS", "A wrong final frame was accepted"
-    print("RUN - PASS: ordinary motion thresholds and instrumented functional evidence stay separate; no OS calls")
+            operation()
+        except (RuntimeError,ValueError,TimeoutError,AssertionError):
+            return
+        raise AssertionError("Invalid native capture evidence was accepted")
+    for epoch,frequency in ((True,1000),(1,False),(-1,1000),(1,0)):
+        rejected(lambda:navigation_observation_frames([],epoch,frequency))
+    rejected(lambda:navigation_observation_frames([dict(qpc=900)],1000,1000))
+    ready=dict(kind="ready",frequency=1000)
+    frame=dict(kind="frame",qpc=100,width=16,height=1,pixels="ffc24cff"*16)
+    end=dict(kind="end",qpc=400)
+    encode=lambda value:(json.dumps(value,separators=(",",":"))+"\n").encode("ascii")
+    protocol=NavigationProtocol(16,1)
+    protocol.accept(encode(ready))
+    decoded=protocol.accept(encode(frame))
+    assert decoded["pixels"]==bytes((255,194,76,255))*16
+    assert navigation_frame_pixels(decoded,50,1)==57.5
+    packed=decoded["pixels"]+bytes((3,2,1,255))*16
+    rows=NavigationProtocol(16,2)
+    rows.accept(encode(ready))
+    top_down=rows.accept(encode(dict(frame,height=2,pixels=packed.hex())))["pixels"]
+    assert top_down[:64]==decoded["pixels"] and top_down[64:]==bytes((3,2,1,255))*16
+    protocol.accept(encode(end));protocol.eof()
+    rejected(lambda:protocol.accept(encode(end)))
+    for bad in (dict(frame,qpc=99),dict(frame,qpc=True),dict(frame,width=15),dict(frame,pixels="zz"*64),dict(frame,pixels="ff"),dict(kind="unknown")):
+        p=NavigationProtocol(16,1);p.accept(encode(ready));p.accept(encode(frame))
+        rejected(lambda:p.accept(encode(bad)))
+    for bad in (b"{}",b"x\n",b'{"kind":"ready","frequency":1,"frequency":2}\n',b"x"*(NavigationProtocol.MAX_LINE+1)):
+        rejected(lambda:NavigationProtocol(16,1).accept(bad))
+    rejected(lambda:NavigationProtocol(16,1).accept(encode(dict(ready,frequency=True))))
+    rejected(lambda:NavigationProtocol(16,1).accept(encode(frame)))
+    rejected(lambda:NavigationProtocol(16,1).accept(encode(dict(kind="error",code="queue_overflow",hresult=-1))))
+    p=NavigationProtocol(16,1);p.accept(encode(ready));p.accept(encode(frame))
+    rejected(p.eof)
+    p.count=512
+    rejected(lambda:p.accept(encode(dict(frame,qpc=101))))
+    p=NavigationProtocol(16,1);p.accept(encode(ready));p.byte_count=32*1024*1024
+    rejected(lambda:p.accept(encode(frame)))
+    rejected(lambda:navigation_frame_pixels(dict(decoded,pixels=bytes(64)),50,1))
+    class Function:
+        def __init__(self,value,ok=True):self.value,self.ok=value,ok
+        def __call__(self,pointer):pointer._obj.value=self.value;return self.ok
+    clock=QpcClock(SimpleNamespace(QueryPerformanceCounter=Function(1234),QueryPerformanceFrequency=Function(1000)))
+    assert clock.frequency==1000 and clock.now()==1234
+    rejected(lambda:QpcClock(SimpleNamespace(QueryPerformanceCounter=Function(0),QueryPerformanceFrequency=Function(0))))
+    class Process:
+        def __init__(self,payload,code=0,hang=False):
+            self.pid=77;self.stdin=io.BytesIO();self.stdout=io.BytesIO(payload)
+            self.returncode=None;self.code,self.hang=code,hang;self.killed=False
+        def poll(self):return self.returncode
+        def wait(self,timeout):
+            if self.hang and not self.killed:raise subprocess.TimeoutExpired("owned-helper",timeout)
+            self.returncode=-9 if self.killed else self.code;return self.returncode
+        def kill(self):self.killed=True
+    class FailingThread:
+        ident=None
+        def __init__(self,**_):pass
+        def start(self):raise RuntimeError("Injected reader start failure")
+        def is_alive(self):return False
+    def scenario(records,success,code=0,hang=False,queue_size=256,start_failure=False):
+        process=Process(b"".join(encode(record) for record in records),code,hang)
+        reports=[]
+        capture=NavigationFrames(None,None,23,17,(0,0,16,1),"owned-helper","a"*64,reports,
+                                 SimpleNamespace(frequency=1000,now=lambda:10000))
+        capture.events=queue.Queue(maxsize=queue_size)
+        def launch(arguments,**options):
+            assert arguments[1:]==["--capture-roi","23","17","0","0","16","1"]
+            assert all(key not in options["env"] for key in ("LLVM_PROFILE_FILE","LLVM_PROFILE_FILE_NAME","RUSTFLAGS","CARGO_ENCODED_RUSTFLAGS"))
+            assert options["stderr"]==subprocess.DEVNULL
+            return process
+        with patch.object(capture,"guard"),patch(__name__+".checked_frameprobe",return_value="owned-helper"),patch.object(subprocess,"Popen",launch),patch.object(threading,"Thread",FailingThread if start_failure else threading.Thread),patch.dict(os.environ,{"LLVM_PROFILE_FILE":"secret-profile","LLVM_PROFILE_FILE_NAME":"secret-name","RUSTFLAGS":"coverage","CARGO_ENCODED_RUSTFLAGS":"coverage"}):
+            try:
+                with capture:
+                    observed=capture.observe(200)
+            except (RuntimeError,TimeoutError,subprocess.TimeoutExpired):
+                assert not success
+            else:
+                assert success and observed[0][1]["qpc"]==300
+        assert reports[0]["cleanup"]==("PASS" if success else "FAIL")
+        assert not capture.reader.is_alive() and process.stdin.closed and process.stdout.closed
+        assert process.returncode is not None
+    complete=[ready,frame,dict(frame,qpc=300),end]
+    scenario(complete,True)
+    scenario([ready,frame],False)
+    scenario(complete,False,code=7)
+    scenario(complete,False,hang=True)
+    scenario(complete,False,queue_size=1)
+    scenario(complete,False,start_failure=True)
+    scenario([dict(ready,frequency=999),frame,end],False)
+    scenario([ready,dict(frame,qpc=10001),dict(end,qpc=10002)],False)
+    capture=NavigationFrames.__new__(NavigationFrames)
+    capture.process=Process(b"")
+    capture.reader=SimpleNamespace(ident=1,join=lambda **_:None,is_alive=lambda:True)
+    capture.report={}
+    rejected(capture.abort)
+    assert capture.process.killed and capture.report["cleanup"]=="FAIL" and capture.process.stdin.closed
+    assert not capture.process.stdout.closed, "Don't block closing a pipe that still has an active reader"
+    capture.process.stdout.close()
+    print("RUN - PASS: native QPC frames, strict motion gates, bounded protocol, pixels, clock, queue and owned process cleanup controls; no OS/GPU/input calls")
 
 
 def pointer_capture_selftest():
@@ -2694,6 +2940,8 @@ def main():
     parser.add_argument("--inventory-only", action="store_true")
     parser.add_argument("--measure-seconds", default=0, type=seconds, help="0–3600 с; 0 оставляет длительный прогон NOT RUN")
     parser.add_argument("--expected-sha256")
+    parser.add_argument("--frameprobe",type=pathlib.Path)
+    parser.add_argument("--frameprobe-sha256")
     isolation = parser.add_mutually_exclusive_group()
     isolation.add_argument("--sandbox-input", type=pathlib.Path,
                            help="Реальный ввод только в WDAGUtilityAccount по nonce/SHA marker")
@@ -2718,10 +2966,11 @@ def main():
     try:
         input_policy = IsolatedInput(exe, args.sandbox_input, args.sandbox_nonce, args.isolated_ci_input) if args.sandbox_input or args.isolated_ci_input else None
         output = checked_output(args.output)
+        frameprobe=checked_frameprobe(args.frameprobe,args.frameprobe_sha256)
     except (OSError, ValueError) as error:
         parser.error(str(error))
     output.mkdir(parents=True, exist_ok=False)
-    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy, args.coverage_instrumented)
+    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy, args.coverage_instrumented,frameprobe,args.frameprobe_sha256)
     runner.run(args.inventory_only)
     print(json.dumps(dict(result="NOT RUN" if runner.measurement_blocked else "PASS", output=str(output), screenshots=len(runner.captures), resource_seconds=args.measure_seconds), ensure_ascii=False), flush=True)
     if runner.measurement_blocked:

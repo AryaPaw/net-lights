@@ -1,3 +1,5 @@
+mod capture;
+
 #[derive(Default)]
 struct Report {
     arguments_valid: bool,
@@ -58,7 +60,8 @@ fn run_guarded(
     probe: impl FnOnce(&mut Report),
 ) -> (Report, u8) {
     let mut report = Report {
-        arguments_valid: arguments == ["--capabilities-only"],
+        arguments_valid: arguments == ["--capabilities-only"]
+            || capture::parse(arguments).is_some(),
         ..Report::default()
     };
     if !report.arguments_valid {
@@ -169,6 +172,29 @@ fn main() -> std::process::ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let environment =
         ["GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "CI"].map(|key| std::env::var(key).ok());
+    if arguments
+        .first()
+        .is_some_and(|value| value == "--capture-roi")
+    {
+        let Some(spec) = capture::parse(&arguments) else {
+            capture::error("invalid_arguments", 0);
+            return std::process::ExitCode::from(2);
+        };
+        #[cfg(windows)]
+        let (_, code) = run_guarded(
+            &arguments,
+            environment.each_ref().map(|value| value.as_deref()),
+            platform::username,
+            |_| {},
+        );
+        #[cfg(not(windows))]
+        let code = 3;
+        if code != 0 {
+            capture::error("hosted_guard", 0);
+            return std::process::ExitCode::from(code);
+        }
+        return std::process::ExitCode::from(capture::run(spec));
+    }
     #[cfg(windows)]
     let (report, code) = run_guarded(
         &arguments,
