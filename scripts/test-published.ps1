@@ -43,6 +43,7 @@ $endpoints = foreach ($group in @('Ru','World')) { foreach ($index in 0..6) { @{
 $endpoints | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $testProfileDirectory 'endpoints.json') -Encoding utf8
 $started = [DateTimeOffset]::UtcNow
 $process = $null
+$backgroundResources = @()
 $readyName = 'Local\NetLights.UpdateHealth.' + [Guid]::NewGuid().ToString('N')
 $ready = [Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$readyName)
 try {
@@ -55,6 +56,12 @@ try {
         $process = [Diagnostics.Process]::Start($start)
         if (-not $ready.WaitOne(30000)) { throw "Published app did not confirm a real probe on run $run." }
         if ($process.WaitForExit(3000)) { throw "Published app exited early on run $run." }
+        $process.Refresh()
+        $backgroundResources += @{
+            run=$run; pid=$process.Id; privateBytes=$process.PrivateMemorySize64
+            workingSetBytes=$process.WorkingSet64; handles=$process.HandleCount
+            mainWindowHandle=$process.MainWindowHandle.ToInt64()
+        }
         $exit = [Diagnostics.ProcessStartInfo]::new($exe)
         $exit.UseShellExecute = $false
         $exit.CreateNoWindow = $true
@@ -78,7 +85,9 @@ try {
     }
     if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ne $appHash -or
         (Get-FileHash -LiteralPath $agent -Algorithm SHA256).Hash -ne $agentHash) { throw 'Published candidate changed during verification.' }
-    @{status='PASS'; version=$version; appSha256=$appHash; agentSha256=$agentHash; agentPreflightExit=2; runs=2; utc=[DateTimeOffset]::UtcNow} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $results 'result.json') -Encoding utf8
+    @{status='PASS'; version=$version; appSha256=$appHash; agentSha256=$agentHash; agentPreflightExit=2; runs=2; utc=[DateTimeOffset]::UtcNow;
+        backgroundStartupResources=$backgroundResources; prolongedResourceVerification='NOT RUN'} |
+        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $results 'result.json') -Encoding utf8
     Write-Output "Published process, monitor, history and restart smoke PASS: $results"
 }
 finally {
