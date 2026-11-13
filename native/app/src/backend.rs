@@ -494,16 +494,10 @@ async fn run(
             });
         if let Some(result) = save_result {
             let completed = save_task.take().expect("Completed write has an owner");
-            persisted.accept(completed.stamp, &result);
+            changed |=
+                persisted.accept_with_feedback(completed.stamp, &result, &mut state.warnings);
             for code in result {
                 journal.event(code);
-                warn(
-                    &mut state.warnings,
-                    LocalizedText::new(
-                        "Историю не удалось записать на диск. Программа повторит сохранение.",
-                        "Couldn't save history to disk. The application will try again.",
-                    ),
-                );
             }
         }
         if (save_requested || last_save.elapsed() >= Duration::from_secs(10)) && save_task.is_none()
@@ -741,6 +735,43 @@ struct Persisted {
     locations: Option<u64>,
 }
 impl Persisted {
+    fn accept_with_feedback(
+        &mut self,
+        stamp: SaveStamp,
+        failures: &[&str],
+        warnings: &mut Vec<LocalizedText>,
+    ) -> bool {
+        let before = warnings.clone();
+        let worker_warning = save_warning("history-save-worker-failed").unwrap();
+        if failures.contains(&"history-save-worker-failed") {
+            warn(warnings, worker_warning);
+            return *warnings != before;
+        }
+        warnings.retain(|warning| warning != &worker_warning);
+        for (code, attempted) in [
+            (
+                "settings-save-failed",
+                self.settings != Some(stamp.settings),
+            ),
+            (
+                "availability-save-failed",
+                self.availability != Some(stamp.availability),
+            ),
+            (
+                "location-save-failed",
+                self.locations != Some(stamp.locations),
+            ),
+        ] {
+            let warning = save_warning(code).unwrap();
+            if failures.contains(&code) {
+                warn(warnings, warning);
+            } else if attempted {
+                warnings.retain(|value| value != &warning);
+            }
+        }
+        self.accept(stamp, failures);
+        *warnings != before
+    }
     fn accept(&mut self, stamp: SaveStamp, failures: &[&str]) {
         if failures.contains(&"history-save-worker-failed") {
             return;
@@ -755,6 +786,28 @@ impl Persisted {
             self.locations = Some(stamp.locations);
         }
     }
+}
+fn save_warning(code: &str) -> Option<LocalizedText> {
+    let (ru, en) = match code {
+        "settings-save-failed" => (
+            "Не удалось сохранить настройки. Программа повторит запись.",
+            "Couldn't save settings. The application will try again.",
+        ),
+        "availability-save-failed" => (
+            "Не удалось сохранить историю доступности. Программа повторит запись.",
+            "Couldn't save availability history. The application will try again.",
+        ),
+        "location-save-failed" => (
+            "Не удалось сохранить историю стран. Программа повторит запись.",
+            "Couldn't save country history. The application will try again.",
+        ),
+        "history-save-worker-failed" => (
+            "Не удалось завершить сохранение данных. Программа повторит запись.",
+            "Couldn't complete the data save. The application will try again.",
+        ),
+        _ => return None,
+    };
+    Some(LocalizedText::new(ru, en))
 }
 struct SaveJob {
     receiver: oneshot::Receiver<Vec<&'static str>>,
@@ -1313,6 +1366,51 @@ mod tests {
         );
         assert_eq!(saved.settings, Some(1));
         saved.accept(old, &[]);
+        assert_eq!(saved.locations, Some(9));
+    }
+    #[test]
+    fn save_feedback_names_the_failed_store_and_clears_only_recovered_failures() {
+        let stamp = SaveStamp {
+            settings: 1,
+            availability: (7, None),
+            locations: 9,
+        };
+        let mut saved = Persisted::default();
+        let mut warnings = vec![];
+        assert!(saved.accept_with_feedback(
+            stamp,
+            &[
+                "settings-save-failed",
+                "save-detail-io-os-32",
+                "location-save-failed"
+            ],
+            &mut warnings
+        ));
+        assert_eq!(warnings.len(), 2);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.get(Language::En).contains("save settings"))
+        );
+        assert_eq!(saved.settings, None);
+        assert_eq!(saved.locations, None);
+        assert!(!saved.accept_with_feedback(
+            stamp,
+            &["settings-save-failed", "location-save-failed"],
+            &mut warnings
+        ));
+        assert!(saved.accept_with_feedback(stamp, &["location-save-failed"], &mut warnings));
+        assert_eq!(
+            warnings,
+            vec![save_warning("location-save-failed").unwrap()]
+        );
+        assert_eq!(saved.settings, Some(1));
+        assert_eq!(saved.locations, None);
+        assert!(saved.accept_with_feedback(stamp, &["history-save-worker-failed"], &mut warnings));
+        assert_eq!(saved.locations, None);
+        assert_eq!(warnings.len(), 2);
+        assert!(saved.accept_with_feedback(stamp, &[], &mut warnings));
+        assert!(warnings.is_empty());
         assert_eq!(saved.locations, Some(9));
     }
     #[test]

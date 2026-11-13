@@ -114,23 +114,64 @@ pub struct SaveSnapshot {
 impl SaveSnapshot {
     pub fn write(self) -> Vec<&'static str> {
         let mut failures = Vec::new();
-        if let Some(value) = self.settings
-            && save_json(&self.root.join("settings.json"), &value).is_err()
-        {
-            failures.push("settings-save-failed");
+        if let Some(value) = self.settings {
+            record_save_result(
+                &mut failures,
+                "settings-save-failed",
+                save_json(&self.root.join("settings.json"), &value),
+            );
         }
-        if let Some(value) = self.availability
-            && save_json(&self.root.join("availability-history.json"), &value).is_err()
-        {
-            failures.push("availability-save-failed");
+        if let Some(value) = self.availability {
+            record_save_result(
+                &mut failures,
+                "availability-save-failed",
+                save_json(&self.root.join("availability-history.json"), &value),
+            );
         }
-        if let Some(value) = self.locations
-            && save_json(&self.root.join("location-history.json"), &value).is_err()
-        {
-            failures.push("location-save-failed");
+        if let Some(value) = self.locations {
+            record_save_result(
+                &mut failures,
+                "location-save-failed",
+                save_json(&self.root.join("location-history.json"), &value),
+            );
         }
         failures
     }
+}
+fn record_save_result(failures: &mut Vec<&'static str>, store: &'static str, result: Result<()>) {
+    let Err(error) = result else { return };
+    // Keep the stable store code: the runtime uses it to retain dirty versions.
+    failures.push(store);
+    let Some(io) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+    else {
+        failures.push("save-detail-non-io");
+        return;
+    };
+    use std::io::ErrorKind;
+    failures.push(match io.kind() {
+        ErrorKind::PermissionDenied => "save-detail-io-kind-permission-denied",
+        ErrorKind::NotFound => "save-detail-io-kind-not-found",
+        ErrorKind::AlreadyExists => "save-detail-io-kind-already-exists",
+        ErrorKind::StorageFull => "save-detail-io-kind-storage-full",
+        ErrorKind::InvalidData => "save-detail-io-kind-invalid-data",
+        ErrorKind::InvalidInput => "save-detail-io-kind-invalid-input",
+        ErrorKind::WriteZero => "save-detail-io-kind-write-zero",
+        ErrorKind::Interrupted => "save-detail-io-kind-interrupted",
+        ErrorKind::TimedOut => "save-detail-io-kind-timed-out",
+        ErrorKind::WouldBlock => "save-detail-io-kind-would-block",
+        _ => "save-detail-io-kind-other",
+    });
+    failures.push(match (cfg!(windows), io.raw_os_error()) {
+        (true, Some(32)) => "save-detail-io-os-32",
+        (true, Some(33)) => "save-detail-io-os-33",
+        (true, Some(5)) => "save-detail-io-os-5",
+        (true, Some(39)) => "save-detail-io-os-39",
+        (true, Some(112)) => "save-detail-io-os-112",
+        (_, Some(_)) => "save-detail-io-os-other",
+        (_, None) => "save-detail-io-os-none",
+    });
 }
 pub fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     let mut input = File::open(path)?;
@@ -187,6 +228,64 @@ pub fn load<T: DeserializeOwned + Default>(
 pub fn write_atomic(path: &Path, bytes: &[u8], backup: bool) -> Result<()> {
     write_atomic_with(path, backup, |output| Ok(output.write_all(bytes)?))
 }
+fn rename_atomic_with_retry(source: &Path, destination: &Path) -> std::io::Result<()> {
+    retry_atomic_rename(
+        || fs::rename(source, destination),
+        |error| rename_failure_is_transient(error, destination),
+    )
+}
+fn rename_failure_is_transient(error: &std::io::Error, destination: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        match error.raw_os_error() {
+            Some(32 | 33) => true,
+            Some(5) => {
+                // MoveFileEx can report ACCESS_DENIED for a destination handle
+                // that denies delete sharing. Distinguish that temporary case
+                // from readonly files or ACL denial. DELETE access alone never
+                // deletes the file: DELETE_ON_CLOSE is deliberately absent.
+                let probe = OpenOptions::new()
+                    .access_mode(0x0001_0000)
+                    .share_mode(0x1 | 0x2 | 0x4)
+                    .open(destination);
+                probe
+                    .as_ref()
+                    .is_err_and(|cause| matches!(cause.raw_os_error(), Some(32 | 33)))
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (error, destination);
+        false
+    }
+}
+fn retry_atomic_rename(
+    mut operation: impl FnMut() -> std::io::Result<()>,
+    mut transient: impl FnMut(&std::io::Error) -> bool,
+) -> std::io::Result<()> {
+    use std::time::{Duration, Instant};
+    let started = Instant::now();
+    let budget = Duration::from_millis(300);
+    for attempt in 0..=5 {
+        match operation() {
+            Err(error) if attempt < 5 && started.elapsed() < budget && transient(&error) => {
+                let delay = Duration::from_millis((10u64 << attempt).min(100));
+                if started.elapsed().saturating_add(delay) >= budget {
+                    return Err(error);
+                }
+                std::thread::sleep(delay);
+                if started.elapsed() >= budget {
+                    return Err(error);
+                }
+            }
+            result => return result,
+        }
+    }
+    unreachable!("The last rename attempt always returns its result")
+}
 fn write_atomic_with(
     path: &Path,
     backup: bool,
@@ -232,13 +331,13 @@ fn write_atomic_with(
                 output.write_all(&committed)?;
                 output.sync_all()?;
                 drop(output);
-                fs::rename(&bak_temp, &bak)?;
+                rename_atomic_with_retry(&bak_temp, &bak)?;
                 Ok::<(), anyhow::Error>(())
             })();
             let _ = fs::remove_file(&bak_temp);
             backup_result?;
         }
-        fs::rename(&temporary, path)?;
+        rename_atomic_with_retry(&temporary, path)?;
         Ok(())
     })();
     let _ = fs::remove_file(&temporary);
@@ -385,19 +484,22 @@ impl Profile {
     }
     pub fn save_histories(&self) -> Vec<&'static str> {
         let mut failures = Vec::new();
-        if self.availability_writable
-            && save_json(
-                &self.root.join("availability-history.json"),
-                &self.availability,
-            )
-            .is_err()
-        {
-            failures.push("availability-save-failed");
+        if self.availability_writable {
+            record_save_result(
+                &mut failures,
+                "availability-save-failed",
+                save_json(
+                    &self.root.join("availability-history.json"),
+                    &self.availability,
+                ),
+            );
         }
-        if self.locations_writable
-            && save_json(&self.root.join("location-history.json"), &self.locations).is_err()
-        {
-            failures.push("location-save-failed");
+        if self.locations_writable {
+            record_save_result(
+                &mut failures,
+                "location-save-failed",
+                save_json(&self.root.join("location-history.json"), &self.locations),
+            );
         }
         failures
     }
@@ -414,6 +516,241 @@ mod tests {
         ));
         fs::create_dir_all(&p).unwrap();
         p
+    }
+    #[cfg(windows)]
+    #[test]
+    fn atomic_rename_recovers_after_a_real_reader_releases_its_delete_denying_handle() {
+        use std::os::windows::fs::OpenOptionsExt;
+        for lock_source in [false, true] {
+            let root = fixture();
+            let source = root.join("new.tmp");
+            let target = root.join("settings.json");
+            fs::write(&source, b"new committed bytes").unwrap();
+            fs::write(&target, b"old committed bytes").unwrap();
+            let mut reader = Some(
+                OpenOptions::new()
+                    .read(true)
+                    .share_mode(0x1 | 0x2)
+                    .open(if lock_source { &source } else { &target })
+                    .unwrap(),
+            );
+            let mut observed_sharing_failures = 0;
+            let mut first_code = None;
+            let outcome = retry_atomic_rename(
+                || fs::rename(&source, &target),
+                |error| {
+                    // Classify while the actual denying handle is still held.
+                    let sharing = rename_failure_is_transient(error, &target);
+                    if observed_sharing_failures == 0 && sharing {
+                        observed_sharing_failures += 1;
+                        first_code = error.raw_os_error();
+                        // Close only after the real failing syscall and its
+                        // classification, without scheduling or sleep races.
+                        drop(reader.take());
+                    }
+                    sharing
+                },
+            );
+            let released = reader.is_none();
+            drop(reader);
+            let committed = fs::read(&target).unwrap();
+            let source_remains = source.exists();
+            fs::remove_dir_all(root).unwrap();
+            assert!(released);
+            assert_eq!(
+                observed_sharing_failures, 1,
+                "A real sharing failure must precede handle release"
+            );
+            if lock_source {
+                assert_eq!(first_code, Some(32));
+            } else {
+                assert!(matches!(first_code, Some(5 | 32)));
+            }
+            outcome.unwrap();
+            assert_eq!(committed, b"new committed bytes");
+            assert!(!source_remains);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_held_reader_preserves_valid_primary_and_backup_until_a_later_save() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        for lock_backup in [false, true] {
+            let root = fixture();
+            let path = root.join("settings.json");
+            let backup_path = path.with_extension("json.bak");
+            save_json(&path, &Settings::default()).unwrap();
+            save_json(
+                &path,
+                &Settings {
+                    window_width: 1200,
+                    ..Settings::default()
+                },
+            )
+            .unwrap();
+            let old = fs::read(&path).unwrap();
+            let old_backup = fs::read(&backup_path).unwrap();
+            let locked_path = if lock_backup { &backup_path } else { &path };
+            let reader = OpenOptions::new()
+                .read(true)
+                .share_mode(0x1 | 0x2)
+                .open(locked_path)
+                .unwrap();
+            let desired = Settings {
+                window_width: 1234,
+                ..Settings::default()
+            };
+            let failure = save_json(&path, &desired).unwrap_err();
+            let io = failure
+                .chain()
+                .find_map(|error| error.downcast_ref::<std::io::Error>())
+                .unwrap();
+            let raw = io.raw_os_error();
+            let sharing = rename_failure_is_transient(io, locked_path);
+            let primary = fs::read(&path).unwrap();
+            let backup = fs::read(&backup_path).unwrap();
+            let retained_files = fs::read_dir(&root).unwrap().count();
+            drop(reader);
+            let recovered = save_json(&path, &desired);
+            let committed: Settings = read_json(&path, SETTINGS_FILE_LIMIT).unwrap();
+            fs::remove_dir_all(root).unwrap();
+            assert!(matches!(raw, Some(5 | 32)));
+            assert!(sharing);
+            assert_eq!(primary, old);
+            assert_eq!(backup, if lock_backup { old_backup } else { old });
+            assert_eq!(
+                retained_files, 2,
+                "A failed publication must clean both owned temporary files"
+            );
+            recovered.unwrap();
+            assert_eq!(committed.window_width, 1234);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readonly_destination_and_other_permanent_errors_are_not_retried() {
+        let root = fixture();
+        let source = root.join("new.tmp");
+        let target = root.join("settings.json");
+        fs::write(&source, b"new").unwrap();
+        fs::write(&target, b"old").unwrap();
+        let original_permissions = fs::metadata(&target).unwrap().permissions();
+        let mut readonly = original_permissions.clone();
+        readonly.set_readonly(true);
+        fs::set_permissions(&target, readonly).unwrap();
+        let mut attempts = 0;
+        let outcome = retry_atomic_rename(
+            || {
+                attempts += 1;
+                fs::rename(&source, &target)
+            },
+            |error| rename_failure_is_transient(error, &target),
+        );
+        fs::set_permissions(&target, original_permissions).unwrap();
+        let contents = fs::read(&target).unwrap();
+        let source_remains = source.exists();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(attempts, 1);
+        assert_eq!(outcome.unwrap_err().raw_os_error(), Some(5));
+        assert_eq!(contents, b"old");
+        assert!(source_remains);
+        for code in [2, 3, 39, 112, 206] {
+            let mut attempts = 0;
+            let outcome = retry_atomic_rename(
+                || {
+                    attempts += 1;
+                    Err(std::io::Error::from_raw_os_error(code))
+                },
+                |error| {
+                    rename_failure_is_transient(error, Path::new("Z:\\nonexistent\\settings.json"))
+                },
+            );
+            assert_eq!(outcome.unwrap_err().raw_os_error(), Some(code));
+            assert_eq!(attempts, 1);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rename_retries_lock_violations_but_has_a_fixed_attempt_bound() {
+        let mut attempts = 0;
+        let outcome = retry_atomic_rename(
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(std::io::Error::from_raw_os_error(33))
+                } else {
+                    Ok(())
+                }
+            },
+            |error| rename_failure_is_transient(error, Path::new("settings.json")),
+        );
+        outcome.unwrap();
+        assert_eq!(attempts, 2);
+        let mut attempts = 0;
+        let outcome = retry_atomic_rename(
+            || {
+                attempts += 1;
+                Err(std::io::Error::from_raw_os_error(32))
+            },
+            |error| rename_failure_is_transient(error, Path::new("settings.json")),
+        );
+        assert_eq!(outcome.unwrap_err().raw_os_error(), Some(32));
+        assert!((1..=6).contains(&attempts));
+    }
+
+    #[test]
+    fn save_failure_details_keep_store_identity_and_never_copy_error_text() {
+        let mut failures = Vec::new();
+        let secret = "C:\\private\\token-secret https://private.invalid/?token=secret 192.0.2.77";
+        record_save_result(
+            &mut failures,
+            "settings-save-failed",
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, secret).into()),
+        );
+        assert_eq!(
+            failures,
+            vec![
+                "settings-save-failed",
+                "save-detail-io-kind-permission-denied",
+                "save-detail-io-os-none"
+            ]
+        );
+        assert!(failures.iter().all(|code| {
+            code.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        }));
+        assert!(!failures.join(" ").contains("secret"));
+        failures.clear();
+        record_save_result(
+            &mut failures,
+            "location-save-failed",
+            Err(anyhow::anyhow!(secret)),
+        );
+        assert_eq!(failures, vec!["location-save-failed", "save-detail-non-io"]);
+        failures.clear();
+        record_save_result(&mut failures, "availability-save-failed", Ok(()));
+        assert!(failures.is_empty());
+        #[cfg(windows)]
+        for (code, diagnostic) in [
+            (32, "save-detail-io-os-32"),
+            (33, "save-detail-io-os-33"),
+            (5, "save-detail-io-os-5"),
+            (39, "save-detail-io-os-39"),
+            (112, "save-detail-io-os-112"),
+        ] {
+            failures.clear();
+            record_save_result(
+                &mut failures,
+                "settings-save-failed",
+                Err(std::io::Error::from_raw_os_error(code).into()),
+            );
+            assert!(failures.contains(&"settings-save-failed"));
+            assert!(failures.contains(&diagnostic));
+        }
     }
     #[test]
     fn a_country_transition_at_the_import_limit_survives_two_saves_and_restart() {

@@ -272,18 +272,62 @@ def checked_output(requested, workspace=None):
     return output
 
 
+def profile_json_snapshot(profile, relative, kernel=None):
+    """Read an owned profile snapshot without blocking its atomic replacement."""
+    limits = {"settings.json": 1024*1024, "availability-history.json": 16*1024*1024,
+              "location-history.json": 64*1024*1024, "GeoIP/current.json": 4096}
+    root = profile if isinstance(profile, pathlib.PurePath) else pathlib.Path(profile)
+    if relative not in limits or root.name != "profile" or not root.is_absolute() or not re.fullmatch(r"[A-Za-z]:", root.drive):
+        raise ValueError("Snapshot reads require a known file in the owned local profile")
+    maximum = limits[relative]
+    if kernel is None:
+        kernel = ct.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes, kernel.CreateFileW.restype = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ct.c_void_p, wt.DWORD, wt.DWORD, wt.HANDLE], wt.HANDLE
+        kernel.GetFileSizeEx.argtypes, kernel.GetFileSizeEx.restype = [wt.HANDLE, ct.POINTER(ct.c_longlong)], wt.BOOL
+        kernel.ReadFile.argtypes, kernel.ReadFile.restype = [wt.HANDLE, ct.c_void_p, wt.DWORD, ct.POINTER(wt.DWORD), ct.c_void_p], wt.BOOL
+        kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [wt.HANDLE], wt.BOOL
+    # GENERIC_READ; SHARE_READ | SHARE_WRITE | SHARE_DELETE; OPEN_EXISTING.
+    # Python's normal CRT file open omits SHARE_DELETE and can obstruct rename.
+    handle = kernel.CreateFileW(str(root.joinpath(*relative.split("/"))), 0x80000000, 0x7, None, 3, 0x80, None)
+    if handle in (None, 0, ct.c_void_p(-1).value):
+        raise OSError(0, "The owned profile snapshot could not be opened", None, ct.get_last_error())
+    chunks, total = [], 0
+    try:
+        size = ct.c_longlong()
+        if not kernel.GetFileSizeEx(handle, ct.byref(size)):
+            raise OSError(0, "The owned profile snapshot size could not be read", None, ct.get_last_error())
+        if not 0 <= size.value <= maximum:
+            raise ValueError("Profile snapshot exceeds its size limit")
+        buffer = ct.create_string_buffer(min(64*1024, maximum+1))
+        while True:
+            requested, count = min(len(buffer), maximum-total+1), wt.DWORD()
+            if not kernel.ReadFile(handle, buffer, requested, ct.byref(count), None):
+                raise OSError(0, "The owned profile snapshot could not be read", None, ct.get_last_error())
+            if count.value > requested:
+                raise RuntimeError("Invalid profile snapshot read count")
+            if not count.value:
+                break
+            total += count.value
+            if total > maximum:
+                raise ValueError("Profile snapshot grew beyond its size limit")
+            chunks.append(buffer[:count.value])
+    finally:
+        if not kernel.CloseHandle(handle):
+            raise OSError(0, "The owned profile snapshot handle could not be closed", None, ct.get_last_error())
+    # Close the native handle before parsing, including on invalid JSON/UTF-8.
+    return json.loads(b"".join(chunks).decode("utf-8-sig"))
+
+
 def country_readiness(profile, enabled_after):
     """Возвращает только публичные версии/булевы признаки, никогда сам IP."""
-    manifest = profile/"GeoIP/current.json"
     archive = profile/"GeoIP-Compare/IPLocate-country.csv.zip"
     state = dict(v2fly=False, iplocate=False, public_lookup=False, both_versions_recorded=False)
     try:
-        if manifest.stat().st_size <= 4096:
-            generation = json.loads(manifest.read_text(encoding="utf-8-sig"))
-            digest = generation.get("Hash", generation.get("hash", "")) if isinstance(generation, dict) else ""
-            if isinstance(digest, str) and len(digest) == 64 and all(c in "0123456789abcdefABCDEF" for c in digest):
-                data = profile/"GeoIP"/f"geoip-{digest.lower()}.dat"
-                state["v2fly"] = data.is_file() and 0 < data.stat().st_size <= 40*1024*1024
+        generation = profile_json_snapshot(profile, "GeoIP/current.json")
+        digest = generation.get("Hash", generation.get("hash", "")) if isinstance(generation, dict) else ""
+        if isinstance(digest, str) and len(digest) == 64 and all(c in "0123456789abcdefABCDEF" for c in digest):
+            data = profile/"GeoIP"/f"geoip-{digest.lower()}.dat"
+            state["v2fly"] = data.is_file() and 0 < data.stat().st_size <= 40*1024*1024
     except (OSError, TypeError, ValueError):
         pass
     try:
@@ -291,10 +335,7 @@ def country_readiness(profile, enabled_after):
     except OSError:
         pass
     try:
-        history_file = profile/"location-history.json"
-        if history_file.stat().st_size > 64*1024*1024:
-            return state
-        history = json.loads(history_file.read_text(encoding="utf-8-sig"))
+        history = profile_json_snapshot(profile, "location-history.json")
         if not isinstance(history, dict):
             return state
         for observation in reversed(history.get("observations", [])):
@@ -1038,10 +1079,10 @@ class Runner:
         return digest.hexdigest()
 
     def setting(self, key):
-        return json.loads((self.profile/"settings.json").read_text(encoding="utf-8-sig")).get(key)
+        return profile_json_snapshot(self.profile, "settings.json").get(key)
 
     def history_counts(self):
-        history = json.loads((self.profile/"location-history.json").read_text(encoding="utf-8-sig"))
+        history = profile_json_snapshot(self.profile, "location-history.json")
         counts = dict(stays=len(history["stays"]), observations=len(history["observations"]))
         assert counts["stays"] == self.meta["fixture"]["stays"], "Перезапуск потерял или продублировал страны"
         assert counts["observations"] == self.meta["fixture"]["observations"], "Перезапуск потерял или продублировал наблюдения"
@@ -1633,7 +1674,7 @@ class Runner:
         self.api.click(self.uia.hwnd,target)
         self.visible_control("Выбранное событие")
         self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,(target[0],outer[1]+100))
-        history = json.loads((self.profile/"availability-history.json").read_text(encoding="utf-8"))
+        history = profile_json_snapshot(self.profile, "availability-history.json")
         local = lambda value: dt.datetime.fromisoformat(value.replace("Z","+00:00")).astimezone().strftime("%d.%m %H:%M:%S")
         expected = next(local(s["startedUtc"])+" – "+local(s["endedUtc"]) for s in history["spans"]
                         if s["group"]=="Ru" and s["state"]=="Offline" and s["endedUtc"]
@@ -2296,6 +2337,7 @@ def uia_retry_selftest():
     run("inventory", [removed], TimeoutError, 1, timeout=1, clock=[10, 10, 11.01])
     pointer_capture_selftest()
     adaptive_viewport_selftest()
+    profile_snapshot_selftest()
     policy=IsolatedInput.__new__(IsolatedInput)
     policy.ci=False
     with patch.object(policy,"assert_identity"):
@@ -2381,6 +2423,85 @@ def adaptive_viewport_selftest():
     else:
         raise AssertionError("Endpoint identity was replaced by its duplicated label")
     print("RUN - PASS: adaptive rectangles, distinct geometry, bounded scrolling and seven independent endpoint identities; no OS calls")
+
+
+def profile_snapshot_selftest():
+    from unittest.mock import patch
+
+    class FileApi:
+        def __init__(self, data=b'{"language":"ru"}', fault=None, declared=None, chunk=3):
+            self.data, self.fault, self.declared, self.chunk = data, fault, declared, chunk
+            self.offset, self.calls = 0, []
+
+        def CreateFileW(self, *arguments):
+            self.calls.append(("open", arguments))
+            return ct.c_void_p(-1).value if self.fault == "open" else 77
+
+        def GetFileSizeEx(self, handle, size):
+            assert handle == 77
+            self.calls.append(("size", handle))
+            size._obj.value = len(self.data) if self.declared is None else self.declared
+            return self.fault != "size"
+
+        def ReadFile(self, handle, buffer, requested, count, overlapped):
+            assert handle == 77 and overlapped is None
+            self.calls.append(("read", requested))
+            if self.fault == "read":
+                return False
+            part = self.data[self.offset:self.offset+min(requested, self.chunk)]
+            self.offset += len(part)
+            buffer[:len(part)] = part
+            count._obj.value = requested+1 if self.fault == "count" else len(part)
+            return True
+
+        def CloseHandle(self, handle):
+            assert handle == 77
+            self.calls.append(("close", handle))
+            return self.fault != "close"
+
+    profile = pathlib.PureWindowsPath("C:/owned/profile")
+    api = FileApi(b'\xef\xbb\xbf{"language":"ru","title":"\xd1\x81\xd1\x82\xd0\xb0\xd1\x82\xd1\x83\xd1\x81"}')
+    assert profile_json_snapshot(profile, "settings.json", api) == {"language":"ru", "title":"статус"}
+    opened = api.calls[0][1]
+    assert opened == (str(profile/"settings.json"), 0x80000000, 0x7, None, 3, 0x80, None)
+    assert sum(call[0] == "read" for call in api.calls) > 1
+    assert [call[0] for call in api.calls].count("close") == 1
+    assert api.calls[-1][0] == "close"
+    for fault in ("open", "size", "read", "close", "count"):
+        api = FileApi(fault=fault)
+        with patch.object(ct, "get_last_error", return_value=32, create=True):
+            try:
+                profile_json_snapshot(profile, "settings.json", api)
+            except OSError as error:
+                if os.name == "nt":
+                    assert error.winerror == 32, "The observer lost the native file error code"
+            except RuntimeError:
+                assert fault == "count"
+            else:
+                raise AssertionError("The snapshot reader hid a native file failure")
+        assert [call[0] for call in api.calls].count("close") == (0 if fault == "open" else 1)
+    for api in (FileApi(declared=1024*1024+1), FileApi(b"x"*4097, declared=1, chunk=4097),
+                FileApi(b"\xff"), FileApi(b"not JSON")):
+        relative = "GeoIP/current.json" if len(api.data) == 4097 else "settings.json"
+        try:
+            profile_json_snapshot(profile, relative, api)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("The snapshot reader accepted oversize or invalid JSON")
+        assert [call[0] for call in api.calls].count("close") == 1
+    for root, relative in ((profile, "../settings.json"), (profile, "unrelated.json"),
+                           (pathlib.PureWindowsPath("C:/live/NetLights"), "settings.json"),
+                           (pathlib.PureWindowsPath("//offline.invalid/share/profile"), "settings.json")):
+        api = FileApi()
+        try:
+            profile_json_snapshot(root, relative, api)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("The snapshot reader accepted an unrelated profile path")
+        assert not api.calls
+    print("RUN - PASS: bounded profile snapshots share read/write/delete, reject invalid paths and close handles on every outcome; no OS calls")
 
 
 def pointer_capture_selftest():
