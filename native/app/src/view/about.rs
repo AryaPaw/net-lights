@@ -2,9 +2,22 @@ use super::*;
 use gpui_kit::component::{Icon, IconName};
 
 pub(super) const VERSION_COPIED: &str = "Версия скопирована.";
-fn copy_version_notice(current: &mut String) {
-    if current.is_empty() || current == VERSION_COPIED {
-        *current = VERSION_COPIED.into();
+const VERSION_COPY_FAILED: &str = "Не удалось скопировать версию. Повторите попытку; буфер обмена может быть занят другим приложением.";
+const VERSION_COPY_FAILED_EN: &str =
+    "Couldn't copy the version. Try again; another application may be using the clipboard.";
+fn copy_version_notice(current: &mut String, copied: bool, lang: Language) {
+    if current.is_empty()
+        || matches!(
+            current.as_str(),
+            VERSION_COPIED | VERSION_COPY_FAILED | VERSION_COPY_FAILED_EN
+        )
+    {
+        *current = if copied {
+            VERSION_COPIED
+        } else {
+            lang.choose(VERSION_COPY_FAILED, VERSION_COPY_FAILED_EN)
+        }
+        .into();
     }
 }
 pub(super) fn clear_copy_version_notice(current: &mut String) {
@@ -84,12 +97,13 @@ impl NetLights {
                     .child(
                         crate::fluent::button("about-copy-version")
                             .label(tr(cx, "Скопировать версию"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(format!(
-                                    "Net Lights {}",
-                                    netlights_core::VERSION
-                                )));
-                                copy_version_notice(&mut this.notice);
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let copied = crate::window_os::copy_text(
+                                    window,
+                                    &format!("Net Lights {}", netlights_core::VERSION),
+                                )
+                                .is_ok();
+                                copy_version_notice(&mut this.notice, copied, language(cx));
                                 cx.notify();
                             })),
                     )
@@ -217,22 +231,40 @@ fn project_link(
 
 #[cfg(test)]
 mod tests {
-    use super::{VERSION_COPIED, clear_copy_version_notice, copy_version_notice};
+    use super::{
+        Language, VERSION_COPIED, VERSION_COPY_FAILED, VERSION_COPY_FAILED_EN,
+        clear_copy_version_notice, copy_version_notice,
+    };
     #[test]
     fn copy_version_and_navigation_never_discard_an_existing_error() {
         for error in [
             "Монитор остановлен из-за ошибки.",
             "Не удалось подтвердить запуск после обновления.",
         ] {
-            let mut notice = error.to_string();
-            copy_version_notice(&mut notice);
-            clear_copy_version_notice(&mut notice);
-            assert_eq!(notice, error);
+            for copied in [false, true] {
+                let mut notice = error.to_string();
+                copy_version_notice(&mut notice, copied, Language::Ru);
+                clear_copy_version_notice(&mut notice);
+                assert_eq!(notice, error);
+            }
         }
         let mut notice = String::new();
-        copy_version_notice(&mut notice);
+        copy_version_notice(&mut notice, true, Language::Ru);
         assert_eq!(notice, VERSION_COPIED);
         clear_copy_version_notice(&mut notice);
         assert!(notice.is_empty());
+    }
+    #[test]
+    fn copy_failure_is_localized_and_a_successful_retry_replaces_it() {
+        let mut notice = String::new();
+        copy_version_notice(&mut notice, false, Language::Ru);
+        assert_eq!(notice, VERSION_COPY_FAILED);
+        clear_copy_version_notice(&mut notice);
+        assert_eq!(notice, VERSION_COPY_FAILED);
+        copy_version_notice(&mut notice, true, Language::Ru);
+        assert_eq!(notice, VERSION_COPIED);
+        copy_version_notice(&mut notice, false, Language::En);
+        assert_eq!(notice, VERSION_COPY_FAILED_EN);
+        assert!(!notice.contains(VERSION_COPIED));
     }
 }
