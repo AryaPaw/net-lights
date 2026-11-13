@@ -650,17 +650,24 @@ class NavigationFrames:
 
     def capture(self):
         from PIL import Image
+        entered=time.perf_counter()
         self.guard()
+        guarded=time.perf_counter()
         left,top,_,_=self.band
         if not self.gdi.BitBlt(self.memory,0,0,self.width,self.height,self.screen,left,top,0x40CC0020):
             raise ct.WinError(ct.get_last_error())
+        copied=time.perf_counter()
         self.gdi.SelectObject(self.memory,self.original)
         try:
             if self.gdi.GetDIBits(self.screen,self.bitmap,0,self.height,self.buffer,ct.byref(self.header),0)!=self.height:
                 raise ct.WinError(ct.get_last_error())
         finally:
             self.gdi.SelectObject(self.memory,self.bitmap)
-        return Image.frombuffer("RGB",(self.width,self.height),self.buffer,"raw","BGRX",0,1).copy()
+        read=time.perf_counter()
+        image=Image.frombuffer("RGB",(self.width,self.height),self.buffer,"raw","BGRX",0,1).copy()
+        self.last_capture_timings=dict(guard_ms=(guarded-entered)*1000,bitblt_ms=(copied-guarded)*1000,
+                                      dib_ms=(read-copied)*1000,image_ms=(time.perf_counter()-read)*1000)
+        return image
 
     def __exit__(self,*_):
         if self.memory and self.original:
@@ -1507,15 +1514,21 @@ class Runner:
         right=max(r[2] for r in rectangles.values())
         band=(left,top,right,bottom)
         def sample():
+            entered=time.perf_counter()
             self.input_policy.assert_identity()
             assert self.api.owner(hwnd)==pid and self.api.user.GetForegroundWindow()==hwnd
             x,y,width,height=self.api.outer(hwnd)
             assert x<=left<right<=x+width and y<=top<bottom<=y+height
+            guarded=time.perf_counter()
             image=frames_source.capture()
+            captured=time.perf_counter()
             positions=[index%image.width+left for index,pixel in enumerate(image.getdata())
                        if max(abs(pixel[i]-channel) for i,channel in enumerate((76,194,255)))<=10]
             assert len(positions)>=round(10*scale), "The visible navigation indicator disappeared"
+            sample.timings.append(dict(guard_ms=(guarded-entered)*1000,capture_ms=(captured-guarded)*1000,
+                                       scan_ms=(time.perf_counter()-captured)*1000,parts=frames_source.last_capture_timings))
             return sum(positions)/len(positions),image
+        sample.timings=[]
         with NavigationFrames(self.api,self.input_policy,hwnd,pid,band) as frames_source:
             return self.navigation_motion_samples(rectangles,sample)
 
@@ -1533,12 +1546,14 @@ class Runner:
         results=[]
         for target in ("О программе","Состояние"):
             initial,_=sample()
+            sample.timings=[]
             started=time.monotonic()
             click(target)
             frames=sample_navigation_frames(sample,started)
             finish=center(target)
             (self.output/f"navigation-motion-{len(results)}-trace.json").write_text(
-                json.dumps(dict(initial=initial,target=finish,samples=[dict(seconds=t,x=x) for t,x,_ in frames]),indent=2),encoding="utf-8")
+                json.dumps(dict(initial=initial,target=finish,samples=[dict(seconds=t,x=x) for t,x,_ in frames],
+                                capture_timings=sample.timings),indent=2),encoding="utf-8")
             for index,(_,_,image) in enumerate(frames):
                 image.save(self.output/f"navigation-motion-{len(results)}-frame-{index:02}.png")
             evidence=navigation_frame_evidence(initial,finish,[(t,x) for t,x,_ in frames],scale,self.coverage_instrumented)

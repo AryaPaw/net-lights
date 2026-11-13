@@ -1,0 +1,59 @@
+name: native-ui-diagnostics
+on:
+  push:
+    branches: [codex/1.7.0-ci]
+    paths: [.github/workflows/native-ui-diagnostics.yml, scripts/native-ui-smoke.py]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnostic:
+    if: github.ref == 'refs/heads/codex/1.7.0-ci'
+    runs-on: windows-2022
+    timeout-minutes: 25
+    env:
+      CI: true
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      # Diagnostic baseline only, never a replacement for ci.yml or its gates.
+      # Refresh the run, commit and digests together when runtime inputs change.
+      - name: Require unchanged CI7 runtime inputs
+        run: |
+          git diff --quiet --exit-code 4ed08bd2a95036f4fdc62b8f6960b3d18dead6ea HEAD -- native 'Cargo.*' rust-toolchain.toml .cargo Directory.Build.props LICENSE scripts/publish.ps1 scripts/collect-native-licenses.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned diagnostic payload no longer matches the runtime inputs; rebuild the full candidate.' }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: native-upgrade-payload
+          run-id: 43405245481
+          github-token: ${{ github.token }}
+          path: artifacts/native-diagnostic-baseline
+      - name: Verify exact normal binaries
+        run: |
+          $publish = 'artifacts/native-diagnostic-baseline/publish'
+          if ((Get-FileHash "$publish/NetLights.exe" -Algorithm SHA256).Hash -cne '21F3BB43D98FB8DE613FD06A42B816847E9EC40DF3C54DA5B19DD7651E992399') { throw 'Diagnostic app digest differs from CI7.' }
+          if ((Get-FileHash "$publish/NetLights.UpdateAgent.exe" -Algorithm SHA256).Hash -cne '4D6D4724A26AF5A4AFA317FE7913D9D27B25E86BAA4E2EBF2B51B844A1108057') { throw 'Diagnostic agent digest differs from CI7.' }
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.11.7'
+          enable-cache: false
+      - name: Prepare isolated functional desktop
+        run: |
+          uv python install 3.11
+          if ($LASTEXITCODE -ne 0) { throw 'Python bootstrap failed.' }
+          scripts/prepare-ci-desktop.ps1 -FunctionalUI -ResultsDirectory TestResults/desktop
+      - name: Profile complete normal UI with unchanged assertions
+        run: |
+          scripts/test-native-ui.ps1 -FunctionalUI -Executable artifacts/native-diagnostic-baseline/publish/NetLights.exe -ExpectedSha256 21F3BB43D98FB8DE613FD06A42B816847E9EC40DF3C54DA5B19DD7651E992399 -ResultsDirectory "TestResults/diagnostic-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Upload diagnostic logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-ui-diagnostics
+          path: TestResults
+          if-no-files-found: warn
