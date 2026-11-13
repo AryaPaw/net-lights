@@ -14,7 +14,7 @@ jobs:
   release:
     if: github.ref_name != 'v1.6.1'
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CI: true
       CARGO_LLVM_COV_SETUP: "no"
@@ -25,6 +25,14 @@ jobs:
         with:
           version: "0.11.7"
           enable-cache: false
+      - name: Python for offline UI controls
+        shell: pwsh
+        run: |
+          uv python install 3.11
+          if ($LASTEXITCODE -ne 0) { throw 'Python bootstrap failed.' }
+      - name: Verify disposable desktop identity
+        shell: pwsh
+        run: scripts/prepare-ci-desktop.ps1 -FunctionalUI -ResultsDirectory TestResults/desktop
       - name: Rust toolchain
         shell: pwsh
         run: |
@@ -44,7 +52,7 @@ jobs:
           echo "version=$version" >> $env:GITHUB_OUTPUT
       - name: Verify build, tests and mandatory offline coverage
         shell: pwsh
-        run: scripts/verify.ps1 -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
+        run: scripts/verify.ps1 -FunctionalUI -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
       - name: Upload test and coverage results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
