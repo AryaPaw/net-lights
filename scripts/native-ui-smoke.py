@@ -48,6 +48,13 @@ def rectangle_inside(rect, bounds):
     return a<=rect[0]<rect[2]<=c and b<=rect[1]<rect[3]<=d
 
 
+def drag_time_bounds(domain_start, domain_end, left, right, start_x, end_x):
+    if domain_end<=domain_start or not left<=min(start_x,end_x)<max(start_x,end_x)<=right:
+        raise ValueError("Drag coordinates must lie inside a positive time domain and plot")
+    duration=domain_end-domain_start
+    return tuple(domain_start+duration*((x-left)/(right-left)) for x in sorted((start_x,end_x)))
+
+
 def navigation_frame_evidence(initial, finish, frames, scale, coverage_instrumented=False):
     assert frames and all(math.isfinite(t) and math.isfinite(x) and t>=0 for t,x in frames), "Invalid navigation samples"
     assert all(a[0]<=b[0] for a,b in zip(frames,frames[1:])), "Navigation timestamps reversed"
@@ -1732,6 +1739,7 @@ class Runner:
         self.visible_control("Закрыть")
         self.uia.call("invoke","Закрыть")
         zoom_ranges=[]
+        drag_geometry=[]
         now=dt.datetime.now().astimezone()
         def parse_bound(value):
             parsed=dt.datetime.strptime("2024 "+value,"%Y %d.%m %H:%M:%S")
@@ -1770,12 +1778,13 @@ class Runner:
             assert len(names)==1, f"Exact zoom bounds missing: {names}"
             bounds=names[0].removeprefix("Участок: ").split(" – ")
             first,last=map(parse_bound,bounds)
-            expected_first=domain_start+dt.timedelta(seconds=min(a,b)*3600)
-            expected_last=domain_start+dt.timedelta(seconds=max(a,b)*3600)
-            assert abs((last-first).total_seconds()-abs(a-b)*3600)<6, f"Wrong zoom duration: {names[0]}"
+            expected_first,expected_last=drag_time_bounds(domain_start,domain_end,left,right,start[0],end[0])
+            assert abs(((last-first)-(expected_last-expected_first)).total_seconds())<6, f"Wrong zoom duration: {names[0]}"
             assert abs((first-expected_first).total_seconds())<5, f"Wrong zoom start: {names[0]}"
             assert abs((last-expected_last).total_seconds())<5, f"Wrong zoom end: {names[0]}"
             zoom_ranges.append(names[0])
+            drag_geometry.append(dict(plot_left=left,plot_right=right,start_x=start[0],end_x=end[0],
+                                      expected_start=stamp(expected_first),expected_end=stamp(expected_last),actual=names[0]))
             self.capture("overview-zoom-forward" if a<b else "overview-zoom-reverse")
             self.visible_control("Весь период")
             self.uia.call("invoke","Весь период")
@@ -1820,7 +1829,8 @@ class Runner:
             wait_for(lambda:self.api.outer(self.uia.hwnd)==initial,description="восстановлен размер своего окна")
         self.period(original,next(label for h,label in PERIODS if h==original))
         return dict(common_readout=tooltip, exact_selected_interval=expected, drag_both_directions=True,
-                    zoom_preserves_period=True, exact_zoom_ranges=zoom_ranges,current_addresses=7, endpoint_runtime_ids=sorted(seen), narrow_outer=narrow)
+                    zoom_preserves_period=True, exact_zoom_ranges=zoom_ranges,drag_geometry=drag_geometry,
+                    current_addresses=7, endpoint_runtime_ids=sorted(seen), narrow_outer=narrow)
 
     def state_heading_counts(self, english=False):
         names = ("Provider", "World") if english else ("Провайдер", "Мир")
@@ -2407,6 +2417,23 @@ def adaptive_viewport_selftest():
     from types import SimpleNamespace
     from unittest.mock import patch
     bounds=(0,100,1000,900)
+    domain_start=dt.datetime(2026,11,13,9,49,20,tzinfo=dt.timezone.utc)
+    domain_end=domain_start+dt.timedelta(hours=1)
+    projected=drag_time_bounds(domain_start,domain_end,35,1414,421,958)
+    assert projected==drag_time_bounds(domain_start,domain_end,35,1414,958,421)
+    actual_start=dt.datetime(2026,11,13,10,6,7,tzinfo=dt.timezone.utc)
+    actual_end=dt.datetime(2026,11,13,10,29,27,tzinfo=dt.timezone.utc)
+    assert abs((projected[0]-actual_start).total_seconds())<5
+    assert abs((projected[1]-actual_end).total_seconds())<5
+    assert abs((domain_start+dt.timedelta(seconds=.67*3600)-actual_end).total_seconds())>=5
+    assert abs((projected[1]-(actual_end+dt.timedelta(seconds=10))).total_seconds())>=5
+    for left,right,start_x,end_x in ((35,35,35,35),(35,1414,34,958),(35,1414,421,1415),(35,1414,421,421)):
+        try:
+            drag_time_bounds(domain_start,domain_end,left,right,start_x,end_x)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid drag geometry was projected into expected times")
     assert rectangle_inside([10,110,100,140],bounds)
     for rect in ([-1,110,100,140],[10,99,100,140],[10,110,1001,140],[10,110,100,901]):
         assert not rectangle_inside(rect,bounds)
