@@ -7,7 +7,7 @@ use std::{
     fs,
     marker::PhantomData,
     os::windows::{ffi::OsStrExt, fs::MetadataExt},
-    path::{Path, PathBuf},
+    path::{Path, PathBuf, Prefix},
     rc::Rc,
 };
 use windows::{
@@ -110,7 +110,8 @@ fn full_path(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(normalized))
 }
 fn ensure_unlinked(path: &Path) -> Result<()> {
-    for ancestor in path.ancestors() {
+    // Inspect the root before any descendant lookup could traverse a junction.
+    for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) => anyhow::ensure!(
                 metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
@@ -467,6 +468,64 @@ fn remove_owned_shortcut(shortcut: &Path, exe: &Path) -> Result<()> {
     if !shortcut.is_file() {
         return Ok(());
     }
+    let Some(target) = read_shortcut_target(shortcut)? else {
+        return Ok(());
+    };
+    if !target.is_absolute() {
+        return Ok(());
+    }
+    let target = full_path(&target)?;
+    let executable = full_path(exe)?;
+    if ordinal_ignore_case(&target.to_string_lossy(), &executable.to_string_lossy()) {
+        fs::remove_file(shortcut)?;
+        return Ok(());
+    }
+    // Never look up an unrelated UNC, device, remote drive or junction target
+    // while migrating an autostart shortcut on the UI thread.
+    let Some(drive) = shortcut_alias_root(&target, &executable) else {
+        return Ok(());
+    };
+    if !local_profile_drive(unsafe { GetDriveTypeW(PCWSTR(wide(&drive).as_ptr())) }) {
+        return Ok(());
+    }
+    ensure_unlinked(&target)?;
+    ensure_unlinked(&executable)?;
+    // The Shell can persist or return an existing target using a DOS 8.3
+    // spelling. GetFullPathNameW alone doesn't expand that spelling. Resolve
+    // long filesystem names before the ordinal ownership comparison; a target
+    // that cannot be verified remains untouched.
+    let target = long_existing_path(&target)?;
+    let executable = long_existing_path(&executable)?;
+    if ordinal_ignore_case(&target.to_string_lossy(), &executable.to_string_lossy()) {
+        fs::remove_file(shortcut)?;
+    }
+    Ok(())
+}
+fn shortcut_alias_root(target: &Path, executable: &Path) -> Option<PathBuf> {
+    let (Some(std::path::Component::Prefix(target)), Some(std::path::Component::Prefix(exe))) =
+        (target.components().next(), executable.components().next())
+    else {
+        return None;
+    };
+    match (target.kind(), exe.kind()) {
+        (Prefix::Disk(left), Prefix::Disk(right)) if left.eq_ignore_ascii_case(&right) => {
+            Some(PathBuf::from(format!("{}:\\", left as char)))
+        }
+        _ => None,
+    }
+}
+fn long_existing_path(path: &Path) -> Result<PathBuf> {
+    let absolute = full_path(path)?;
+    let input = wide(&absolute);
+    let mut expanded = vec![0u16; 32768];
+    let length = unsafe { GetLongPathNameW(PCWSTR(input.as_ptr()), Some(&mut expanded)) } as usize;
+    anyhow::ensure!(
+        length > 0 && length < expanded.len(),
+        "Cannot verify the existing shortcut target's long path"
+    );
+    full_path(Path::new(&String::from_utf16(&expanded[..length])?))
+}
+fn read_shortcut_target(shortcut: &Path) -> Result<Option<PathBuf>> {
     let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     if initialized != RPC_E_CHANGED_MODE {
         initialized.ok()?;
@@ -487,17 +546,7 @@ fn remove_owned_shortcut(shortcut: &Path, exe: &Path) -> Result<()> {
         .position(|c| *c == 0)
         .context("The shortcut target is too long")?;
     let target = PathBuf::from(String::from_utf16(&target[..length])?);
-    if !target.as_os_str().is_empty()
-        && ordinal_ignore_case(
-            &full_path(&target)?.to_string_lossy(),
-            &full_path(exe)?.to_string_lossy(),
-        )
-    {
-        drop(persist);
-        drop(link);
-        fs::remove_file(shortcut)?;
-    }
-    Ok(())
+    Ok((!target.as_os_str().is_empty()).then_some(target))
 }
 pub fn auto_start_enabled(exe: &Path) -> Result<bool> {
     let mut key = HKEY::default();
@@ -728,10 +777,8 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("NetLightsOrdinalOwnership-{identity}"));
         let ours = directory.join("ſ").join("NetLights.exe");
         let foreign = directory.join("S").join("NetLights.exe");
-        for path in [&ours, &foreign] {
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, b"owned fixture").unwrap();
-        }
+        // These intentionally collide under the legacy hash casing. Registry
+        // ownership is a string protocol and doesn't require either file.
         assert_eq!(
             upper(&ours.to_string_lossy()),
             upper(&foreign.to_string_lossy()),
@@ -767,17 +814,45 @@ mod tests {
         assert!(owns_command(&command, &foreign));
         assert!(!owns_command(&command, &ours));
         drop(key);
+        // Independently prove that the Shell fixture has two different files.
+        // Do not assume a filesystem's Unicode case table equals Win32 ordinal
+        // string comparison on every Windows version.
+        let shortcut_ours = directory.join("Straße").join("NetLights.exe");
+        let shortcut_foreign = directory.join("Strasse").join("NetLights.exe");
+        for (path, contents) in [
+            (&shortcut_ours, b"our independent fixture".as_slice()),
+            (&shortcut_foreign, b"foreign independent fixture".as_slice()),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        assert_eq!(
+            fs::read(&shortcut_ours).unwrap(),
+            b"our independent fixture"
+        );
+        assert_eq!(
+            fs::read(&shortcut_foreign).unwrap(),
+            b"foreign independent fixture"
+        );
+        assert!(!ordinal_ignore_case(
+            &long_existing_path(&shortcut_ours)
+                .unwrap()
+                .to_string_lossy(),
+            &long_existing_path(&shortcut_foreign)
+                .unwrap()
+                .to_string_lossy()
+        ));
         let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
         if initialized != RPC_E_CHANGED_MODE {
             initialized.ok().unwrap();
         }
         let _apartment = ComApartment(initialized.is_ok());
         let shortcut = directory.join("Net Lights.lnk");
-        {
+        let save = |target: &Path| {
             let link: IShellLinkW =
                 unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap() };
             unsafe {
-                link.SetPath(PCWSTR(wide(&foreign).as_ptr())).unwrap();
+                link.SetPath(PCWSTR(wide(target).as_ptr())).unwrap();
             }
             let persist: IPersistFile = link.cast().unwrap();
             unsafe {
@@ -785,12 +860,71 @@ mod tests {
                     .Save(PCWSTR(wide(&shortcut).as_ptr()), true)
                     .unwrap();
             }
-        }
+        };
+        save(&shortcut_foreign);
+        let persisted = read_shortcut_target(&shortcut).unwrap().unwrap();
+        let raw_spelling_matches = ordinal_ignore_case(
+            &full_path(&persisted).unwrap().to_string_lossy(),
+            &full_path(&shortcut_foreign).unwrap().to_string_lossy(),
+        );
+        eprintln!(
+            "Shell target: raw spelling matches={raw_spelling_matches}, DOS alias marker={}",
+            persisted.to_string_lossy().contains('~')
+        );
         let original = fs::read(&shortcut).unwrap();
-        remove_owned_shortcut(&shortcut, &ours).unwrap();
+        remove_owned_shortcut(&shortcut, &shortcut_ours).unwrap();
         assert_eq!(fs::read(&shortcut).unwrap(), original);
-        remove_owned_shortcut(&shortcut, &foreign).unwrap();
+        remove_owned_shortcut(&shortcut, &shortcut_foreign).unwrap();
         assert!(!shortcut.exists());
+        let mut short = vec![0u16; 32768];
+        let length = unsafe {
+            windows::Win32::Storage::FileSystem::GetShortPathNameW(
+                PCWSTR(wide(&shortcut_foreign).as_ptr()),
+                Some(&mut short),
+            )
+        } as usize;
+        assert!(length > 0 && length < short.len());
+        let short = PathBuf::from(String::from_utf16(&short[..length]).unwrap());
+        let long = long_existing_path(&shortcut_foreign).unwrap();
+        let distinct_alias = !ordinal_ignore_case(
+            &full_path(&short).unwrap().to_string_lossy(),
+            &full_path(&long).unwrap().to_string_lossy(),
+        );
+        assert!(
+            distinct_alias || std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true"),
+            "Hosted CI didn't supply a distinct DOS alias: the mandatory alias scenario is NOT RUN"
+        );
+        if distinct_alias {
+            save(&short);
+            let persisted_alias = read_shortcut_target(&shortcut).unwrap().unwrap();
+            assert!(persisted_alias.is_absolute());
+            let raw = full_path(&persisted_alias).unwrap();
+            let owner = if ordinal_ignore_case(&raw.to_string_lossy(), &long.to_string_lossy()) {
+                &short
+            } else {
+                &long
+            };
+            assert!(
+                !ordinal_ignore_case(
+                    &raw.to_string_lossy(),
+                    &full_path(owner).unwrap().to_string_lossy()
+                ),
+                "DOS regression must bypass the literal-path fast path"
+            );
+            assert!(ordinal_ignore_case(
+                &long_existing_path(&raw).unwrap().to_string_lossy(),
+                &long_existing_path(owner).unwrap().to_string_lossy()
+            ));
+            let original = fs::read(&shortcut).unwrap();
+            remove_owned_shortcut(&shortcut, &shortcut_ours).unwrap();
+            assert_eq!(fs::read(&shortcut).unwrap(), original);
+            remove_owned_shortcut(&shortcut, owner).unwrap();
+            assert!(!shortcut.exists());
+        } else {
+            eprintln!(
+                "NOT RUN: this filesystem doesn't supply DOS aliases; the Unicode and regular-path ownership assertions did run"
+            );
+        }
         set_auto_start_at(false, &foreign, &subkey).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
@@ -798,6 +932,26 @@ mod tests {
     fn profile_identity_preserves_dotnet_invariant_casing_contract() {
         assert_eq!(upper("ßſıΐᾀ"), "ßSıΐᾈ");
         assert_ne!(upper("Straße"), upper("Strasse"));
+    }
+    #[test]
+    fn shortcut_alias_lookup_rejects_unrelated_or_network_namespaces_before_io() {
+        let executable = Path::new("C:\\NetLights\\NetLights.exe");
+        assert_eq!(
+            shortcut_alias_root(Path::new("c:\\NETLIG~1\\NETLIG~1.EXE"), executable),
+            Some(PathBuf::from("C:\\"))
+        );
+        for target in [
+            "D:\\NetLights\\NetLights.exe",
+            "\\\\offline.invalid\\share\\NetLights.exe",
+            "\\\\?\\UNC\\offline.invalid\\share\\NetLights.exe",
+            "\\\\?\\C:\\NetLights\\NetLights.exe",
+            "relative\\NetLights.exe",
+        ] {
+            assert!(
+                shortcut_alias_root(Path::new(target), executable).is_none(),
+                "{target}"
+            );
+        }
     }
     #[test]
     fn network_filter_ignores_down_loopback_and_tunnel_interfaces() {
