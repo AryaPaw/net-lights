@@ -1,0 +1,21 @@
+[package]
+name = "netlights-native-frameprobe"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+# Deliberately isolated from the product workspace and its lockfile.
+[workspace]
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = [
+    "Graphics_Capture",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_WinRT",
+] }

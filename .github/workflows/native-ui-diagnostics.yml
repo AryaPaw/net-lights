@@ -2,7 +2,7 @@ name: native-ui-diagnostics
 on:
   push:
     branches: [codex/1.7.0-ci]
-    paths: [.github/workflows/native-ui-diagnostics.yml, scripts/native-ui-smoke.py]
+    paths: [.github/workflows/native-ui-diagnostics.yml, scripts/native-ui-smoke.py, 'scripts/fixtures/native-frameprobe/**']
   workflow_dispatch:
 permissions:
   contents: read
@@ -47,6 +47,14 @@ jobs:
           uv python install 3.11
           if ($LASTEXITCODE -ne 0) { throw 'Python bootstrap failed.' }
           scripts/prepare-ci-desktop.ps1 -FunctionalUI -ResultsDirectory TestResults/desktop
+      - name: Inspect capture API availability without starting a session
+        run: |
+          $manifest = 'scripts/fixtures/native-frameprobe/Cargo.toml'
+          cargo test --manifest-path $manifest --locked --release --target-dir artifacts/frameprobe-target -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Capture capability guard tests failed.' }
+          cargo run --manifest-path $manifest --locked --release --target-dir artifacts/frameprobe-target -- --capabilities-only > TestResults/capture-capabilities.json
+          if ($LASTEXITCODE -ne 0) { throw 'Capture capability probe failed its hosted guard.' }
+          Get-Content TestResults/capture-capabilities.json
       - name: Profile complete normal UI with unchanged assertions
         run: |
           scripts/test-native-ui.ps1 -FunctionalUI -Executable artifacts/native-diagnostic-baseline/publish/NetLights.exe -ExpectedSha256 21F3BB43D98FB8DE613FD06A42B816847E9EC40DF3C54DA5B19DD7651E992399 -ResultsDirectory "TestResults/diagnostic-${{ github.run_id }}-${{ github.run_attempt }}"
