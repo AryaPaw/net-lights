@@ -98,6 +98,7 @@ impl Render for Navigation {
                 let chosen = index == selected;
                 let label = tr(cx, page.label());
                 gpui_kit::base::Tab::new(("page", index))
+                    .cursor_pointer()
                     .selected(chosen)
                     .set_position(index + 1, Page::ALL.len())
                     .accessibility_label(label.clone())

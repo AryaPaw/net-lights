@@ -1746,6 +1746,51 @@ class Runner:
         return dict(switches=results,rapid_reversal=True,foreground_owned_sandbox_only=True,
                     smoothness=self.meta["navigation_smoothness"])
 
+    def cursor_affordances(self):
+        # Physical pointer input remains confined to the hosted disposable VM.
+        self.input_policy.assert_pointer_input_allowed()
+        class CursorInfo(ct.Structure):
+            _fields_=[("cbSize",wt.DWORD),("flags",wt.DWORD),("cursor",wt.HANDLE),("position",wt.POINT)]
+        query=self.api.user.GetCursorInfo
+        query.argtypes,query.restype=[ct.POINTER(CursorInfo)],wt.BOOL
+        load=self.api.user.LoadCursorW
+        load.argtypes,load.restype=[wt.HINSTANCE,ct.c_void_p],wt.HANDLE
+        hand=load(None,ct.c_void_p(32649))  # IDC_HAND
+        assert hand, "The system hand cursor is unavailable"
+        results=[]
+        def check(name,active,scroll=False):
+            r=self.visible_control(name) if scroll else self.uia.call("rect",name)
+            target=((r[0]+r[2])//2,(r[1]+r[3])//2)
+            self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,target)
+            def matches():
+                self.input_policy.assert_pointer_input_allowed()
+                assert self.api.user.GetForegroundWindow()==self.uia.hwnd
+                assert self.api.owner(self.uia.hwnd)==self.process.pid
+                assert self.api.owner(self.api.user.WindowFromPoint(wt.POINT(*target)))==self.process.pid
+                information=CursorInfo();information.cbSize=ct.sizeof(information)
+                if not query(ct.byref(information)):
+                    raise ct.WinError(ct.get_last_error())
+                assert information.flags & 1, "The cursor isn't visible"
+                assert (information.position.x,information.position.y)==target, "The isolated pointer moved unexpectedly"
+                return (information.cursor==hand)==active
+            wait_for(matches,.75,f"Cursor affordance: {name}")
+            time.sleep(.08)
+            assert matches(), f"Cursor affordance changed after settling: {name}"
+            results.append(dict(control=name,hand=active))
+        self.page("Состояние")
+        check("Локации",True)
+        check("Проверить сейчас",True)
+        check("Увеличивать короткие отметки",True,True)
+        self.page("Параметры")
+        check("Интервал доступности",True,True)
+        check("Определять страну",True,True)
+        assert not self.setting("geoCountryDetectionEnabled"), "Disabled cursor fixture requires detection off"
+        check("Значок страны",False,True)
+        check("Автозапуск",False,True)
+        self.page("О программе")
+        check("Исходный код",True,True)
+        return results
+
     def fluent_controls(self):
         assert self.input_policy, "Fluent interaction requires the isolated input policy"
         self.input_policy.assert_identity()
@@ -1827,9 +1872,10 @@ class Runner:
             time.sleep(.5)
             wait_for(lambda:self.api.outer(hwnd)==original,5,"Fluent test restored exact owned window geometry")
             wait_for(lambda:self.setting("windowWidth")==original_width and self.setting("windowHeight")==original_height,5,"Restored window dimensions persisted")
+        cursors=self.cursor_affordances()
         self.page("Состояние")
         assert self.process.pid==pid and self.process.poll() is None
-        return dict(tabs=heights,compact_buttons=24,arrow_home_end=True,about_version=version,clipboard_in_guest=True,settings_anchors=True,narrow=True,navigation_motion=motion)
+        return dict(tabs=heights,compact_buttons=24,arrow_home_end=True,about_version=version,clipboard_in_guest=True,settings_anchors=True,narrow=True,navigation_motion=motion,cursor_affordances=cursors)
 
     def overview_interactions(self):
         from PIL import Image

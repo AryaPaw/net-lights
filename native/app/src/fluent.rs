@@ -1,6 +1,6 @@
 //! Shared Fluent typography, surfaces and GPUI Kit control metrics.
 use gpui_kit::{
-    component::{ActiveTheme, Sizable, button::Button},
+    component::{ActiveTheme, Disableable, Sizable, button::Button, switch::Switch},
     *,
 };
 
@@ -39,6 +39,7 @@ impl AssetSource for Assets {
 
 pub fn button(id: impl Into<ElementId>) -> Button {
     Button::new(id)
+        .cursor_pointer()
         .large()
         .h(px(BUTTON))
         .px(px(12.))
@@ -48,8 +49,27 @@ pub fn button(id: impl Into<ElementId>) -> Button {
 pub fn compact_button(id: impl Into<ElementId>) -> Button {
     button(id).h(px(COMPACT_BUTTON)).px(px(8.))
 }
+pub fn switch(id: impl Into<ElementId>) -> Switch {
+    Switch::new(id).cursor_pointer()
+}
+
+/// Keep the affordance consistent with the same state that blocks interaction.
+pub trait ControlCursor: Disableable + Styled {
+    fn disabled_with_cursor(self, disabled: bool) -> Self {
+        let control = self.disabled(disabled);
+        if disabled {
+            control.cursor_default()
+        } else {
+            control.cursor_pointer()
+        }
+    }
+}
+impl ControlCursor for Button {}
+impl ControlCursor for Switch {}
+
 pub fn input<T: Styled>(control: T) -> T {
     control
+        .cursor_pointer()
         .h(px(BUTTON))
         .px(px(12.))
         .text_size(px(BODY))

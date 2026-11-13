@@ -1,7 +1,8 @@
 //! Two availability lanes share one UTC cursor, selection and time axis.
 use super::*;
 use crate::dashboard::{self, EventKind, HistoryEvent, Stats, TimeRange};
-use gpui_kit::component::{Disableable, button::ButtonVariants};
+use crate::fluent::ControlCursor;
+use gpui_kit::component::button::ButtonVariants;
 
 pub enum TimelineEvent {
     Select(HistoryEvent),
@@ -668,7 +669,7 @@ impl Render for AvailabilityTimeline {
                                     "dashboard-probe-{id}"
                                 )))
                                 .ghost()
-                                .disabled(
+                                .disabled_with_cursor(
                                     e.in_flight
                                         || self.live.paused
                                         || self.live.monitor_error.is_some(),

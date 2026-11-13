@@ -267,7 +267,7 @@ impl NetLights {
                 .find(|e| !e.in_flight)
                 .map(|e| e.endpoint.id.clone());
             card=card.child(div().mt_3().flex().items_center().gap_3().flex_wrap()
-                .child(crate::fluent::compact_button("event-diagnose-now").label(lang.choose("Диагностика сейчас","Diagnose now")).disabled(endpoint.is_none()||self.state.monitor.paused||self.state.monitor.monitor_error.is_some())
+                .child(crate::fluent::compact_button("event-diagnose-now").label(lang.choose("Диагностика сейчас","Diagnose now")).disabled_with_cursor(endpoint.is_none()||self.state.monitor.paused||self.state.monitor.monitor_error.is_some())
                     .on_click(cx.listener(move |this,_,_,cx|{if let Some(id)=&endpoint {this.send(Command::Diagnose(id.clone()),cx);}})))
                 .child(muted(lang.choose("Проверка текущего состояния. Исторические HTTP-ответы и задержки не сохранялись.","Checks the current connection. Historical HTTP responses and response times weren't recorded."),cx)));
         }
@@ -323,7 +323,7 @@ impl NetLights {
         let mut history=panel(cx).child(header)
             .child(div().mt_4().child(self.timeline.clone()))
             .child(div().mt_4().pt_3().border_t_1().border_color(cx.theme().border.opacity(0.65)).flex().items_center().justify_between().gap_3().flex_wrap().child(legend(cx))
-                .child(Switch::new("short-events").checked(self.settings.emphasize_short_statuses).focus_ring(false).label(tr(cx,"Увеличивать короткие отметки"))
+                .child(crate::fluent::switch("short-events").checked(self.settings.emphasize_short_statuses).focus_ring(false).label(tr(cx,"Увеличивать короткие отметки"))
                     .tooltip(tr(cx,"Увеличивает короткие события только на графике. В подсказке показана фактическая длительность."))
                     .on_change(cx.listener(|this,value,_,cx|{this.settings.emphasize_short_statuses = *value;this.save_settings(cx);this.refresh_charts(cx);}))))
             .child(div().mt_3().text_size(px(11.)).text_color(cx.theme().muted_foreground).child(lang.choose("Выделите участок мышью, чтобы увеличить. Нажмите на полосу или событие для подробностей.","Drag across a lane to zoom. Click a lane or an event for details.")));

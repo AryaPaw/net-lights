@@ -82,7 +82,7 @@ impl NetLights {
                                     },
                                 ))
                                 .flex_shrink_0()
-                                .disabled(endpoint.in_flight)
+                                .disabled_with_cursor(endpoint.in_flight)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.send(Command::Diagnose(id.clone()), cx)
                                 })),
@@ -120,7 +120,7 @@ impl NetLights {
                                 "Сохранить диагностику"
                             },
                         ))
-                        .disabled(self.state.export_busy)
+                        .disabled_with_cursor(self.state.export_busy)
                         .on_click(cx.listener(|this, _, _, cx| this.send(Command::Export, cx))),
                 )
                 .child(muted(

@@ -42,7 +42,7 @@ impl NetLights {
             )
             .child(
                 panel(cx).child(
-                    Switch::new("debug-sources")
+                    crate::fluent::switch("debug-sources")
                         .checked(self.settings.show_location_debug_sources)
                         .label(tr(cx, "Debug: источники определения"))
                         .on_change(cx.listener(|this, value, _, cx| {

@@ -1,18 +1,18 @@
 use crate::{
     backend::{Backend, Command, State},
     charts::{self, Chart},
+    fluent::ControlCursor,
     text::{UiLanguage, language, tr},
     tray::{OsEvent, TrayHost, TrayState},
 };
 use chrono::{Duration as ChronoDuration, Local, Utc};
 use gpui_kit::{
     component::{
-        ActiveTheme, Disableable, FocusableExt, IndexPath, Sizable, Theme, ThemeMode, TitleBar,
+        ActiveTheme, FocusableExt, IndexPath, Sizable, Theme, ThemeMode, TitleBar,
         button::ButtonVariants,
         scroll::ScrollableElement,
         searchable_list::SearchableVec,
         select::{Select, SelectEvent, SelectState},
-        switch::Switch,
     },
     prelude::*,
     *,

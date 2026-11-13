@@ -65,7 +65,7 @@ impl NetLights {
             .child(setting_row(
                 "Определять страну",
                 "Онлайн по публичному IP; локальные базы доступны для сравнения.",
-                Switch::new("geo-enabled")
+                crate::fluent::switch("geo-enabled")
                     .checked(self.settings.geo_country_detection_enabled)
                     .accessibility_label(tr(cx, "Определять страну"))
                     .on_change(cx.listener(|this, value, _, cx| {
@@ -80,9 +80,9 @@ impl NetLights {
             .child(setting_row(
                 "Значок страны в трее",
                 "История сохраняется независимо от значка.",
-                Switch::new("geo-icon")
+                crate::fluent::switch("geo-icon")
                     .checked(self.settings.geo_country_icon_enabled)
-                    .disabled(!self.settings.geo_country_detection_enabled)
+                    .disabled_with_cursor(!self.settings.geo_country_detection_enabled)
                     .accessibility_label(tr(cx, "Значок страны"))
                     .on_change(cx.listener(|this, value, _, cx| {
                         this.settings.geo_country_icon_enabled = *value;
@@ -115,11 +115,11 @@ impl NetLights {
                 } else {
                     "Запускать вместе с Windows."
                 },
-                Switch::new("autostart")
+                crate::fluent::switch("autostart")
                     .checked(
                         self.settings.auto_start && !self.state.isolated && self.state.installed,
                     )
-                    .disabled(self.state.isolated || !self.state.installed)
+                    .disabled_with_cursor(self.state.isolated || !self.state.installed)
                     .accessibility_label(tr(cx, "Автозапуск"))
                     .on_change(cx.listener(|this, value, _, cx| {
                         this.settings.auto_start = *value;
@@ -134,13 +134,13 @@ impl NetLights {
                 } else {
                     "Обновления с проверкой и восстановлением."
                 },
-                Switch::new("auto-update")
+                crate::fluent::switch("auto-update")
                     .checked(
                         self.settings.auto_update_enabled
                             && !self.state.isolated
                             && self.state.installed,
                     )
-                    .disabled(self.state.isolated || !self.state.installed)
+                    .disabled_with_cursor(self.state.isolated || !self.state.installed)
                     .accessibility_label(tr(cx, "Автообновление"))
                     .on_change(cx.listener(|this, value, _, cx| {
                         this.settings.auto_update_enabled = *value;
@@ -196,7 +196,7 @@ impl NetLights {
                     .child(
                         crate::fluent::button("check-update")
                             .label(tr(cx, "Проверить обновление"))
-                            .disabled(self.state.update_busy)
+                            .disabled_with_cursor(self.state.update_busy)
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.send(Command::CheckUpdates, cx)),
                             ),
