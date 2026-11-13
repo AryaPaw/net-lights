@@ -64,6 +64,19 @@ def navigation_frame_evidence(initial, finish, frames, scale, coverage_instrumen
                 smoothness="NOT RUN" if coverage_instrumented else "PASS")
 
 
+def sample_navigation_frames(sample, started):
+    frames=[]
+    while time.monotonic()-started<.8:
+        position,image=sample()
+        frames.append((time.monotonic()-started,position,image))
+        time.sleep(.012)
+    # Scheduling can leave the last loop frame before the observation boundary.
+    # Read that boundary once; don't retry or wait for the desired position.
+    position,image=sample()
+    frames.append((time.monotonic()-started,position,image))
+    return frames
+
+
 def fitted_outer(original, work, width, height):
     x,y,w,h=work
     width,height=min(int(width),w),min(int(height),h)
@@ -1522,11 +1535,7 @@ class Runner:
             initial,_=sample()
             started=time.monotonic()
             click(target)
-            frames=[]
-            while time.monotonic()-started<.8:
-                position,image=sample()
-                frames.append((time.monotonic()-started,position,image))
-                time.sleep(.012)
+            frames=sample_navigation_frames(sample,started)
             finish=center(target)
             (self.output/f"navigation-motion-{len(results)}-trace.json").write_text(
                 json.dumps(dict(initial=initial,target=finish,samples=[dict(seconds=t,x=x) for t,x,_ in frames]),indent=2),encoding="utf-8")
@@ -2521,6 +2530,8 @@ def profile_snapshot_selftest():
 
 
 def navigation_motion_selftest():
+    from unittest.mock import patch
+
     smooth=[(0.,10.),(.05,30.),(.1,60.),(.15,90.),(.25,110.)]
     sparse=[(0.,10.),(.312,37.),(.437,87.),(.531,110.)]
     late=[(0.,10.),(.51,30.),(.56,60.),(.61,90.),(.7,110.)]
@@ -2542,6 +2553,27 @@ def navigation_motion_selftest():
                 pass
             else:
                 raise AssertionError("Instrumented mode bypassed functional navigation evidence")
+    for final in (110.,104.):
+        now=[0.]
+        readings=iter([(.1,10.),(.2,30.),(.3,60.),(.718,90.),(.9,final)])
+        captures=[]
+        def sample():
+            now[0],position=next(readings)
+            image=object()
+            captures.append(image)
+            return position,image
+        def pause(_):
+            now[0]=.85 if now[0]>=.7 else now[0]+.012
+        with patch.object(time,"monotonic",lambda:now[0]),patch.object(time,"sleep",pause):
+            frames=sample_navigation_frames(sample,0.)
+        assert len(captures)==5 and frames[-2][0]==.718 and frames[-1][0]==.9
+        assert frames[-1][2] is captures[-1], "The boundary capture lost its actual image"
+        try:
+            evidence=navigation_frame_evidence(10,110,[(t,x) for t,x,_ in frames],1)
+        except AssertionError:
+            assert final==104., "The observer validated a stale pre-boundary frame"
+        else:
+            assert final==110. and evidence["smoothness"]=="PASS", "A wrong final frame was accepted"
     print("RUN - PASS: ordinary motion thresholds and instrumented functional evidence stay separate; no OS calls")
 
 
