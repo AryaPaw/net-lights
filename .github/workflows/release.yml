@@ -53,6 +53,11 @@ jobs:
       - name: Verify build, tests and mandatory offline coverage
         shell: pwsh
         run: scripts/verify.ps1 -FunctionalUI -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Require navigation measurement before packaging and publication
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/publish/NetLights.exe").Path
+          scripts/test-native-ui.ps1 -FunctionalUI -NavigationMeasurement -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/motion"
       - name: Upload test and coverage results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

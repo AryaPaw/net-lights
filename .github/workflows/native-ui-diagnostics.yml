@@ -41,7 +41,7 @@ jobs:
       - name: Run unchanged functional UI assertions on the current executable
         run: |
           $exe = (Resolve-Path artifacts/native-diagnostic/NetLights.exe).Path
-          scripts/test-native-ui.ps1 -FunctionalUI -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory TestResults/diagnostic
+          scripts/test-native-ui.ps1 -FunctionalUI -NavigationMeasurement -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory TestResults/diagnostic
       - name: Upload diagnostic evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

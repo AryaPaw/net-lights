@@ -200,6 +200,44 @@ jobs:
         with:
           name: upgrade-${{ matrix.scenario }}-${{ matrix.release }}
           path: artifacts/ci-upgrade-*
+  motion:
+    needs: windows
+    if: ${{ !cancelled() && needs.windows.outputs.native_package == 'true' }}
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      CI: true
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: '0.11.7'
+          enable-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: native-upgrade-payload
+          path: artifacts/motion-candidate
+      - name: Prepare isolated motion measurement
+        run: |
+          uv python install 3.11
+          if ($LASTEXITCODE -ne 0) { throw 'Python bootstrap failed.' }
+          scripts/prepare-ci-desktop.ps1 -FunctionalUI -ResultsDirectory TestResults/desktop
+      - name: Require motion evidence from this run's exact normal executable
+        run: |
+          $exe = (Resolve-Path artifacts/motion-candidate/publish/NetLights.exe).Path
+          scripts/test-native-ui.ps1 -FunctionalUI -NavigationMeasurement -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory TestResults/motion
+      - name: Upload motion evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: motion-results
+          path: |
+            TestResults
+            !TestResults/**/profile/**
+          if-no-files-found: error
   resources:
     if: github.ref == 'refs/heads/codex/1.7.0-ci' && github.event_name == 'workflow_dispatch' && inputs.resource_run
     runs-on: windows-2022

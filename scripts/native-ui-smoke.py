@@ -1306,19 +1306,26 @@ def validate_resource_mode(enabled, functional, seconds, country, maximum, cover
         raise ValueError("Hosted resource evidence requires a normal exe, one hour, both databases, maximum history and an actual hosted input policy")
 
 
+def validate_navigation_mode(functional, coverage, measure):
+    if type(measure) is not bool or (coverage and measure) or (not functional and not coverage and not measure):
+        raise ValueError("Navigation mode must preserve native measurement and keep coverage unmeasured")
+
+
 class Runner:
-    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None, coverage_instrumented=False, frameprobe=None, frameprobe_sha=None, hosted_resource=False):
+    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None, coverage_instrumented=False, frameprobe=None, frameprobe_sha=None, hosted_resource=False, measure_navigation=True):
         if not __debug__:
             raise RuntimeError("Проверки требуют включённых assert: уберите -O и PYTHONOPTIMIZE")
         if functional_evidence and (measure_seconds or enable_country):
             raise ValueError("Функциональный offline UI-режим не допускает ресурсный прогон или публичное Geo-определение")
         validate_resource_mode(hosted_resource, functional_evidence, measure_seconds, enable_country, maximum, coverage_instrumented, input_policy is not None and input_policy.ci)
+        validate_navigation_mode(functional_evidence, coverage_instrumented, measure_navigation)
         if hosted_resource:
             input_policy.assert_pointer_input_allowed()
         self.exe, self.output, self.profile = exe, output, output/"profile"
         self.api, self.process, self.uia = Win32(), None, None
         self.measure_seconds, self.results, self.captures = measure_seconds, [], []
         self.functional_evidence=functional_evidence
+        self.measure_navigation=measure_navigation
         self.compact_hosted_geometry=functional_evidence or hosted_resource
         self.coverage_instrumented=coverage_instrumented
         self.frameprobe,self.frameprobe_sha=frameprobe,frameprobe_sha
@@ -1336,6 +1343,7 @@ class Runner:
             assertions_enabled=__debug__)
         self.meta["evidenceLevel"] = "GitHub-hosted Windows resource measurement" if hosted_resource else ("functional" if functional_evidence else "Windows 11 native visual")
         self.meta["visualAcceptance"] = "NOT RUN" if functional_evidence or hosted_resource else "requires screenshot review"
+        self.meta["navigation_measurement_requested"]=measure_navigation
         self.meta["coverage_instrumented"] = coverage_instrumented
         self.meta["navigation_capture_workers"] = []
         self.meta["navigation_frameprobe_sha256"] = frameprobe_sha
@@ -1900,7 +1908,11 @@ class Runner:
             r=next(r["rect"] for r in tabs if r["kind"]=="Button" and r["name"]==name and r["visible"])
             assert abs((r[3]-r[1])/scale-32)<=1.1, f"Toolbar button must match the tab height: {name}"
         self.capture("fluent-navigation-metrics")
-        motion=self.navigation_motion(tabs)
+        if self.measure_navigation:
+            motion=self.navigation_motion(tabs)
+        else:
+            self.meta["navigation_smoothness"]="NOT RUN"
+            motion=dict(smoothness="NOT RUN",reason="Measured separately on the normal executable")
         self.uia.call("invoke","Состояние")
         for name in (*PAGES[1:],PAGES[0]):
             assert self.api.owner(hwnd)==pid
@@ -2695,6 +2707,15 @@ class Runner:
 
 
 def uia_retry_selftest():
+    for mode in [(False,False,True),(True,False,False),(True,False,True),(True,True,False),(False,True,False)]:
+        validate_navigation_mode(*mode)
+    for mode in [(False,False,False),(True,True,True),(True,False,1),(True,True,"false")]:
+        try:
+            validate_navigation_mode(*mode)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("An invalid navigation measurement mode was accepted")
     valid = dict(enabled=True, functional=False, seconds=3600, country=True, maximum=True, coverage=False, hosted=True)
     validate_resource_mode(**valid)
     for field, value in [("functional", True), ("seconds", 20), ("country", False), ("maximum", False), ("coverage", True), ("hosted", False)]:
@@ -3160,6 +3181,8 @@ def main():
     parser.add_argument("--maximum-history", action="store_true", help="70 000 наблюдений, 70 000 периодов стран и 10 000 интервалов доступности")
     parser.add_argument("--functional-evidence", action="store_true",
                         help="Функциональные native UI-проверки на Windows Server; визуальная приёмка Windows 11 остаётся NOT RUN")
+    parser.add_argument("--navigation-measurement", action="store_true",
+                        help="Отдельная обязательная проверка плавности на обычном exe")
     parser.add_argument("--hosted-resource-evidence", action="store_true",
                         help="Часовой ресурсный прогон на GitHub-hosted Windows; визуальная приёмка Windows 11 остаётся NOT RUN")
     parser.add_argument("--coverage-instrumented", action="store_true",
@@ -3167,6 +3190,8 @@ def main():
     parser.add_argument("--enable-country-for-measurement", action="store_true",
                         help="После synthetic-снимков включить настоящий IP-опрос и обе базы для ресурсного прогона")
     args = parser.parse_args()
+    if args.navigation_measurement and (not args.functional_evidence or args.coverage_instrumented):
+        parser.error("--navigation-measurement requires non-instrumented --functional-evidence")
     if args.enable_country_for_measurement and (not args.measure_seconds or args.inventory_only):
         parser.error("--enable-country-for-measurement требует --measure-seconds > 0 и полный UI-прогон")
     if args.functional_evidence and (args.measure_seconds or args.enable_country_for_measurement):
@@ -3181,7 +3206,7 @@ def main():
     except (OSError, ValueError) as error:
         parser.error(str(error))
     output.mkdir(parents=True, exist_ok=False)
-    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy, args.coverage_instrumented,frameprobe,args.frameprobe_sha256,args.hosted_resource_evidence)
+    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy, args.coverage_instrumented,frameprobe,args.frameprobe_sha256,args.hosted_resource_evidence,not args.coverage_instrumented and (not args.functional_evidence or args.navigation_measurement))
     runner.run(args.inventory_only)
     print(json.dumps(dict(result="NOT RUN" if runner.measurement_blocked else "PASS", output=str(output), screenshots=len(runner.captures), resource_seconds=args.measure_seconds), ensure_ascii=False), flush=True)
     if runner.measurement_blocked:

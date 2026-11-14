@@ -117,6 +117,7 @@ function Get-CompletedGeoPid($Evidence,[int]$Seconds) {
     return [int]$checks[0].detail.pid
 }
 function Assert-FunctionalEvidence($Evidence,[string]$ExpectedHash,[string]$EndpointFile,[switch]$RequireLocale) {
+    if($Evidence.metadata.navigation_measurement_requested -isnot [bool] -or $Evidence.metadata.navigation_measurement_requested -or @($Evidence.metadata.navigation_capture_workers).Count) {throw 'Coverage UI must not claim navigation measurements or capture workers.'}
     if($Evidence.metadata.evidenceLevel -cne 'functional' -or $Evidence.metadata.visualAcceptance -cne 'NOT RUN') {throw 'Functional UI evidence must explicitly leave visual acceptance NOT RUN.'}
     if($Evidence.metadata.coverage_instrumented -isnot [bool] -or -not $Evidence.metadata.coverage_instrumented -or
         $Evidence.metadata.navigation_smoothness -cne 'NOT RUN') {throw 'Coverage UI must identify instrumentation and leave navigation smoothness NOT RUN.'}
@@ -245,14 +246,14 @@ function Invoke-RunnerControls {
     @{geoCountryDetectionEnabled=$false;geoCountryIconEnabled=$false;autoStart=$false;autoUpdateEnabled=$false}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $probe 'settings.json') -Encoding utf8
     $functionalEndpoints=@(foreach($group in @('Ru','World')) {foreach($i in 0..6) {@{id="$group-$i";group=$group;uri="https://127.0.0.1:1/$group-$i";infrastructureId="local-$group-$i"}}})
     $functionalEndpoints|ConvertTo-Json|Set-Content -LiteralPath $functionalEndpointFile -Encoding utf8
-    $functional=@{metadata=@{fixture=@{offline_availability_endpoints=$true};coverage_instrumented=$true;navigation_smoothness='NOT RUN';locale_required=$false;evidenceLevel='functional';visualAcceptance='NOT RUN';windows_build=20348;windows_product_type=3;country_measurement_requested=$false;measured_seconds=0;assertions_enabled=$true;exe_sha256=$fixtureHash;pids=@(123,124,125,126)};checks=@();cleanup_errors=@();resource_errors=@();resource_samples=1}
+    $functional=@{metadata=@{fixture=@{offline_availability_endpoints=$true};coverage_instrumented=$true;navigation_measurement_requested=$false;navigation_capture_workers=@();navigation_smoothness='NOT RUN';locale_required=$false;evidenceLevel='functional';visualAcceptance='NOT RUN';windows_build=20348;windows_product_type=3;country_measurement_requested=$false;measured_seconds=0;assertions_enabled=$true;exe_sha256=$fixtureHash;pids=@(123,124,125,126)};checks=@();cleanup_errors=@();resource_errors=@();resource_samples=1}
     Assert-Throws {Assert-FunctionalEvidence $functional $fixtureHash $functionalEndpointFile}
     foreach($name in @('overview-linked-selection-zoom-and-addresses','fluent-tabs-about-and-settings-navigation','physical-outer-geometry-reset-and-restart','native-caption-controls-and-hittest','default-debug-off','dropdown-wheel-does-not-change-settings','X-hide-and-show-local-same-PID','Debug-on-and-off-survive-restart','history-end-and-single-scroll-owner')) {$functional.checks+=@{check=$name;result='PASS'}}
     foreach($page in @('Состояние','Локации')) {foreach($hours in @(1,3,6,12,24,72,120,168)) {$functional.checks+=@{check="$page-${hours}h";result='PASS'}}}
     $functional.checks+=@{check='resource-measurement';result='NOT RUN'}
     $functional.checks[1].detail=@{navigation_motion=@{smoothness='NOT RUN'}}
     $validatedPids=@(Assert-FunctionalEvidence $functional $fixtureHash $functionalEndpointFile)
-    foreach($kind in @('instrumented-false','instrumented-type','smoothness','motion-smoothness','missing-mode','missing-smoothness')) {
+    foreach($kind in @('instrumented-false','instrumented-type','smoothness','motion-smoothness','missing-mode','missing-smoothness','navigation-true','navigation-type','navigation-workers')) {
         $bad=ConvertFrom-Json (ConvertTo-Json $functional -Depth 12)
         switch($kind) {
             'instrumented-false'{$bad.metadata.coverage_instrumented=$false}
@@ -261,6 +262,9 @@ function Invoke-RunnerControls {
             'motion-smoothness'{$bad.checks[1].detail.navigation_motion.smoothness='PASS'}
             'missing-mode'{$bad.metadata.PSObject.Properties.Remove('coverage_instrumented')}
             'missing-smoothness'{$bad.metadata.PSObject.Properties.Remove('navigation_smoothness')}
+            'navigation-true'{$bad.metadata.navigation_measurement_requested=$true}
+            'navigation-type'{$bad.metadata.navigation_measurement_requested='false'}
+            'navigation-workers'{$bad.metadata.navigation_capture_workers=@(@{pid=100})}
         }
         Assert-Throws {Assert-FunctionalEvidence $bad $fixtureHash $functionalEndpointFile}
     }

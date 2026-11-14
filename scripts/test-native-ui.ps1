@@ -4,6 +4,7 @@ param(
     [string]$ResultsDirectory = ('TestResults/native-ui-isolated-' + [Guid]::NewGuid().ToString('N')),
     [string]$ExpectedSha256,
     [switch]$FunctionalUI,
+    [switch]$NavigationMeasurement,
     [switch]$HostedResource,
     [string]$RawProfileDirectory,
     [switch]$CoverageInstrumented,
@@ -192,14 +193,16 @@ function Assert-Amd64Pe([string]$Path) {
         if($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664){throw 'Runtime library is not an AMD64 PE.'}
     }finally{$reader.Dispose()}
 }
-function Assert-UiEvidence($Evidence,[string]$Scope,[string]$Nonce,[string]$AppHash,[string]$RunnerHash,[bool]$ExpectCoverageInstrumented=$false,[bool]$ExpectHostedResource=$false) {
+function Assert-UiEvidence($Evidence,[string]$Scope,[string]$Nonce,[string]$AppHash,[string]$RunnerHash,[bool]$ExpectCoverageInstrumented=$false,[bool]$ExpectHostedResource=$false,[bool]$ExpectNavigationMeasurement=$true) {
     if($ExpectHostedResource) {
         $measurement=@($Evidence.checks | Where-Object check -CEQ 'resource-measurement')
         if($Evidence.metadata.evidenceLevel -cne 'GitHub-hosted Windows resource measurement' -or $Evidence.metadata.visualAcceptance -cne 'NOT RUN' -or
             $Evidence.metadata.measured_seconds -ne 3600 -or $Evidence.metadata.country_measurement_requested -cne $true -or
             $measurement.Count -ne 1 -or $measurement[0].result -cne 'PASS') {throw 'The requested full hosted resource evidence is missing.'}
     }
-    $smoothness=if($ExpectCoverageInstrumented){'NOT RUN'}else{'PASS'}
+    $smoothness=if($ExpectCoverageInstrumented -or -not $ExpectNavigationMeasurement){'NOT RUN'}else{'PASS'}
+    if($Evidence.metadata.navigation_measurement_requested -isnot [bool] -or $Evidence.metadata.navigation_measurement_requested -ne $ExpectNavigationMeasurement) {throw 'Navigation measurement evidence differs from the requested mode.'}
+    if(-not $ExpectNavigationMeasurement -and @($Evidence.metadata.navigation_capture_workers).Count) {throw 'Functional evidence must not claim navigation capture workers.'}
     if($Evidence.metadata.coverage_instrumented -isnot [bool] -or $Evidence.metadata.coverage_instrumented -ne $ExpectCoverageInstrumented -or
        $Evidence.metadata.navigation_smoothness -cne $smoothness) {throw 'UI coverage mode or navigation smoothness evidence differs from the requested run.'}
     if($Evidence.metadata.exe_sha256 -ine $AppHash -or $Evidence.metadata.physical_input -cne $true -or
@@ -234,7 +237,7 @@ function Assert-FrameprobeEvidence($Evidence,[string]$ExpectedHash) {
 }
 
 if($SelfTest) {
-    if($Executable -or $ExpectedSha256 -or $RawProfileDirectory -or $FunctionalUI -or $HostedResource -or $CoverageInstrumented -or $MeasureSeconds -or $EnableCountryForMeasurement -or $MaximumHistory) {throw 'SelfTest cannot be combined with a UI run.'}
+    if($Executable -or $ExpectedSha256 -or $RawProfileDirectory -or $FunctionalUI -or $NavigationMeasurement -or $HostedResource -or $CoverageInstrumented -or $MeasureSeconds -or $EnableCountryForMeasurement -or $MaximumHistory) {throw 'SelfTest cannot be combined with a UI run.'}
     & uv run --offline --cache-dir (Join-Path $repository 'artifacts/uv-cache') --python 3.11 python (Join-Path $PSScriptRoot 'native-ui-smoke.py') --self-test-uia
     if($LASTEXITCODE -ne 0){throw 'Read-only UIA retry controls FAIL.'}
     $rejected=$false;try{Assert-ArtifactPath (Join-Path $repository 'native')|Out-Null}catch{$rejected=$true}
@@ -250,7 +253,7 @@ if($SelfTest) {
     $functionText=${function:Assert-UiEvidence}.ToString()
     if(-not $functionText.Contains("'locale-English-restart-system-Russian'") -or -not $functionText.Contains("'state-no-duplicate-provider-world'")){throw 'Locale acceptance guards are missing.'}
     $good=@{metadata=@{exe_sha256=('a'*64);physical_input=$true;input_isolation=@{scope='Windows Sandbox';nonce=('b'*32);app_sha256=('a'*64);runner_sha256=('c'*64)};
-        fixture=@{offline_availability_endpoints=$true;live_country_detection=$false};coverage_instrumented=$false;navigation_smoothness='PASS';assertions_enabled=$true;locale_required=$true;locale_verified=$true;pids=@(1,2,3,4,5)};
+        fixture=@{offline_availability_endpoints=$true;live_country_detection=$false};coverage_instrumented=$false;navigation_measurement_requested=$true;navigation_capture_workers=@();navigation_smoothness='PASS';assertions_enabled=$true;locale_required=$true;locale_verified=$true;pids=@(1,2,3,4,5)};
         cleanup_errors=@();resource_errors=@();resource_samples=1;checks=@()}
     $names=@('fluent-tabs-about-and-settings-navigation','physical-outer-geometry-reset-and-restart','native-caption-controls-and-hittest','default-debug-off','dropdown-wheel-does-not-change-settings','X-hide-and-show-local-same-PID','Debug-on-and-off-survive-restart','history-end-and-single-scroll-owner','state-no-duplicate-provider-world','locale-English-restart-system-Russian')
     foreach($page in @('Состояние','Локации')){foreach($hours in @(1,3,6,12,24,72,120,168)){$names+="$page-${hours}h"}}
@@ -276,7 +279,7 @@ if($SelfTest) {
         $rejected=$false;try{Assert-UiEvidence $bad 'GitHub-hosted Windows VM' '' ('a'*64) ('c'*64) $false $true}catch{$rejected=$true}
         if(-not $rejected){throw "Invalid hosted resource evidence accepted: $kind"}
     }
-    foreach($kind in @('nonce','hash','physical','pid','missing-check','failed-check','locale','cleanup','instrumented-mode','instrumented-type','smoothness','motion-smoothness')) {
+    foreach($kind in @('nonce','hash','physical','pid','missing-check','failed-check','locale','cleanup','instrumented-mode','instrumented-type','smoothness','motion-smoothness','navigation-false','navigation-type','navigation-missing')) {
         $bad=ConvertFrom-Json (ConvertTo-Json $good -Depth 12)
         switch($kind){
             'nonce'{$bad.metadata.input_isolation.nonce='different'}
@@ -291,15 +294,33 @@ if($SelfTest) {
             'instrumented-type'{$bad.metadata.coverage_instrumented='false'}
             'smoothness'{$bad.metadata.navigation_smoothness='NOT RUN'}
             'motion-smoothness'{$bad.checks[0].detail.navigation_motion.smoothness='NOT RUN'}
+            'navigation-false'{$bad.metadata.navigation_measurement_requested=$false}
+            'navigation-type'{$bad.metadata.navigation_measurement_requested='true'}
+            'navigation-missing'{$bad.metadata.PSObject.Properties.Remove('navigation_measurement_requested')}
         }
         $rejected=$false;try{Assert-UiEvidence $bad 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64)}catch{$rejected=$true}
         if(-not $rejected){throw "Invalid $kind evidence was accepted."}
     }
     $instrumented=ConvertFrom-Json (ConvertTo-Json $good -Depth 12)
     $instrumented.metadata.coverage_instrumented=$true
+    $instrumented.metadata.navigation_measurement_requested=$false
     $instrumented.metadata.navigation_smoothness='NOT RUN'
     $instrumented.checks[0].detail.navigation_motion.smoothness='NOT RUN'
-    Assert-UiEvidence $instrumented 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64) $true
+    Assert-UiEvidence $instrumented 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64) -ExpectCoverageInstrumented $true -ExpectNavigationMeasurement $false
+    $functional=ConvertFrom-Json (ConvertTo-Json $instrumented -Depth 12)
+    $functional.metadata.coverage_instrumented=$false
+    Assert-UiEvidence $functional 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64) -ExpectNavigationMeasurement $false
+    foreach($kind in @('navigation-true','navigation-type','claimed-pass','claimed-workers')) {
+        $bad=ConvertFrom-Json (ConvertTo-Json $functional -Depth 12)
+        switch($kind) {
+            'navigation-true'{$bad.metadata.navigation_measurement_requested=$true}
+            'navigation-type'{$bad.metadata.navigation_measurement_requested='false'}
+            'claimed-pass'{$bad.metadata.navigation_smoothness='PASS';$bad.checks[0].detail.navigation_motion.smoothness='PASS'}
+            'claimed-workers'{$bad.metadata.navigation_capture_workers=@(@{pid=100})}
+        }
+        $rejected=$false;try{Assert-UiEvidence $bad 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64) -ExpectNavigationMeasurement $false}catch{$rejected=$true}
+        if(-not $rejected){throw "Functional UI accepted false measurement evidence: $kind"}
+    }
     foreach($kind in @('instrumented-mode','smoothness','motion-smoothness','missing-mode','missing-smoothness')) {
         $bad=ConvertFrom-Json (ConvertTo-Json $instrumented -Depth 12)
         switch($kind){
@@ -309,7 +330,7 @@ if($SelfTest) {
             'missing-mode'{$bad.metadata.PSObject.Properties.Remove('coverage_instrumented')}
             'missing-smoothness'{$bad.metadata.PSObject.Properties.Remove('navigation_smoothness')}
         }
-        $rejected=$false;try{Assert-UiEvidence $bad 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64) $true}catch{$rejected=$true}
+        $rejected=$false;try{Assert-UiEvidence $bad 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64) -ExpectCoverageInstrumented $true -ExpectNavigationMeasurement $false}catch{$rejected=$true}
         if(-not $rejected){throw "Invalid instrumented $kind evidence was accepted."}
     }
     $capture=@{metadata=@{navigation_frameprobe_sha256=('d'*64);navigation_capture_workers=@(1..3|ForEach-Object {@{pid=$_;sha256=('d'*64);mode='Windows.Graphics.Capture';cleanup='PASS';exit_code=0;frames=3;frequency=1000;end_qpc=10000}})}}
@@ -365,6 +386,8 @@ if($SelfTest) {
 if(-not $Executable -or $ExpectedSha256 -cnotmatch '^[A-Fa-f0-9]{64}$') {throw 'Supply an exact executable and SHA-256.'}
 if($CoverageInstrumented -and -not $RawProfileDirectory) {throw 'CoverageInstrumented requires an explicit RawProfileDirectory.'}
 if($FunctionalUI -and ($MeasureSeconds -or $EnableCountryForMeasurement)) {throw 'FunctionalUI requires offline checks without measurement.'}
+if($NavigationMeasurement -and (-not $FunctionalUI -or $CoverageInstrumented)) {throw 'NavigationMeasurement requires non-instrumented FunctionalUI.'}
+$expectNavigationMeasurement=-not $CoverageInstrumented -and (-not $FunctionalUI -or $NavigationMeasurement)
 if($HostedResource -and ($FunctionalUI -or $CoverageInstrumented -or $MeasureSeconds -ne 3600 -or -not $EnableCountryForMeasurement -or -not $MaximumHistory)) {throw 'HostedResource requires a normal executable, one hour, both databases and maximum history.'}
 if($EnableCountryForMeasurement -and -not $MeasureSeconds) {throw 'Country measurement requires a positive duration.'}
 $app=[IO.Path]::GetFullPath($Executable,$repository); Assert-Unlinked $app
@@ -547,6 +570,7 @@ try {
     $arguments=[Collections.Generic.List[string]]::new()
     foreach($value in @('-B',"$local\bootstrap.py",'--exe',"$local\publish\NetLights.exe",'--output',"$local\TestResults\ui",'--expected-sha256',$config.app_sha256,'--sandbox-input',"$local\input.json",'--sandbox-nonce',$Nonce,'--measure-seconds',[string]$config.measure_seconds)){$arguments.Add($value)}
     if($config.functional_ui){$arguments.Add('--functional-evidence')}
+    if($config.navigation_measurement){$arguments.Add('--navigation-measurement')}
     if($config.coverage_instrumented){$arguments.Add('--coverage-instrumented')}
     if($config.maximum_history){$arguments.Add('--maximum-history')}
     if($config.enable_country){$arguments.Add('--enable-country-for-measurement')}
@@ -643,14 +667,15 @@ try {
         $ui=Join-Path $results 'ui'
         $arguments=$uvPrefix+@('--exe',$app,'--output',$ui,'--expected-sha256',$ExpectedSha256,'--isolated-ci-input','--measure-seconds',[string]$MeasureSeconds,'--frameprobe',$frameprobe,'--frameprobe-sha256',$frameprobeHash)
         if($FunctionalUI){$arguments+='--functional-evidence'}
+        if($NavigationMeasurement){$arguments+='--navigation-measurement'}
         if($HostedResource){$arguments+='--hosted-resource-evidence'}
         if($CoverageInstrumented){$arguments+='--coverage-instrumented'}
         if($MaximumHistory){$arguments+='--maximum-history'}
         if($EnableCountryForMeasurement){$arguments+='--enable-country-for-measurement'}
         Invoke-CommandBounded 'isolated-ci-ui' $uv $arguments $timeout -Environment $environment|Out-Null
         $evidence=Get-Content -LiteralPath (Join-Path $ui 'results.json') -Raw|ConvertFrom-Json
-        Assert-UiEvidence $evidence 'GitHub-hosted Windows VM' $nonce $ExpectedSha256 $runnerHash ([bool]$CoverageInstrumented) ([bool]$HostedResource)
-        Assert-FrameprobeEvidence $evidence $frameprobeHash
+        Assert-UiEvidence $evidence 'GitHub-hosted Windows VM' $nonce $ExpectedSha256 $runnerHash ([bool]$CoverageInstrumented) ([bool]$HostedResource) ([bool]$expectNavigationMeasurement)
+        if($expectNavigationMeasurement){Assert-FrameprobeEvidence $evidence $frameprobeHash}
         $receipt.uiResults=Join-Path $ui 'results.json'
     }else {
         if(@(Sandbox-Ids).Count){throw 'Another Sandbox exists; no environment will be reused, reconnected or stopped.'}
@@ -693,7 +718,7 @@ try {
         if((Get-Item -LiteralPath $payloadPath).Length -gt 512MB -or (Get-FileHash -LiteralPath $runner).Hash -ine $runnerHash -or (Get-FileHash -LiteralPath $app).Hash -ine $ExpectedSha256){throw 'Payload changed or exceeds its bound.'}
         $config=[ordered]@{nonce=$nonce;purpose='netlights-native-ui';mode='windows-sandbox';app_sha256=$ExpectedSha256;runner_sha256=$runnerHash;
             payload_sha256=(Get-FileHash -LiteralPath $payloadPath).Hash;command_sha256=(Get-FileHash -LiteralPath (Join-Path $inputDirectory 'command.cs')).Hash;mfc_sha256=$mfcHash;
-            functional_ui=[bool]$FunctionalUI;coverage_instrumented=[bool]$CoverageInstrumented;maximum_history=[bool]$MaximumHistory;enable_country=[bool]$EnableCountryForMeasurement;measure_seconds=$MeasureSeconds;timeout_seconds=$timeout}
+            functional_ui=[bool]$FunctionalUI;navigation_measurement=[bool]$NavigationMeasurement;coverage_instrumented=[bool]$CoverageInstrumented;maximum_history=[bool]$MaximumHistory;enable_country=[bool]$EnableCountryForMeasurement;measure_seconds=$MeasureSeconds;timeout_seconds=$timeout}
         Write-NewJson (Join-Path $inputDirectory 'input.json') $config
         if((Get-Item -LiteralPath (Join-Path $inputDirectory 'input.json')).Length -gt 4096){throw 'Input marker exceeds the Python guard limit.'}
         $escapedInput=[Security.SecurityElement]::Escape($inputDirectory);$escapedOutput=[Security.SecurityElement]::Escape($outputDirectory)
@@ -747,7 +772,7 @@ try {
         if($guest.status -cne 'PASS' -or $guest.runnerExitCode -ne 0){throw 'Owned guest native UI checks failed; inspect retained guest logs and UI results.'}
         $ui=Join-Path $results 'ui'
         $evidence=Get-Content -LiteralPath (Join-Path $ui 'results.json') -Raw|ConvertFrom-Json
-        Assert-UiEvidence $evidence 'Windows Sandbox' $nonce $ExpectedSha256 $runnerHash ([bool]$CoverageInstrumented)
+        Assert-UiEvidence $evidence 'Windows Sandbox' $nonce $ExpectedSha256 $runnerHash -ExpectCoverageInstrumented ([bool]$CoverageInstrumented) -ExpectNavigationMeasurement ([bool]$expectNavigationMeasurement)
         $receipt.uiResults=Join-Path $ui 'results.json'
     }
     if($RawProfileDirectory) {
