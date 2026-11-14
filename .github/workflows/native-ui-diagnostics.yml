@@ -1,6 +1,12 @@
 name: native-ui-diagnostics
 on:
   workflow_dispatch:
+    inputs:
+      navigation_measurement:
+        description: 'Также измерить плавность навигации'
+        type: boolean
+        required: false
+        default: false
 permissions:
   contents: read
 jobs:
@@ -39,9 +45,14 @@ jobs:
       - name: Build this checkout without a stale pinned payload
         run: scripts/publish.ps1 -OutputDirectory artifacts/native-diagnostic
       - name: Run unchanged functional UI assertions on the current executable
+        env:
+          NETLIGHTS_NAVIGATION_MEASUREMENT: ${{ inputs.navigation_measurement }}
         run: |
           $exe = (Resolve-Path artifacts/native-diagnostic/NetLights.exe).Path
-          scripts/test-native-ui.ps1 -FunctionalUI -NavigationMeasurement -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory TestResults/diagnostic
+          if ($env:NETLIGHTS_NAVIGATION_MEASUREMENT -cnotin @('true','false')) { throw 'Expected a boolean navigation measurement option.' }
+          $extra = @{}
+          if ($env:NETLIGHTS_NAVIGATION_MEASUREMENT -ceq 'true') { $extra.NavigationMeasurement = $true }
+          scripts/test-native-ui.ps1 -FunctionalUI @extra -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory TestResults/diagnostic
       - name: Upload diagnostic evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
