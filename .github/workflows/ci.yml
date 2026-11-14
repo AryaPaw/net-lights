@@ -70,7 +70,7 @@ jobs:
         run: scripts/verify.ps1 -FunctionalUI -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
       - name: Compile installer for isolated upgrade checks
         id: package
-        if: ${{ !cancelled() }}
+        if: ${{ success() }}
         shell: pwsh
         run: |
           . scripts/ci-environment.ps1

@@ -56,6 +56,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Resource analyzer controls FAIL.' }
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-native-ui.ps1') -SelfTest *> (Join-Path $results 'ui-isolation-controls.log')
     if ($LASTEXITCODE -ne 0) { throw 'UI isolation controls FAIL.' }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'collect-native-licenses.ps1') -SelfTest *> (Join-Path $results 'license-controls.log')
+    if ($LASTEXITCODE -ne 0) { throw 'License collector controls FAIL.' }
     function Invoke-Cargo([string]$Name,[string[]]$Arguments) {
         $log = Join-Path $results "$Name.log"
         Write-Host "RUN: cargo $($Arguments -join ' ')"
