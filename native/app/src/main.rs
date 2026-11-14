@@ -15,6 +15,7 @@ mod dashboard;
 mod fluent;
 mod geometry;
 mod location_rows;
+mod shell;
 mod text;
 mod tray;
 mod view;
@@ -27,6 +28,8 @@ struct Options {
     exit: bool,
     no_updates: bool,
     health: Option<String>,
+    inspect_page: Option<String>,
+    inspect_copy_feedback: bool,
 }
 fn options() -> Result<Options> {
     let mut result = Options::default();
@@ -40,6 +43,19 @@ fn options() -> Result<Options> {
                 ))?)
             }
             Some("--show-local") => result.show = true,
+            Some("--inspect-page") => {
+                let page = args
+                    .next()
+                    .and_then(|s| s.into_string().ok())
+                    .ok_or_else(|| anyhow::anyhow!("Missing inspection page"))?;
+                anyhow::ensure!(
+                    ["state", "locations", "diagnostics", "settings", "about"]
+                        .contains(&page.as_str()),
+                    "Invalid inspection page"
+                );
+                result.inspect_page = Some(page);
+            }
+            Some("--inspect-copy-feedback") => result.inspect_copy_feedback = true,
             Some("--exit-local") => result.exit = true,
             Some("--skip-automatic-updates") => result.no_updates = true,
             Some("--update-health-event") => {
@@ -69,12 +85,31 @@ fn run(owner: &mut Option<Rc<platform::Instance>>, startup_language: &mut Langua
     }
     run_options(options()?, owner, startup_language, tray::TrayHost::new)
 }
+fn validate_inspection(options: &Options) -> Result<()> {
+    if let Some(page) = &options.inspect_page {
+        anyhow::ensure!(
+            ["state", "locations", "diagnostics", "settings", "about"].contains(&page.as_str()),
+            "Invalid inspection page"
+        );
+    }
+    anyhow::ensure!(
+        options.inspect_page.is_none()
+            || (options.profile.is_some() && options.no_updates && !options.show && !options.exit),
+        "Inspection requires an isolated profile, disabled updates and non-activating startup"
+    );
+    anyhow::ensure!(
+        !options.inspect_copy_feedback || options.inspect_page.as_deref() == Some("about"),
+        "Copy feedback inspection requires About"
+    );
+    Ok(())
+}
 fn run_options(
     options: Options,
     owner: &mut Option<Rc<platform::Instance>>,
     startup_language: &mut Language,
     create_tray: impl FnOnce(mpsc::SyncSender<tray::OsEvent>) -> Result<tray::TrayHost>,
 ) -> Result<()> {
+    validate_inspection(&options)?;
     let instance = match platform::acquire(options.profile.as_deref(), options.show, options.exit)?
     {
         Startup::Forwarded => return Ok(()),
@@ -102,6 +137,7 @@ fn run_options(
         init(cx);
         let (bounds, display_id) = geometry::initial(&settings, cx);
         let show = options.show;
+        let inspecting = options.inspect_page.is_some();
         let result = open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -128,22 +164,29 @@ fn run_options(
                     cx,
                 );
                 cx.new(|cx| {
-                    view::NetLights::new(
+                    let mut view = view::NetLights::new(
                         backend,
                         instance,
                         tray,
                         os,
                         root,
                         options.health,
-                        show,
+                        show || inspecting,
                         window,
                         cx,
-                    )
+                    );
+                    if let Some(page) = options.inspect_page.as_deref() {
+                        view.inspect_initial_page(page, options.inspect_copy_feedback, window, cx);
+                    }
+                    view
                 })
             },
         );
         match result {
             Ok((window, _)) => {
+                if inspecting {
+                    let _ = window.update(cx, |_, window, _| window_os::show_inactive(window));
+                }
                 if window_os::mica_supported()
                     && let Some(handle) = window.downcast::<base::Root>()
                 {
@@ -165,7 +208,14 @@ fn main() -> std::process::ExitCode {
     // (including LLVM profile output) to run through a normal return from main.
     let mut owner = std::mem::ManuallyDrop::new(None);
     let mut startup_language = Language::system();
-    if run(&mut owner, &mut startup_language).is_err() {
+    if let Err(error) = run(&mut owner, &mut startup_language) {
+        // Inspection must fail without activating a modal on the user's desktop.
+        if std::env::args_os().any(|arg| {
+            arg == "--inspect-page" || arg == "--inspect-copy-feedback" || arg == "--exit-local"
+        }) {
+            eprintln!("Static inspection failed: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
         let message = windows::core::HSTRING::from(startup_language.choose(
             "Не удалось запустить Net Lights. Проверьте доступ к папке настроек и журнал приложения.",
             "Couldn't start Net Lights. Check access to the settings folder and the application log."
@@ -187,6 +237,31 @@ fn main() -> std::process::ExitCode {
 #[cfg(test)]
 mod startup_tests {
     use super::{Language, Options, Profile, Startup, platform, run_options};
+    #[test]
+    fn static_inspection_cannot_activate_a_window_or_use_the_working_profile() {
+        let mut options = Options {
+            inspect_page: Some("about".into()),
+            ..Default::default()
+        };
+        assert!(super::validate_inspection(&options).is_err());
+        options.profile = Some(std::path::PathBuf::from("isolated-fixture"));
+        assert!(super::validate_inspection(&options).is_err());
+        options.no_updates = true;
+        assert!(super::validate_inspection(&options).is_ok());
+        options.show = true;
+        assert!(super::validate_inspection(&options).is_err());
+        options.show = false;
+        options.exit = true;
+        assert!(super::validate_inspection(&options).is_err());
+        options.exit = false;
+        options.inspect_copy_feedback = true;
+        assert!(super::validate_inspection(&options).is_ok());
+        options.inspect_page = Some("settings".into());
+        assert!(super::validate_inspection(&options).is_err());
+        options.inspect_copy_feedback = false;
+        options.inspect_page = Some("unknown".into());
+        assert!(super::validate_inspection(&options).is_err());
+    }
     #[test]
     fn failed_tray_startup_keeps_profile_ownership_until_process_shutdown() {
         let root = std::env::temp_dir().join(format!(

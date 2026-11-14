@@ -21,12 +21,15 @@ use url::Url;
 const COUNTRY_URL: &str = "https://api.country.is/";
 const FALLBACK_URL: &str = "https://ipwho.is/?fields=success,country_code,ip";
 const CACHE_LIMIT: usize = 512;
+mod diagnostics;
+pub use diagnostics::{GeoDiagnostic, GeoIssue, GeoSourceDiagnostic};
 
 #[derive(Clone, Debug, Default)]
 struct Lookup {
     ip: Option<IpAddr>,
     country: Option<String>,
     retry: Option<Duration>,
+    diagnostic: GeoSourceDiagnostic,
 }
 impl Lookup {
     fn usable(&self) -> bool {
@@ -62,10 +65,19 @@ impl SourceClient {
                 let Ok(url) = Url::parse(url) else {
                     return Lookup::default();
                 };
-                match transport.get(&url, 4096, Duration::from_secs(5)).await {
+                let mut lookup = match transport.get(&url, 4096, Duration::from_secs(5)).await {
                     Ok(response) => parse_response(response, *country_is, time_after(now, started)),
-                    Err(_) => Lookup::default(),
-                }
+                    Err(error) => Lookup {
+                        diagnostic: GeoSourceDiagnostic {
+                            issue: Some(GeoIssue::from_transport(Transport::failure_code(&error))),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                };
+                lookup.diagnostic.elapsed_ms =
+                    started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                lookup
             }
             #[cfg(test)]
             Self::Stub { replies, calls } => {
@@ -85,6 +97,25 @@ struct CacheEntry {
     lookup: Lookup,
     expires: DateTime<Utc>,
 }
+#[derive(Clone)]
+struct Cooldown {
+    until: DateTime<Utc>,
+    diagnostic: GeoSourceDiagnostic,
+}
+impl Cooldown {
+    fn lookup(&self, now: DateTime<Utc>) -> Option<Lookup> {
+        (self.until > now).then(|| Lookup {
+            retry: Some(duration_until(now, self.until)),
+            diagnostic: GeoSourceDiagnostic {
+                deferred: true,
+                elapsed_ms: 0,
+                retry_until: Some(self.until),
+                ..self.diagnostic.clone()
+            },
+            ..Default::default()
+        })
+    }
+}
 
 /// The runtime owns one service and awaits one observation at a time. Online
 /// polling is independent from UI visibility and from background database refresh.
@@ -94,12 +125,12 @@ pub struct GeoService {
     databases: DatabaseWorker,
     usage: UsageLedger,
     cache: HashMap<String, CacheEntry>,
-    primary_retry_until: Option<DateTime<Utc>>,
-    fallback_retry_until: Option<DateTime<Utc>>,
+    primary_cooldown: Option<Cooldown>,
+    fallback_cooldown: Option<Cooldown>,
     last_public_ip: Option<IpAddr>,
     last_observation: Option<LocationObservation>,
     last_confirmed_country: Option<String>,
-    failures: usize,
+    diagnostic: Option<GeoDiagnostic>,
     all_sources_retry: Option<Duration>,
 }
 impl GeoService {
@@ -116,12 +147,12 @@ impl GeoService {
             databases: DatabaseWorker::start(root.clone(), traffic)?,
             usage: UsageLedger::open(&root),
             cache: HashMap::new(),
-            primary_retry_until: None,
-            fallback_retry_until: None,
+            primary_cooldown: None,
+            fallback_cooldown: None,
             last_public_ip: None,
             last_observation: None,
             last_confirmed_country: None,
-            failures: 0,
+            diagnostic: None,
             all_sources_retry: None,
         })
     }
@@ -135,9 +166,16 @@ impl GeoService {
         self.usage.failure
     }
     pub fn network_changed(&mut self) {
-        self.failures = 0;
+        self.diagnostic = None;
         // Neither cache identity nor a service-wide Retry-After belongs to a network epoch.
         // With no current IP, fallback must make a fresh request rather than using a cache.
+    }
+    pub fn diagnostic(&self, seconds: u64) -> Option<GeoDiagnostic> {
+        self.diagnostic.clone().map(|mut report| {
+            report.next_attempt_utc =
+                report.observed_utc + chrono_duration(self.next_delay(seconds));
+            report
+        })
     }
     pub fn next_delay(&self, default_seconds: u64) -> Duration {
         let interval = Duration::from_secs(
@@ -150,32 +188,26 @@ impl GeoService {
         if let Some(retry) = self.all_sources_retry {
             return retry.max(interval);
         }
-        let backoff = match self.failures {
-            0 => 0,
-            1 => 15,
-            2 => 45,
-            3 => 120,
-            _ => 0,
-        };
-        interval.max(Duration::from_secs(backoff))
+        interval
     }
     pub async fn shutdown(&mut self) {
         self.databases.shutdown().await;
     }
     async fn observe_at(&mut self, now: DateTime<Utc>) -> Result<LocationObservation> {
         let started = Instant::now();
-        let primary = if let Some(until) = self.primary_retry_until.filter(|until| *until > now) {
-            Lookup {
-                retry: Some(duration_until(now, until)),
-                ..Lookup::default()
-            }
-        } else {
-            let result = self.primary.fetch(now).await;
-            if let Some(retry) = result.retry {
-                self.primary_retry_until = Some(time_after(now, started) + chrono_duration(retry));
-            }
-            result
-        };
+        let primary =
+            if let Some(lookup) = self.primary_cooldown.as_ref().and_then(|c| c.lookup(now)) {
+                lookup
+            } else {
+                let result = self.primary.fetch(now).await;
+                if let Some(retry) = result.retry {
+                    self.primary_cooldown = Some(Cooldown {
+                        until: time_after(now, started) + chrono_duration(retry),
+                        diagnostic: result.diagnostic.clone(),
+                    });
+                }
+                result
+            };
         let mut ip = primary.ip;
         let mut accepted = primary.country.clone().filter(|_| primary.usable());
         let online = accepted.clone();
@@ -183,12 +215,14 @@ impl GeoService {
         let mut retry = None;
         let mut source = "none";
         let mut different_ip = false;
+        let mut fallback_diagnostic = None;
         if primary.usable() {
             source = "country.is";
         } else {
             let fallback = self
                 .fallback_observation(primary.ip, time_after(now, started))
                 .await;
+            fallback_diagnostic = Some(fallback.diagnostic.clone());
             // A service's Retry-After gates only that service. The scheduler can
             // sleep longer only when neither online source is eligible.
             retry = primary.retry.zip(fallback.retry).map(|(a, b)| a.min(b));
@@ -270,12 +304,18 @@ impl GeoService {
         };
         if confirmed {
             self.last_confirmed_country = accepted;
-            self.failures = 0;
             self.all_sources_retry = None;
         } else {
-            self.failures = self.failures.saturating_add(1).min(4);
             self.all_sources_retry = retry;
         }
+        self.diagnostic = Some(GeoDiagnostic {
+            observed_utc,
+            primary: primary.diagnostic,
+            fallback: fallback_diagnostic,
+            ip_mismatch: different_ip,
+            confirmed,
+            next_attempt_utc: observed_utc,
+        });
         self.last_observation = Some(observation.clone());
         Ok(observation)
     }
@@ -285,47 +325,50 @@ impl GeoService {
         now: DateTime<Utc>,
     ) -> Lookup {
         let started = Instant::now();
-        if let Some(until) = self.fallback_retry_until.filter(|until| *until > now) {
-            return Lookup {
-                retry: Some(duration_until(now, until)),
-                ..Lookup::default()
-            };
+        if let Some(lookup) = self.fallback_cooldown.as_ref().and_then(|c| c.lookup(now)) {
+            return lookup;
         }
         self.cache.retain(|_, entry| entry.expires > now);
         let key = current_ip.map(|ip| digest(ip.to_string().as_bytes()));
         if let Some(cached) = key.as_ref().and_then(|key| self.cache.get(key)) {
-            return cached.lookup.clone();
+            let mut lookup = cached.lookup.clone();
+            lookup.diagnostic.cached = true;
+            lookup.diagnostic.elapsed_ms = 0;
+            return lookup;
         }
         if !self.usage.consume(now.date_naive()) {
             // Revisit the persisted daily budget after rollover even if the primary
             // service is currently throttled for a much longer period.
             return Lookup {
                 retry: Some(Duration::from_secs(10)),
+                diagnostic: GeoSourceDiagnostic {
+                    issue: Some(if self.usage.failure.is_some() {
+                        GeoIssue::QuotaStorage
+                    } else {
+                        GeoIssue::Quota
+                    }),
+                    deferred: true,
+                    ..Default::default()
+                },
                 ..Lookup::default()
             };
         }
         let result = self.fallback.fetch(now).await;
         let now = time_after(now, started);
         if let Some(retry) = result.retry {
-            self.fallback_retry_until = Some(now + chrono_duration(retry));
+            self.fallback_cooldown = Some(Cooldown {
+                until: now + chrono_duration(retry),
+                diagnostic: result.diagnostic.clone(),
+            });
         }
-        if result.usable() {
-            if let Some(returned_ip) = result.ip {
-                self.cache.insert(
-                    digest(returned_ip.to_string().as_bytes()),
-                    CacheEntry {
-                        lookup: result.clone(),
-                        expires: now + ChronoDuration::hours(24),
-                    },
-                );
-            }
-        } else if let Some(key) = key {
-            let retry = result.retry.unwrap_or(Duration::from_secs(300));
+        if result.usable()
+            && let Some(returned_ip) = result.ip
+        {
             self.cache.insert(
-                key,
+                digest(returned_ip.to_string().as_bytes()),
                 CacheEntry {
                     lookup: result.clone(),
-                    expires: now + chrono_duration(retry),
+                    expires: now + ChronoDuration::hours(24),
                 },
             );
         }
@@ -357,7 +400,13 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 fn parse_response(response: HttpResponse, country_is: bool, now: DateTime<Utc>) -> Lookup {
-    if response.status == 429 {
+    let mut diagnostic = GeoSourceDiagnostic {
+        http_status: Some(response.status),
+        ..Default::default()
+    };
+    if response.status == 429
+        || response.status == 503 && response.headers.contains_key("retry-after")
+    {
         let retry = response
             .headers
             .get("retry-after")
@@ -374,17 +423,42 @@ fn parse_response(response: HttpResponse, country_is: bool, now: DateTime<Utc>) 
             .unwrap_or(Duration::from_secs(60));
         return Lookup {
             retry: Some(retry),
+            diagnostic: GeoSourceDiagnostic {
+                issue: Some(if response.status == 429 {
+                    GeoIssue::RateLimit
+                } else {
+                    GeoIssue::Http
+                }),
+                retry_until: Some(now + chrono_duration(retry)),
+                ..diagnostic
+            },
             ..Lookup::default()
         };
     }
     if !(200..300).contains(&response.status) || response.body.len() > 4096 {
-        return Lookup::default();
+        diagnostic.issue = Some(if !(200..300).contains(&response.status) {
+            GeoIssue::Http
+        } else {
+            GeoIssue::InvalidResponse
+        });
+        return Lookup {
+            diagnostic,
+            ..Lookup::default()
+        };
     }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&response.body) else {
-        return Lookup::default();
+        diagnostic.issue = Some(GeoIssue::InvalidResponse);
+        return Lookup {
+            diagnostic,
+            ..Lookup::default()
+        };
     };
     if !country_is && value["success"].as_bool() != Some(true) {
-        return Lookup::default();
+        diagnostic.issue = Some(GeoIssue::InvalidResponse);
+        return Lookup {
+            diagnostic,
+            ..Lookup::default()
+        };
     }
     let ip = value["ip"]
         .as_str()
@@ -396,10 +470,14 @@ fn parse_response(response: HttpResponse, country_is: bool, now: DateTime<Utc>) 
         "country_code"
     };
     let country = value[key].as_str().and_then(normalize_country);
+    if ip.is_none() || country.is_none() {
+        diagnostic.issue = Some(GeoIssue::InvalidResponse);
+    }
     Lookup {
         ip,
         country,
         retry: None,
+        diagnostic,
     }
 }
 
@@ -537,6 +615,7 @@ mod tests {
             ip: Some(ip.parse().unwrap()),
             country: Some(country.into()),
             retry: None,
+            diagnostic: GeoSourceDiagnostic::default(),
         }
     }
     fn service(
@@ -559,12 +638,12 @@ mod tests {
                 databases: DatabaseWorker::empty_for_tests(),
                 usage: UsageLedger::open(root),
                 cache: HashMap::new(),
-                primary_retry_until: None,
-                fallback_retry_until: None,
+                primary_cooldown: None,
+                fallback_cooldown: None,
                 last_public_ip: None,
                 last_observation: None,
                 last_confirmed_country: None,
-                failures: 0,
+                diagnostic: None,
                 all_sources_retry: None,
             },
             a,
@@ -638,22 +717,133 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn failed_checks_use_the_documented_backoff_but_network_change_only_resets_failures() {
+    async fn repeated_failures_keep_the_selected_interval_and_recovery_is_immediate() {
         let root = root();
-        let (mut service, _, _) = service(&root, vec![], vec![]);
+        let mut replies = vec![Lookup::default(); 6];
+        replies.push(answer("203.0.113.7", "DE"));
+        let (mut service, primary_calls, fallback_calls) = service(&root, replies, vec![]);
         let now = Utc::now();
         assert_eq!(service.next_delay(10), Duration::from_secs(10));
-        for (index, expected) in [15, 45, 120, 10].into_iter().enumerate() {
+        for index in 0..6 {
             let row = service
-                .observe_at(now + ChronoDuration::minutes(index as i64))
+                .observe_at(now + ChronoDuration::seconds(index as i64 * 10))
                 .await
                 .unwrap();
             assert!(!row.confirmed);
-            assert_eq!(service.next_delay(10), Duration::from_secs(expected));
+            for seconds in crate::model::COUNTRY_INTERVALS {
+                assert_eq!(service.next_delay(seconds), Duration::from_secs(seconds));
+            }
         }
+        let recovered = service
+            .observe_at(now + ChronoDuration::seconds(60))
+            .await
+            .unwrap();
+        assert!(recovered.confirmed);
+        assert_eq!(recovered.country_code.as_deref(), Some("DE"));
+        assert_eq!(primary_calls.load(Ordering::Relaxed), 7);
+        assert_eq!(fallback_calls.load(Ordering::Relaxed), 6);
+        assert!(service.diagnostic(10).unwrap().confirmed);
         service.network_changed();
         assert_eq!(service.next_delay(u64::MAX), Duration::from_secs(10));
         fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn transient_fallback_failure_does_not_cache_a_five_minute_outage() {
+        let root = root();
+        let partial = Lookup {
+            ip: Some("203.0.113.7".parse().unwrap()),
+            ..Default::default()
+        };
+        let (mut service, _, calls) = service(
+            &root,
+            vec![partial.clone(), partial],
+            vec![Lookup::default(), answer("203.0.113.7", "JP")],
+        );
+        let now = Utc::now();
+        assert!(!service.observe_at(now).await.unwrap().confirmed);
+        assert_eq!(service.next_delay(10), Duration::from_secs(10));
+        let recovered = service
+            .observe_at(now + ChronoDuration::seconds(10))
+            .await
+            .unwrap();
+        assert!(recovered.confirmed);
+        assert_eq!(recovered.country_code.as_deref(), Some("JP"));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn service_unavailable_retry_after_keeps_its_cause_and_allows_fallback_recovery() {
+        let root = root();
+        let now = Utc::now();
+        let unavailable = parse_response(
+            HttpResponse {
+                status: 503,
+                headers: BTreeMap::from([("retry-after".into(), "600".into())]),
+                body: Vec::new(),
+            },
+            true,
+            now,
+        );
+        let (mut service, primary_calls, fallback_calls) = service(
+            &root,
+            vec![unavailable],
+            vec![Lookup::default(), answer("203.0.113.7", "DE")],
+        );
+        assert!(!service.observe_at(now).await.unwrap().confirmed);
+        let deadline = service.primary_cooldown.as_ref().unwrap().until;
+        assert!(deadline >= now + ChronoDuration::seconds(600));
+        assert_eq!(service.next_delay(10), Duration::from_secs(10));
+        assert!(
+            service
+                .observe_at(now + ChronoDuration::seconds(10))
+                .await
+                .unwrap()
+                .confirmed
+        );
+        let report = service.diagnostic(10).unwrap();
+        assert_eq!(report.primary.issue, Some(GeoIssue::Http));
+        assert_eq!(report.primary.http_status, Some(503));
+        assert!(report.primary.deferred);
+        assert_eq!(report.primary.retry_until, Some(deadline));
+        assert_eq!(primary_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback_calls.load(Ordering::Relaxed), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn source_diagnostics_distinguish_http_throttling_and_invalid_payloads_without_private_data() {
+        let at = Utc::now();
+        for (status, body, expected) in [
+            (
+                503,
+                br#"{"message":"token=private-fixture https://private.test"}"#.as_slice(),
+                GeoIssue::Http,
+            ),
+            (200, b"private-fixture", GeoIssue::InvalidResponse),
+            (200, br#"{"ip":"203.0.113.7"}"#, GeoIssue::InvalidResponse),
+            (429, b"private-fixture", GeoIssue::RateLimit),
+        ] {
+            let row = parse_response(
+                HttpResponse {
+                    status,
+                    headers: BTreeMap::from([("retry-after".into(), "600".into())]),
+                    body: body.to_vec(),
+                },
+                true,
+                at,
+            );
+            assert_eq!(row.diagnostic.issue, Some(expected));
+            assert_eq!(row.diagnostic.http_status, Some(status));
+            let json = serde_json::to_string(&row.diagnostic).unwrap();
+            for private in ["private-fixture", "203.0.113.7", "private.test", "token="] {
+                assert!(!json.contains(private));
+            }
+            if status == 429 {
+                assert_eq!(
+                    row.diagnostic.retry_until,
+                    Some(at + ChronoDuration::seconds(600))
+                );
+            }
+        }
     }
     #[tokio::test]
     async fn primary_country_is_accepted_without_spending_fallback_quota() {
@@ -721,11 +911,11 @@ mod tests {
         let row = service.observe_at(started_utc).await.unwrap();
         assert!(!row.confirmed);
         assert!(
-            service.primary_retry_until.unwrap()
+            service.primary_cooldown.unwrap().until
                 >= started_utc + ChronoDuration::seconds(60) + ChronoDuration::milliseconds(30)
         );
         assert!(
-            service.fallback_retry_until.unwrap()
+            service.fallback_cooldown.unwrap().until
                 >= started_utc + ChronoDuration::seconds(120) + ChronoDuration::milliseconds(60)
         );
         fs::remove_dir_all(root).unwrap();
@@ -812,7 +1002,7 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(primary_calls.load(Ordering::Relaxed), 2);
-        assert_eq!(service.next_delay(10), Duration::from_secs(15));
+        assert_eq!(service.next_delay(10), Duration::from_secs(10));
         fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]

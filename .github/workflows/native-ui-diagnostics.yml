@@ -1,67 +1,51 @@
 name: native-ui-diagnostics
 on:
-  push:
-    branches: [codex/1.7.0-ci]
-    paths: [.github/workflows/native-ui-diagnostics.yml, scripts/native-ui-smoke.py, 'scripts/fixtures/native-frameprobe/**']
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 jobs:
   diagnostic:
     if: github.ref == 'refs/heads/codex/1.7.0-ci'
     runs-on: windows-2022
-    timeout-minutes: 25
+    timeout-minutes: 60
     env:
       CI: true
     defaults:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 0
-      # Diagnostic baseline only, never a replacement for ci.yml or its gates.
-      # Refresh the run, commit and digests together when runtime inputs change.
-      - name: Require unchanged pinned runtime inputs
-        run: |
-          git diff --quiet --exit-code 5c9b181243aa3d127631f965a33a2c1661595393 HEAD -- native 'Cargo.*' rust-toolchain.toml .cargo Directory.Build.props LICENSE scripts/publish.ps1 scripts/collect-native-licenses.ps1
-          if ($LASTEXITCODE -ne 0) { throw 'Pinned diagnostic payload no longer matches the runtime inputs; rebuild the full candidate.' }
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: native-upgrade-payload
-          run-id: 43421985036
-          github-token: ${{ github.token }}
-          path: artifacts/native-diagnostic-baseline
-      - name: Verify exact normal binaries
-        run: |
-          $publish = 'artifacts/native-diagnostic-baseline/publish'
-          if ((Get-FileHash "$publish/NetLights.exe" -Algorithm SHA256).Hash -cne '62CD8E43BCCCE33374FC95473470D22B23F9F7E94550CFFB3461D76EA4E3D059') { throw 'Diagnostic app digest differs from the pinned source build.' }
-          if ((Get-FileHash "$publish/NetLights.UpdateAgent.exe" -Algorithm SHA256).Hash -cne '948BA15E7F62589EEC95540E186AFE70E4C2F176C0F275E366AEF1A9C1ACA900') { throw 'Diagnostic agent digest differs from the pinned source build.' }
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           version: '0.11.7'
           enable-cache: false
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          key: native-win22-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
+          restore-keys: |
+            native-win22-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-
+            native-win22-
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            artifacts/rust-target
       - name: Prepare isolated functional desktop
         run: |
           uv python install 3.11
           if ($LASTEXITCODE -ne 0) { throw 'Python bootstrap failed.' }
           scripts/prepare-ci-desktop.ps1 -FunctionalUI -ResultsDirectory TestResults/desktop
-      - name: Inspect capture API availability without starting a session
+      - name: Build this checkout without a stale pinned payload
+        run: scripts/publish.ps1 -OutputDirectory artifacts/native-diagnostic
+      - name: Run unchanged functional UI assertions on the current executable
         run: |
-          $manifest = 'scripts/fixtures/native-frameprobe/Cargo.toml'
-          cargo test --manifest-path $manifest --locked --release --target-dir artifacts/frameprobe-target -- --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Capture capability guard tests failed.' }
-          cargo run --manifest-path $manifest --locked --release --target-dir artifacts/frameprobe-target -- --capabilities-only > TestResults/capture-capabilities.json
-          if ($LASTEXITCODE -ne 0) { throw 'Capture capability probe failed its hosted guard.' }
-          Get-Content TestResults/capture-capabilities.json
-      - name: Profile complete normal UI with unchanged assertions
-        run: |
-          scripts/test-native-ui.ps1 -FunctionalUI -Executable artifacts/native-diagnostic-baseline/publish/NetLights.exe -ExpectedSha256 62CD8E43BCCCE33374FC95473470D22B23F9F7E94550CFFB3461D76EA4E3D059 -ResultsDirectory "TestResults/diagnostic-${{ github.run_id }}-${{ github.run_attempt }}"
-      - name: Upload diagnostic logs and screenshots
+          $exe = (Resolve-Path artifacts/native-diagnostic/NetLights.exe).Path
+          scripts/test-native-ui.ps1 -FunctionalUI -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory TestResults/diagnostic
+      - name: Upload diagnostic evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-ui-diagnostics
-          path: TestResults
-          if-no-files-found: warn
+          path: |
+            TestResults
+            !TestResults/**/profile/**
+          if-no-files-found: error

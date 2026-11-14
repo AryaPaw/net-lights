@@ -69,7 +69,18 @@ impl NetLights {
                                         age
                                     ),
                                     cx,
-                                )),
+                                ))
+                                .when_some(endpoint.failure.as_deref(), |row, failure| {
+                                    row.child(muted(
+                                        format!(
+                                            "{}: {}",
+                                            lang.choose("Причина", "Reason"),
+                                            netlights_core::geo::GeoIssue::from_transport(failure)
+                                                .text(lang)
+                                        ),
+                                        cx,
+                                    ))
+                                }),
                         )
                         .child(
                             crate::fluent::button(SharedString::from(format!("probe-{id}")))

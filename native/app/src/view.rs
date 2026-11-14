@@ -6,6 +6,8 @@ use crate::{
     tray::{OsEvent, TrayHost, TrayState},
 };
 use chrono::{Duration as ChronoDuration, Local, Utc};
+use gpui_kit::base::InteractiveElementExt as _;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::{
     component::{
         ActiveTheme, FocusableExt, IndexPath, Sizable, Theme, ThemeMode, TitleBar,
@@ -34,6 +36,7 @@ mod diagnostics;
 mod locations;
 mod navigation;
 mod settings;
+mod settings_navigation;
 mod state;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -76,6 +79,11 @@ pub struct NetLights {
     page_transition: usize,
     page_direction: f32,
     settings_scroll: ScrollHandle,
+    page_scroll: [ScrollHandle; 5],
+    copy_feedback_until: Option<Instant>,
+    settings_navigation: Entity<settings_navigation::SettingsNavigation>,
+    settings_scroll_motion: gpui_kit::base::motion::TransitionState<Pixels>,
+    settings_scroll_destination: Option<Pixels>,
     settings_target: Option<usize>,
     settings_section: usize,
     settings_picked: bool,
@@ -102,6 +110,7 @@ pub struct NetLights {
     visible: bool,
     notice: String,
     about: bool,
+    shell_job: Option<crate::shell::Job>,
     incident: Option<charts::Segment>,
     history_scroll: ListState,
     location_rows: Arc<Vec<(usize, Option<String>)>>,
@@ -203,6 +212,13 @@ impl NetLights {
         );
         let mut subscriptions = vec![];
         let navigation = cx.new(navigation::Navigation::new);
+        let settings_navigation = cx.new(settings_navigation::SettingsNavigation::new);
+        subscriptions.push(cx.subscribe(
+            &settings_navigation,
+            |this, _, event: &settings_navigation::Selected, cx| {
+                this.pick_settings_section(event.0, cx)
+            },
+        ));
         subscriptions.push(cx.subscribe(
             &navigation,
             |this, _, event: &navigation::Selected, cx| {
@@ -331,6 +347,7 @@ impl NetLights {
             crate::window_os::hide(window);
             let _ = weak.update(cx, |this, cx| {
                 this.visible = false;
+                this.cancel_scroll_inertia();
                 this.discard_chart_models(cx);
             });
             false
@@ -349,9 +366,7 @@ impl NetLights {
         let timeline = cx.new(|cx| charts::AvailabilityTimeline::new(state.monitor.clone(), cx));
         subscriptions.push(cx.subscribe(&timeline, |this, _, event, cx| {
             match event {
-                charts::TimelineEvent::Select(event) => {
-                    this.overview_selected = Some(event.clone())
-                }
+                charts::TimelineEvent::Select(event) => this.overview_selected = event.clone(),
                 charts::TimelineEvent::Zoom(range) => {
                     this.overview_range = Some(*range);
                     this.overview_selected = None;
@@ -374,6 +389,11 @@ impl NetLights {
             page_transition: 0,
             page_direction: 0.,
             settings_scroll: ScrollHandle::new(),
+            page_scroll: std::array::from_fn(|_| ScrollHandle::new()),
+            copy_feedback_until: None,
+            settings_navigation,
+            settings_scroll_motion: Default::default(),
+            settings_scroll_destination: None,
             settings_target: None,
             settings_section: 0,
             settings_picked: false,
@@ -400,6 +420,7 @@ impl NetLights {
             visible,
             notice: String::new(),
             about: false,
+            shell_job: None,
             incident: None,
             history_scroll: ListState::new(1, ListAlignment::Top, px(500.))
                 .with_uniform_item_height(px(64.)),
@@ -438,6 +459,7 @@ impl NetLights {
         let lang = Language::resolve(&self.settings.language);
         cx.set_global(UiLanguage(lang));
         self.navigation.update(cx, |_, cx| cx.notify());
+        self.settings_navigation.update(cx, |_, cx| cx.notify());
         let traffic_index = match self
             .settings
             .extra
@@ -552,6 +574,11 @@ impl NetLights {
             colors.popover_foreground = colors.foreground;
             colors.title_bar = colors.background;
             colors.title_bar_border = colors.border;
+            // TitleBar uses danger tokens for its close control in both themes.
+            // The default dark theme pairs a red glyph with a pale red surface.
+            colors.danger = rgb(0xe81123).into();
+            colors.danger_foreground = rgb(0xffffff).into();
+            colors.danger_active = rgb(0xc50f1f).into();
             colors.primary = rgb(if dark { 0x4cc2ff } else { 0x0067c0 }).into();
             colors.primary_foreground = rgb(if dark { 0x00213b } else { 0xffffff }).into();
             colors.primary_hover = colors.primary.opacity(0.9);
@@ -570,6 +597,7 @@ impl NetLights {
             colors.button_primary_active = colors.primary_active;
         });
         self.navigation.update(cx, |_, cx| cx.notify());
+        self.settings_navigation.update(cx, |_, cx| cx.notify());
     }
     fn save_settings(&mut self, cx: &mut Context<Self>) -> bool {
         self.settings.normalize();
@@ -591,6 +619,17 @@ impl NetLights {
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if !self.backend.command(command) {
             self.notice = "Команда не принята: повторите действие через секунду.".into();
+        }
+        cx.notify();
+    }
+    fn open_shell(&mut self, target: crate::shell::Target, cx: &mut Context<Self>) {
+        if self.shell_job.is_some() {
+            return;
+        }
+        let failure = target.failure_message();
+        match crate::shell::Job::start(target, self.backend.journal()) {
+            Ok(job) => self.shell_job = Some(job),
+            Err(_) => self.notice = failure.into(),
         }
         cx.notify();
     }
@@ -616,6 +655,25 @@ impl NetLights {
         }
     }
     fn poll(&mut self, cx: &mut Context<Self>) {
+        if self
+            .copy_feedback_until
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.copy_feedback_until = None;
+            for handle in cx.windows() {
+                let _ = handle.update(cx, |_, window, cx| {
+                    window.remove_notification::<about::CopyVersionNotice>(cx)
+                });
+            }
+        }
+        if let Some(success) = self.shell_job.as_ref().and_then(crate::shell::Job::poll) {
+            self.shell_job
+                .as_ref()
+                .unwrap()
+                .apply_notice(&mut self.notice, success);
+            self.shell_job = None;
+            cx.notify();
+        }
         if self.instance.take_exit_request() {
             self.shutdown(cx);
         }
@@ -650,11 +708,16 @@ impl NetLights {
             cx.notify();
         }
         if let Some(next) = self.backend.changed() {
+            let country_notice_changed = crate::backend::geo_notice(&self.state, language(cx))
+                != crate::backend::geo_notice(&next, language(cx));
             if next.settings_generation >= self.pending_settings {
                 self.settings = next.settings.clone();
                 self.pending_settings = 0;
             }
             self.state = next;
+            if country_notice_changed {
+                self.history_scroll.splice(0..1, 1);
+            }
             if self.visible {
                 self.timeline.update(cx, |timeline, cx| {
                     timeline.live(self.state.monitor.clone(), cx)
@@ -924,17 +987,18 @@ impl Render for NetLights {
         let navigation = self.navigation.clone();
         // Commands sit outside the title bar's native drag region.
         let commands = div()
+            .pb(px(6.))
             .flex()
             .items_center()
             .gap_2()
             .child(
-                crate::fluent::compact_button("check-now")
+                crate::fluent::button("check-now")
                     .label(tr(cx, "Проверить сейчас"))
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| this.send(Command::CheckNow, cx))),
             )
             .child(
-                crate::fluent::compact_button("pause")
+                crate::fluent::button("pause")
                     .label(if self.state.monitor.paused {
                         tr(cx, "Продолжить")
                     } else {
@@ -971,7 +1035,7 @@ impl Render for NetLights {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().size(px(12.)).rounded_sm().bg(cx.theme().primary))
+                    .child(crate::fluent::brand_mark(20.))
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
@@ -1037,8 +1101,12 @@ impl Render for NetLights {
                     .flex_1()
                     .min_h_0()
                     .p_4()
+                    .pt(px(crate::fluent::PAGE_TOP_INSET))
                     .child(content)
-                    .overflow_y_scrollbar(),
+                    .overflow_y_scroll()
+                    .lock_scroll_axis()
+                    .track_scroll(&self.page_scroll[self.page as usize])
+                    .vertical_scrollbar(&self.page_scroll[self.page as usize]),
             )
         };
         let main = if self.page_transition != 0 && !cx.reduce_motion() {
@@ -1060,6 +1128,14 @@ impl Render for NetLights {
             .line_height(relative(1.4))
             .when(!mica, |d| d.bg(cx.theme().background))
             .text_color(cx.theme().foreground)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.overview_selected.take().is_some() {
+                    this.timeline
+                        .update(cx, |timeline, cx| timeline.select(None, cx));
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
             .child(titlebar)
             .child(toolbar)
             .child(main)

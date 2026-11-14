@@ -1,34 +1,86 @@
 use super::*;
 use gpui_kit::component::{Icon, IconName};
 
-pub(super) const VERSION_COPIED: &str = "Версия скопирована.";
-const VERSION_COPY_FAILED: &str = "Не удалось скопировать версию. Повторите попытку; буфер обмена может быть занят другим приложением.";
-const VERSION_COPY_FAILED_EN: &str =
-    "Couldn't copy the version. Try again; another application may be using the clipboard.";
-fn copy_version_notice(current: &mut String, copied: bool, lang: Language) {
-    if current.is_empty()
-        || matches!(
-            current.as_str(),
-            VERSION_COPIED | VERSION_COPY_FAILED | VERSION_COPY_FAILED_EN
+use gpui_kit::component::notification::{Notification, NotificationDelivery};
+pub(super) struct CopyVersionNotice;
+fn copy_version_message(copied: bool, lang: Language) -> (&'static str, Duration) {
+    if copied {
+        (
+            lang.choose("Версия скопирована.", "Version copied."),
+            Duration::from_millis(1800),
         )
-    {
-        *current = if copied {
-            VERSION_COPIED
-        } else {
-            lang.choose(VERSION_COPY_FAILED, VERSION_COPY_FAILED_EN)
-        }
-        .into();
-    }
-}
-pub(super) fn clear_copy_version_notice(current: &mut String) {
-    if current == VERSION_COPIED {
-        current.clear();
+    } else {
+        (lang.choose("Не удалось скопировать версию. Повторите попытку; буфер обмена может быть занят другим приложением.", "Couldn't copy the version. Try again; another application may be using the clipboard."), Duration::from_secs(5))
     }
 }
 
 impl NetLights {
+    pub(crate) fn inspect_initial_page(
+        &mut self,
+        name: &str,
+        feedback: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let page = match name {
+            "locations" => Page::Locations,
+            "diagnostics" => Page::Diagnostics,
+            "settings" => Page::Settings,
+            "about" => Page::About,
+            _ => Page::State,
+        };
+        self.select_page(page, cx);
+        if feedback {
+            let weak = cx.entity().downgrade();
+            window.on_next_frame(move |window, cx| {
+                let _ = weak.update(cx, |this, cx| this.present_copy_feedback(true, window, cx));
+            });
+        }
+    }
+
+    fn present_copy_feedback(&mut self, copied: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (message, lifetime) = copy_version_message(copied, language(cx));
+        let note = if copied {
+            Notification::success(message)
+        } else {
+            Notification::error(message)
+        };
+        window.push_notification(
+            note.id::<CopyVersionNotice>()
+                .placement(Anchor::BottomRight)
+                .delivery(NotificationDelivery::InApp)
+                .autohide(false)
+                .shadow_none(),
+            cx,
+        );
+        self.copy_feedback_until = Some(Instant::now() + lifetime);
+        cx.notify();
+    }
+
     pub(super) fn about_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let lang = language(cx);
+        let actions = div()
+            .flex()
+            .flex_shrink_0()
+            .flex_wrap()
+            .gap_2()
+            .child(
+                crate::fluent::button("about-copy-version")
+                    .label(tr(cx, "Скопировать версию"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let copied = crate::window_os::copy_text(
+                            window,
+                            &format!("Net Lights {}", netlights_core::VERSION),
+                        )
+                        .is_ok();
+                        this.present_copy_feedback(copied, window, cx);
+                    })),
+            )
+            .child(
+                crate::fluent::button("about-quit")
+                    .label(tr(cx, "Выйти из приложения"))
+                    .on_click(cx.listener(|this, _, _, cx| this.shutdown(cx))),
+            );
         let hero = div()
             .w_full()
             .flex()
@@ -36,7 +88,8 @@ impl NetLights {
             .items_center()
             .gap(px(20.))
             .min_h(px(112.))
-            .p(px(20.))
+            .px(px(20.))
+            .py(px(16.))
             .rounded(px(8.))
             .border_1()
             .border_color(cx.theme().border)
@@ -50,69 +103,55 @@ impl NetLights {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        Icon::new(IconName::Globe)
-                            .size(px(36.))
-                            .text_color(cx.theme().primary),
-                    ),
+                    .child(crate::fluent::brand_mark(64.)),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w(px(200.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
                     .child(
                         div()
                             .flex()
-                            .items_baseline()
+                            .items_center()
                             .flex_wrap()
                             .gap(px(10.))
                             .child(
                                 div()
                                     .font_family(crate::fluent::DISPLAY_FONT)
                                     .text_size(px(24.))
+                                    .line_height(px(28.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .child("Net Lights"),
                             )
                             .child(
                                 div()
                                     .text_size(px(13.))
+                                    .line_height(px(20.))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(text!(id = "about-version", netlights_core::VERSION)),
                             ),
                     )
-                    .child(muted(
-                        lang.choose(
-                            "Доступность сети и история стран публичного IP",
-                            "Network availability and public IP country history",
-                        ),
-                        cx,
-                    ))
-                    .child(muted("© 2026 AryaPaw", cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
                     .child(
-                        crate::fluent::button("about-copy-version")
-                            .label(tr(cx, "Скопировать версию"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let copied = crate::window_os::copy_text(
-                                    window,
-                                    &format!("Net Lights {}", netlights_core::VERSION),
-                                )
-                                .is_ok();
-                                copy_version_notice(&mut this.notice, copied, language(cx));
-                                cx.notify();
-                            })),
+                        muted(
+                            lang.choose(
+                                "Доступность сети и история стран публичного IP",
+                                "Network availability and public IP country history",
+                            ),
+                            cx,
+                        )
+                        .text_size(px(13.))
+                        .line_height(px(18.)),
                     )
                     .child(
-                        crate::fluent::button("about-quit")
-                            .label(tr(cx, "Выйти из приложения"))
-                            .on_click(cx.listener(|this, _, _, cx| this.shutdown(cx))),
+                        muted("© 2026 AryaPaw", cx)
+                            .text_size(px(12.))
+                            .line_height(px(16.)),
                     ),
-            );
+            )
+            .child(actions);
         let links = div()
             .flex()
             .flex_wrap()
@@ -142,11 +181,9 @@ impl NetLights {
             "Настройки и обе истории сохраняются локально. Срок хранения истории – 7 дней.",
             crate::fluent::button("about-settings-folder")
                 .label(tr(cx, "Открыть папку"))
+                .disabled_with_cursor(self.shell_job.is_some())
                 .on_click(cx.listener(|this, _, _, cx| {
-                    if platform::open_settings(&this.root).is_err() {
-                        this.notice = "Не удалось открыть папку настроек.".into();
-                        cx.notify();
-                    }
+                    this.open_shell(crate::shell::Target::Directory(this.root.clone()), cx);
                 })),
             cx,
         );
@@ -165,18 +202,21 @@ impl NetLights {
             .child(hero).child(links).child(runtime).child(storage).child(licenses)
             .when(self.about,|d|d.child(div().p_4().rounded(px(8.)).bg(surface(cx)).border_1().border_color(cx.theme().border)
                 .child(muted("GPUI Kit – Apache-2.0. V2Fly GeoIP – CC BY-SA 4.0. IPLocate ip-country – CC BY-SA 4.0. Онлайн-источники: country.is, резервный ipwho.is. Базы обновляются в фоне, результаты источников не равнозначны точному местоположению.",cx))
-                .child(div().mt_3().child(crate::fluent::button("license-files").label(tr(cx,"Файлы лицензий"))
+                .child(div().mt_3().child(crate::fluent::button("license-files").label(tr(cx,"Файлы лицензий")).disabled_with_cursor(self.shell_job.is_some())
                     .on_click(cx.listener(|this,_,_,cx|{
-                        if let Ok(exe)=std::env::current_exe() && let Some(parent)=exe.parent(){let archive=parent.join("third-party-licenses.zip");if archive.is_file(){cx.reveal_path(&archive);return;}}
+                        if let Ok(exe)=std::env::current_exe() && let Some(parent)=exe.parent(){let archive=parent.join("third-party-licenses.zip");if archive.is_file(){this.open_shell(crate::shell::Target::LicenseArchive(archive),cx);return;}}
                         this.notice="Архив лицензий отсутствует рядом с программой. Он включён в готовую сборку.".into();cx.notify();
                     }))))));
         div()
             .id("about-content")
             .flex_1()
             .min_h_0()
-            .overflow_y_scrollbar()
+            .overflow_y_scroll()
+            .lock_scroll_axis()
+            .track_scroll(&self.page_scroll[Page::About as usize])
+            .vertical_scrollbar(&self.page_scroll[Page::About as usize])
             .px(px(16.))
-            .pt(px(4.))
+            .pt(px(crate::fluent::PAGE_TOP_INSET))
             .pb(px(32.))
             .flex()
             .flex_col()
@@ -231,40 +271,17 @@ fn project_link(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Language, VERSION_COPIED, VERSION_COPY_FAILED, VERSION_COPY_FAILED_EN,
-        clear_copy_version_notice, copy_version_notice,
-    };
+    use super::{Duration, Language, copy_version_message};
     #[test]
-    fn copy_version_and_navigation_never_discard_an_existing_error() {
-        for error in [
-            "Монитор остановлен из-за ошибки.",
-            "Не удалось подтвердить запуск после обновления.",
-        ] {
-            for copied in [false, true] {
-                let mut notice = error.to_string();
-                copy_version_notice(&mut notice, copied, Language::Ru);
-                clear_copy_version_notice(&mut notice);
-                assert_eq!(notice, error);
-            }
+    fn copy_feedback_is_localized_and_success_is_short_lived() {
+        let (ru, success_lifetime) = copy_version_message(true, Language::Ru);
+        let (en, _) = copy_version_message(true, Language::En);
+        assert_ne!(ru, en);
+        assert_eq!(success_lifetime, Duration::from_millis(1800));
+        for lang in [Language::Ru, Language::En] {
+            let (error, lifetime) = copy_version_message(false, lang);
+            assert_ne!(error, copy_version_message(true, lang).0);
+            assert_eq!(lifetime, Duration::from_secs(5));
         }
-        let mut notice = String::new();
-        copy_version_notice(&mut notice, true, Language::Ru);
-        assert_eq!(notice, VERSION_COPIED);
-        clear_copy_version_notice(&mut notice);
-        assert!(notice.is_empty());
-    }
-    #[test]
-    fn copy_failure_is_localized_and_a_successful_retry_replaces_it() {
-        let mut notice = String::new();
-        copy_version_notice(&mut notice, false, Language::Ru);
-        assert_eq!(notice, VERSION_COPY_FAILED);
-        clear_copy_version_notice(&mut notice);
-        assert_eq!(notice, VERSION_COPY_FAILED);
-        copy_version_notice(&mut notice, true, Language::Ru);
-        assert_eq!(notice, VERSION_COPIED);
-        copy_version_notice(&mut notice, false, Language::En);
-        assert_eq!(notice, VERSION_COPY_FAILED_EN);
-        assert!(!notice.contains(VERSION_COPIED));
     }
 }

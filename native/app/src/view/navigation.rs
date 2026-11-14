@@ -32,10 +32,21 @@ impl Navigation {
     }
 }
 impl NetLights {
+    pub(super) fn cancel_scroll_inertia(&self) {
+        for handle in &self.page_scroll {
+            handle.set_offset(handle.offset());
+        }
+        self.settings_scroll
+            .set_offset(self.settings_scroll.offset());
+        self.history_scroll.cancel_scroll_animation();
+    }
     pub(super) fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
         if self.page == page {
             return;
         }
+        self.cancel_scroll_inertia();
+        self.settings_target = None;
+        self.settings_scroll_destination = None;
         self.page_direction = if page as usize > self.page as usize {
             1.
         } else {
@@ -44,7 +55,6 @@ impl NetLights {
         self.page_transition = self.page_transition.wrapping_add(1);
         self.page = page;
         self.navigation.update(cx, |nav, cx| nav.set(page, cx));
-        super::about::clear_copy_version_notice(&mut self.notice);
         self.timeline
             .update(cx, |timeline, cx| timeline.clear_pointer(cx));
         self.incident = None;

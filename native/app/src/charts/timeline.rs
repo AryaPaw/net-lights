@@ -5,7 +5,7 @@ use crate::fluent::ControlCursor;
 use gpui_kit::component::button::ButtonVariants;
 
 pub enum TimelineEvent {
-    Select(HistoryEvent),
+    Select(Option<HistoryEvent>),
     Zoom(TimeRange),
     Diagnose(String),
 }
@@ -25,7 +25,7 @@ pub struct AvailabilityTimeline {
     hover_row: usize,
     drag: Option<(usize, f32, f32)>,
     tooltip: Option<(String, String)>,
-    tooltip_key: Option<(i64, Option<usize>, Option<usize>)>,
+    tooltip_key: Option<(usize, i64, Option<usize>, Option<usize>)>,
     expanded: [bool; 2],
     focus: FocusHandle,
     marker_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -174,6 +174,16 @@ impl AvailabilityTimeline {
         self.selected = event;
         self.clear_pointer(cx);
     }
+    fn toggle_selection(&mut self, event: Option<HistoryEvent>, cx: &mut Context<Self>) {
+        self.selected = event.filter(|event| {
+            !self
+                .selected
+                .as_ref()
+                .is_some_and(|old| old.same_record(event))
+        });
+        self.clear_pointer(cx);
+        cx.emit(TimelineEvent::Select(self.selected.clone()));
+    }
     pub fn clear_pointer(&mut self, cx: &mut Context<Self>) {
         self.pointer = None;
         self.pointer_fraction = None;
@@ -217,7 +227,7 @@ impl AvailabilityTimeline {
     }
     fn readout(&mut self, at: DateTime<Utc>) {
         let indices = [self.index(0, at), self.index(1, at)];
-        let key = (at.timestamp(), indices[0], indices[1]);
+        let key = (self.hover_row, at.timestamp(), indices[0], indices[1]);
         self.pointer = Some(at);
         if self.tooltip_key == Some(key) {
             return;
@@ -300,15 +310,13 @@ impl AvailabilityTimeline {
             }
         } else {
             let at = self.inspected_time(row, x);
-            if let Some(event) = dashboard::select_availability(
+            let event = dashboard::select_availability(
                 &self.availability,
                 Group::ALL[row],
                 at,
                 self.live.generated_utc,
-            ) {
-                self.selected = Some(event.clone());
-                cx.emit(TimelineEvent::Select(event));
-            }
+            );
+            self.toggle_selection(event, cx);
         }
         cx.notify();
     }
@@ -455,7 +463,7 @@ impl AvailabilityTimeline {
     }
 }
 impl Render for AvailabilityTimeline {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = self.models[0].language;
         let mut body = div()
             .id("availability-timeline")
@@ -466,7 +474,9 @@ impl Render for AvailabilityTimeline {
             .gap_4()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
+                    this.selected = None;
                     this.clear_pointer(cx);
+                    cx.emit(TimelineEvent::Select(None));
                 }
             }));
         for row in 0..2 {
@@ -753,9 +763,7 @@ impl Render for AvailabilityTimeline {
                                 if let Some(event) =
                                     this.marker_hover.and_then(|i| this.changes.get(i)).cloned()
                                 {
-                                    this.selected = Some(event.clone());
-                                    cx.emit(TimelineEvent::Select(event));
-                                    this.clear_pointer(cx);
+                                    this.toggle_selection(Some(event), cx);
                                 }
                             }))
                             .child(
@@ -874,32 +882,41 @@ impl Render for AvailabilityTimeline {
         }
         body = body.child(axis);
         if let Some((title, detail)) = &self.tooltip {
+            let target = if self.marker_hover.is_some() {
+                self.marker_bounds.get()
+            } else {
+                self.bounds[self.hover_row].get()
+            };
             body = body.child(
                 deferred(
-                    div()
-                        .absolute()
-                        .right_0()
-                        .top(px(if self.hover_row == 0 { 72. } else { 8. }))
-                        .max_w(px(360.))
-                        .p_3()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().popover)
-                        .text_color(cx.theme().popover_foreground)
-                        .shadow_md()
-                        .text_size(px(13.))
-                        .line_height(px(18.))
-                        .font_weight(FontWeight::MEDIUM)
+                    anchored()
+                        .anchor(Anchor::BottomRight)
+                        .position(point(target.right(), target.top() - px(8.)))
+                        .snap_to_window_with_margin(px(12.))
                         .child(
                             div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(text!(id = "timeline-readout-title", title.clone())),
-                        )
-                        .child(
-                            div()
-                                .mt_2()
-                                .child(text!(id = "timeline-readout-detail", detail.clone())),
+                                .w(px(340.).min(window.viewport_size().width - px(24.)))
+                                .p_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().popover)
+                                .text_color(cx.theme().popover_foreground)
+                                .shadow_md()
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(text!(id = "timeline-readout-title", title.clone())),
+                                )
+                                .child(
+                                    div().mt_2().child(text!(
+                                        id = "timeline-readout-detail",
+                                        detail.clone()
+                                    )),
+                                ),
                         ),
                 )
                 .with_priority(2),

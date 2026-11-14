@@ -4,6 +4,7 @@ param(
     [string]$ResultsDirectory = ('TestResults/native-ui-isolated-' + [Guid]::NewGuid().ToString('N')),
     [string]$ExpectedSha256,
     [switch]$FunctionalUI,
+    [switch]$HostedResource,
     [string]$RawProfileDirectory,
     [switch]$CoverageInstrumented,
     [ValidateRange(0,3600)][int]$MeasureSeconds = 0,
@@ -191,7 +192,13 @@ function Assert-Amd64Pe([string]$Path) {
         if($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664){throw 'Runtime library is not an AMD64 PE.'}
     }finally{$reader.Dispose()}
 }
-function Assert-UiEvidence($Evidence,[string]$Scope,[string]$Nonce,[string]$AppHash,[string]$RunnerHash,[bool]$ExpectCoverageInstrumented=$false) {
+function Assert-UiEvidence($Evidence,[string]$Scope,[string]$Nonce,[string]$AppHash,[string]$RunnerHash,[bool]$ExpectCoverageInstrumented=$false,[bool]$ExpectHostedResource=$false) {
+    if($ExpectHostedResource) {
+        $measurement=@($Evidence.checks | Where-Object check -CEQ 'resource-measurement')
+        if($Evidence.metadata.evidenceLevel -cne 'GitHub-hosted Windows resource measurement' -or $Evidence.metadata.visualAcceptance -cne 'NOT RUN' -or
+            $Evidence.metadata.measured_seconds -ne 3600 -or $Evidence.metadata.country_measurement_requested -cne $true -or
+            $measurement.Count -ne 1 -or $measurement[0].result -cne 'PASS') {throw 'The requested full hosted resource evidence is missing.'}
+    }
     $smoothness=if($ExpectCoverageInstrumented){'NOT RUN'}else{'PASS'}
     if($Evidence.metadata.coverage_instrumented -isnot [bool] -or $Evidence.metadata.coverage_instrumented -ne $ExpectCoverageInstrumented -or
        $Evidence.metadata.navigation_smoothness -cne $smoothness) {throw 'UI coverage mode or navigation smoothness evidence differs from the requested run.'}
@@ -227,7 +234,7 @@ function Assert-FrameprobeEvidence($Evidence,[string]$ExpectedHash) {
 }
 
 if($SelfTest) {
-    if($Executable -or $ExpectedSha256 -or $RawProfileDirectory -or $FunctionalUI -or $CoverageInstrumented -or $MeasureSeconds -or $EnableCountryForMeasurement -or $MaximumHistory) {throw 'SelfTest cannot be combined with a UI run.'}
+    if($Executable -or $ExpectedSha256 -or $RawProfileDirectory -or $FunctionalUI -or $HostedResource -or $CoverageInstrumented -or $MeasureSeconds -or $EnableCountryForMeasurement -or $MaximumHistory) {throw 'SelfTest cannot be combined with a UI run.'}
     & uv run --offline --cache-dir (Join-Path $repository 'artifacts/uv-cache') --python 3.11 python (Join-Path $PSScriptRoot 'native-ui-smoke.py') --self-test-uia
     if($LASTEXITCODE -ne 0){throw 'Read-only UIA retry controls FAIL.'}
     $rejected=$false;try{Assert-ArtifactPath (Join-Path $repository 'native')|Out-Null}catch{$rejected=$true}
@@ -250,6 +257,25 @@ if($SelfTest) {
     $good.checks=@($names|ForEach-Object {@{check=$_;result='PASS'}})+@(@{check='resource-measurement';result='NOT RUN'})
     $good.checks[0].detail=@{navigation_motion=@{smoothness='PASS'}}
     Assert-UiEvidence ([pscustomobject]$good) 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64)
+    $resource=ConvertFrom-Json (ConvertTo-Json $good -Depth 20) -AsHashtable
+    $resource.metadata.input_isolation.scope='GitHub-hosted Windows VM'
+    $resource.metadata.evidenceLevel='GitHub-hosted Windows resource measurement'
+    $resource.metadata.visualAcceptance='NOT RUN'
+    $resource.metadata.measured_seconds=3600
+    $resource.metadata.country_measurement_requested=$true
+    $resource.checks[-1].result='PASS'
+    Assert-UiEvidence $resource 'GitHub-hosted Windows VM' '' ('a'*64) ('c'*64) $false $true
+    foreach($kind in @('short','offline','missing-measurement','visual-claim')) {
+        $bad=ConvertFrom-Json (ConvertTo-Json $resource -Depth 20) -AsHashtable
+        switch($kind) {
+            'short' {$bad.metadata.measured_seconds=20}
+            'offline' {$bad.metadata.country_measurement_requested=$false}
+            'missing-measurement' {$bad.checks[-1].result='NOT RUN'}
+            'visual-claim' {$bad.metadata.visualAcceptance='PASS'}
+        }
+        $rejected=$false;try{Assert-UiEvidence $bad 'GitHub-hosted Windows VM' '' ('a'*64) ('c'*64) $false $true}catch{$rejected=$true}
+        if(-not $rejected){throw "Invalid hosted resource evidence accepted: $kind"}
+    }
     foreach($kind in @('nonce','hash','physical','pid','missing-check','failed-check','locale','cleanup','instrumented-mode','instrumented-type','smoothness','motion-smoothness')) {
         $bad=ConvertFrom-Json (ConvertTo-Json $good -Depth 12)
         switch($kind){
@@ -339,6 +365,7 @@ if($SelfTest) {
 if(-not $Executable -or $ExpectedSha256 -cnotmatch '^[A-Fa-f0-9]{64}$') {throw 'Supply an exact executable and SHA-256.'}
 if($CoverageInstrumented -and -not $RawProfileDirectory) {throw 'CoverageInstrumented requires an explicit RawProfileDirectory.'}
 if($FunctionalUI -and ($MeasureSeconds -or $EnableCountryForMeasurement)) {throw 'FunctionalUI requires offline checks without measurement.'}
+if($HostedResource -and ($FunctionalUI -or $CoverageInstrumented -or $MeasureSeconds -ne 3600 -or -not $EnableCountryForMeasurement -or -not $MaximumHistory)) {throw 'HostedResource requires a normal executable, one hour, both databases and maximum history.'}
 if($EnableCountryForMeasurement -and -not $MeasureSeconds) {throw 'Country measurement requires a positive duration.'}
 $app=[IO.Path]::GetFullPath($Executable,$repository); Assert-Unlinked $app
 if(-not(Test-Path -LiteralPath $app -PathType Leaf) -or (Get-FileHash -LiteralPath $app).Hash -ine $ExpectedSha256) {throw 'The exact candidate executable hash differs.'}
@@ -349,6 +376,7 @@ $results=Assert-ArtifactPath $ResultsDirectory
 if(Test-Path -LiteralPath $results){throw 'The result directory must be fresh.'}
 if($RawProfileDirectory){$rawTarget=Assert-ArtifactPath $RawProfileDirectory}else{$rawTarget=$null}
 $hosted=Test-HostedRunner
+if($HostedResource -and -not $hosted) {throw 'BLOCKED: HostedResource requires the actual disposable GitHub-hosted runner.'}
 if(-not $hosted) {
     [void][IO.Directory]::CreateDirectory($results)
     Write-NewJson (Join-Path $results 'result.json') ([ordered]@{
@@ -615,12 +643,13 @@ try {
         $ui=Join-Path $results 'ui'
         $arguments=$uvPrefix+@('--exe',$app,'--output',$ui,'--expected-sha256',$ExpectedSha256,'--isolated-ci-input','--measure-seconds',[string]$MeasureSeconds,'--frameprobe',$frameprobe,'--frameprobe-sha256',$frameprobeHash)
         if($FunctionalUI){$arguments+='--functional-evidence'}
+        if($HostedResource){$arguments+='--hosted-resource-evidence'}
         if($CoverageInstrumented){$arguments+='--coverage-instrumented'}
         if($MaximumHistory){$arguments+='--maximum-history'}
         if($EnableCountryForMeasurement){$arguments+='--enable-country-for-measurement'}
         Invoke-CommandBounded 'isolated-ci-ui' $uv $arguments $timeout -Environment $environment|Out-Null
         $evidence=Get-Content -LiteralPath (Join-Path $ui 'results.json') -Raw|ConvertFrom-Json
-        Assert-UiEvidence $evidence 'GitHub-hosted Windows VM' $nonce $ExpectedSha256 $runnerHash ([bool]$CoverageInstrumented)
+        Assert-UiEvidence $evidence 'GitHub-hosted Windows VM' $nonce $ExpectedSha256 $runnerHash ([bool]$CoverageInstrumented) ([bool]$HostedResource)
         Assert-FrameprobeEvidence $evidence $frameprobeHash
         $receipt.uiResults=Join-Path $ui 'results.json'
     }else {

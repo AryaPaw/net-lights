@@ -1,0 +1,12 @@
+gpui-pre 0.3.12, Apache-2.0, registry archive SHA-256:
+29DB89613527079737F53752EAB27FB65C9A7DD94979256C65A0E590C9FD34D8
+
+The smooth_scroll curve and scheduling are backported from Ray-lea/Argus,
+commit a8c1a705481cb729758041db647a7955c10efe5e,
+vendor/gpui-pre/src/elements/div.rs (Apache-2.0).
+https://github.com/Ray-lea/Argus/tree/a8c1a705481cb729758041db647a7955c10efe5e
+
+Net Lights changes: shared inertia for Div and virtual ListState, explicit
+clock stepping, reduced-motion support, nested event ownership, cancellation
+on programmatic moves and cleanup when scroll state owners are destroyed.
+Existing Windows platform/cursor fixes remain in the separate windows crate.

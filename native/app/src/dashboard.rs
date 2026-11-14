@@ -174,6 +174,9 @@ pub struct HistoryEvent {
     pub kind: EventKind,
 }
 impl HistoryEvent {
+    pub fn same_record(&self, other: &Self) -> bool {
+        self.start == other.start && self.kind == other.kind
+    }
     pub fn color(&self) -> u32 {
         match &self.kind {
             EventKind::Availability { state, paused, .. } => {
@@ -182,6 +185,22 @@ impl HistoryEvent {
             EventKind::Country { current, .. } => crate::charts::country_color(current),
         }
     }
+}
+/// Keep a clicked timeline interval in the event list even when it isn't one
+/// of the recent incidents (for example, a healthy or older interval).
+pub fn event_rows(recent: &[HistoryEvent], selected: Option<&HistoryEvent>) -> Vec<HistoryEvent> {
+    let mut rows = recent.to_vec();
+    if let Some(event) = selected {
+        if let Some(index) = rows.iter().position(|row| row.same_record(event)) {
+            // Selection is a snapshot. A live refresh mustn't silently extend
+            // its duration while the timeline outline still shows the old end.
+            rows[index] = event.clone();
+        } else {
+            let index = rows.partition_point(|row| row.start > event.start);
+            rows.insert(index, event.clone());
+        }
+    }
+    rows
 }
 pub fn country_changes(history: &LocationHistory, range: TimeRange) -> Vec<HistoryEvent> {
     // The loader and observation owner maintain chronological stays. A resumed
@@ -335,6 +354,55 @@ pub fn overall(snapshot: &MonitorSnapshot) -> (Availability, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_healthy_or_old_interval_is_inline_and_live_refresh_preserves_its_snapshot() {
+        let now: DateTime<Utc> = "2026-11-13T12:00:00Z".parse().unwrap();
+        let selected = HistoryEvent {
+            start: now - Duration::hours(3),
+            end: now,
+            ongoing: true,
+            kind: EventKind::Availability {
+                group: Group::Ru,
+                state: Availability::Online,
+                paused: false,
+            },
+        };
+        let recent: Vec<_> = (0..8)
+            .map(|i| HistoryEvent {
+                start: now - Duration::minutes(i),
+                end: now,
+                kind: EventKind::Availability {
+                    group: Group::World,
+                    state: Availability::Offline,
+                    paused: false,
+                },
+                ongoing: false,
+            })
+            .collect();
+        let rows = event_rows(&recent, Some(&selected));
+        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.last(), Some(&selected));
+        assert_eq!(event_rows(&recent, None), recent);
+        let refreshed = HistoryEvent {
+            end: now + Duration::minutes(1),
+            ..selected.clone()
+        };
+        assert!(refreshed.same_record(&selected));
+        assert_eq!(
+            event_rows(&[refreshed], Some(&selected)),
+            vec![selected.clone()]
+        );
+        let other_group = HistoryEvent {
+            kind: EventKind::Availability {
+                group: Group::World,
+                state: Availability::Online,
+                paused: false,
+            },
+            ..selected.clone()
+        };
+        assert!(!other_group.same_record(&selected));
+        assert_eq!(event_rows(&[other_group], Some(&selected)).len(), 2);
+    }
     fn range(hours: u32) -> TimeRange {
         let end: DateTime<Utc> = "2026-11-12T12:00:00Z".parse().unwrap();
         TimeRange {

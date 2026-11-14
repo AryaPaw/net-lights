@@ -32,6 +32,19 @@ finally {
     if (-not $agentProbe.HasExited) { $agentProbe.Kill($true); $agentProbe.WaitForExit(5000) | Out-Null }
     $agentProbe.Dispose()
 }
+# Invalid static inspections must fail before opening a profile, without a dialog.
+foreach ($inspectionArguments in @(@('--inspect-page','about'), @('--inspect-page','invalid'), @('--inspect-copy-feedback'))) {
+    $start = [Diagnostics.ProcessStartInfo]::new($exe)
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    foreach ($argument in $inspectionArguments) { $start.ArgumentList.Add($argument) }
+    $probe = [Diagnostics.Process]::Start($start)
+    try {
+        if (-not $probe.WaitForExit(5000) -or $probe.ExitCode -ne 1) { throw 'Unsafe or non-terminating inspection preflight.' }
+    } finally {
+        if (-not $probe.HasExited) { $probe.Kill($true); $probe.WaitForExit(5000) | Out-Null }
+        $probe.Dispose()
+    }
+}
 $seedStart = [DateTimeOffset]::UtcNow.AddMinutes(-5).ToString('o')
 $seedEnd = [DateTimeOffset]::UtcNow.AddMinutes(-4).ToString('o')
 @{settingsVersion=0; autoStart=$true; autoUpdateEnabled=$true; geoCountryDetectionEnabled=$false; availabilityPollingSeconds=5; countryPollingSeconds=10; windowWidth=1000; windowHeight=800} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testProfileDirectory 'settings.json') -Encoding utf8

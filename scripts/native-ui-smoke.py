@@ -42,6 +42,12 @@ DEBUG = "Debug: источники определения"
 WM_CLOSE, WM_MOUSEMOVE, WM_MOUSEWHEEL = 0x0010, 0x0200, 0x020A
 NO_CONSOLE = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+def invocation_candidates(controls):
+    """A heading/text and an action can have the same label. Never click text
+    coordinates when an invocation was meant for a real control."""
+    kinds={"Button","TabItem","CheckBox","RadioButton","ComboBox","Hyperlink","MenuItem","ListItem","TreeItem","SplitButton"}
+    return [control for control in controls if control.element_info.control_type in kinds]
+
 
 def rectangle_inside(rect, bounds):
     a,b,c,d=bounds
@@ -1092,6 +1098,8 @@ class Automation:
                         if command == "exists":
                             value = any(c.is_visible() for c in controls)
                         else:
+                            if command == "invoke":
+                                controls = invocation_candidates(controls)
                             if not controls:
                                 raise RuntimeError(f"Контрол не найден: {name}")
                             control = next((c for c in controls if c.is_visible()), controls[0])
@@ -1293,16 +1301,25 @@ def normalize_resources(source, destination, pid, started, ended, requested_seco
                 source_timestamps_preserved=True)
 
 
+def validate_resource_mode(enabled, functional, seconds, country, maximum, coverage, hosted):
+    if enabled and (functional or seconds != 3600 or not country or not maximum or coverage or not hosted):
+        raise ValueError("Hosted resource evidence requires a normal exe, one hour, both databases, maximum history and an actual hosted input policy")
+
+
 class Runner:
-    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None, coverage_instrumented=False, frameprobe=None, frameprobe_sha=None):
+    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None, coverage_instrumented=False, frameprobe=None, frameprobe_sha=None, hosted_resource=False):
         if not __debug__:
             raise RuntimeError("Проверки требуют включённых assert: уберите -O и PYTHONOPTIMIZE")
         if functional_evidence and (measure_seconds or enable_country):
             raise ValueError("Функциональный offline UI-режим не допускает ресурсный прогон или публичное Geo-определение")
+        validate_resource_mode(hosted_resource, functional_evidence, measure_seconds, enable_country, maximum, coverage_instrumented, input_policy is not None and input_policy.ci)
+        if hosted_resource:
+            input_policy.assert_pointer_input_allowed()
         self.exe, self.output, self.profile = exe, output, output/"profile"
         self.api, self.process, self.uia = Win32(), None, None
         self.measure_seconds, self.results, self.captures = measure_seconds, [], []
         self.functional_evidence=functional_evidence
+        self.compact_hosted_geometry=functional_evidence or hosted_resource
         self.coverage_instrumented=coverage_instrumented
         self.frameprobe,self.frameprobe_sha=frameprobe,frameprobe_sha
         self.enable_country, self.country_enabled, self.measurement_blocked = enable_country, False, False
@@ -1317,8 +1334,8 @@ class Runner:
             windows_build=windows.build, windows_product_type=windows.product_type,
             measured_seconds=measure_seconds, dpi_changed=False, physical_input=input_policy is not None,
             assertions_enabled=__debug__)
-        self.meta["evidenceLevel"] = "functional" if functional_evidence else "Windows 11 native visual"
-        self.meta["visualAcceptance"] = "NOT RUN" if functional_evidence else "requires screenshot review"
+        self.meta["evidenceLevel"] = "GitHub-hosted Windows resource measurement" if hosted_resource else ("functional" if functional_evidence else "Windows 11 native visual")
+        self.meta["visualAcceptance"] = "NOT RUN" if functional_evidence or hosted_resource else "requires screenshot review"
         self.meta["coverage_instrumented"] = coverage_instrumented
         self.meta["navigation_capture_workers"] = []
         self.meta["navigation_frameprobe_sha256"] = frameprobe_sha
@@ -1326,7 +1343,7 @@ class Runner:
         self.meta["country_measurement_requested"] = enable_country
         self.meta["locale_required"] = (pathlib.Path(__file__).resolve().parents[1]/"native/core/src/locale.rs").is_file()
         self.meta["input_isolation"] = input_policy.evidence if input_policy else dict(scope="host-owned HWND messages", guard="no-real-pointer-input")
-        if not functional_evidence and (windows.build < 22000 or windows.product_type != 1):
+        if not functional_evidence and not hosted_resource and (windows.build < 22000 or windows.product_type != 1):
             raise RuntimeError("Визуальная приёмка требует Windows 11")
         self.resources = ResourceLog(self.api, exe, output/"resources.csv")
 
@@ -1388,11 +1405,11 @@ class Runner:
         assert self.api.owner(self.uia.hwnd) == self.process.pid
         self.meta["dpi"] = self.api.user.GetDpiForWindow(self.uia.hwnd)
         work=self.api.work_area(self.uia.hwnd)
-        required_height=1000 if self.functional_evidence else 1300
+        required_height=1000 if self.compact_hosted_geometry else 1300
         if work[2]<1450 or work[3]<required_height:
             raise RuntimeError("Actual work area cannot exercise the required functional/visual UI matrix")
         self.meta.setdefault("viewports",[]).append(dict(pid=self.process.pid,work_area=work,
-            outer=self.api.outer(self.uia.hwnd),compact_functional=self.functional_evidence and work[3]<1300))
+            outer=self.api.outer(self.uia.hwnd),compact_functional=self.compact_hosted_geometry and work[3]<1300))
         expected_navigation = startup_navigation_label(self.setting("language"))
         self.meta.setdefault("startup_navigation", []).append(dict(pid=self.process.pid,
             saved_language=self.setting("language"), expected_label=expected_navigation))
@@ -1802,7 +1819,7 @@ class Runner:
         def check(name,active,scroll=False):
             r=self.visible_control(name) if scroll else self.uia.call("rect",name)
             target=((r[0]+r[2])//2,(r[1]+r[3])//2)
-            self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,target)
+            self.input_policy.send_mouse_path(self.api,self.uia.hwnd,self.process.pid,target)
             def matches():
                 self.input_policy.assert_pointer_input_allowed()
                 assert self.api.user.GetForegroundWindow()==self.uia.hwnd
@@ -1832,6 +1849,32 @@ class Runner:
         check("Исходный код",True,True)
         return results
 
+    def settings_scroll_sections(self):
+        self.page("Параметры")
+        hwnd,pid=self.uia.hwnd,self.process.pid
+        original=self.api.outer(hwnd)
+        scale=self.meta["dpi"]/96.
+        try:
+            self.resize_fitted(original[2],min(original[3],round(860*scale)))
+            label="Проверки и трафик, текущий раздел" if self.uia.call("exists","Проверки и трафик, текущий раздел") else "Проверки и трафик"
+            self.uia.call("invoke",label)
+            time.sleep(.35)
+            seen=["Проверки и трафик"]
+            for _ in range(8):
+                self.api.wheel(hwnd,self.content_point(),-120)
+                until=time.monotonic()+.4
+                while time.monotonic()<until:
+                    selected=next((r["name"].split(",")[0] for r in self.uia.call("inventory") if r["kind"]=="Button" and ", текущий раздел" in r["name"]),None)
+                    if selected and seen[-1]!=selected:seen.append(selected)
+                    time.sleep(.01)
+                if seen[-1]=="Приложение":break
+            assert "Локация" in seen, f"Ordinary wheel skipped the country section: {seen}"
+            assert seen[-1]=="Приложение", f"Wheel never reached the final section: {seen}"
+            return dict(single_notch_sections=seen,physical_input=False)
+        finally:
+            assert self.api.owner(hwnd)==pid
+            if not self.api.user.SetWindowPos(hwnd,None,*original,0x14):raise ct.WinError(ct.get_last_error())
+
     def fluent_controls(self):
         assert self.input_policy, "Fluent interaction requires the isolated input policy"
         self.input_policy.assert_identity()
@@ -1855,7 +1898,7 @@ class Runner:
             heights[name]=height
         for name in ("Проверить сейчас","Пауза"):
             r=next(r["rect"] for r in tabs if r["kind"]=="Button" and r["name"]==name and r["visible"])
-            assert abs((r[3]-r[1])/scale-24)<=1.1, f"Fluent compact button: {name}"
+            assert abs((r[3]-r[1])/scale-32)<=1.1, f"Toolbar button must match the tab height: {name}"
         self.capture("fluent-navigation-metrics")
         motion=self.navigation_motion(tabs)
         self.uia.call("invoke","Состояние")
@@ -1873,8 +1916,24 @@ class Runner:
                                creationflags=NO_CONSOLE,check=True).stdout.strip()
         assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?",version), "CLI version is missing"
         assert self.uia.call("exists",version), "About differs from actual executable version"
+        version_rect_before = self.uia.call("rect", version)
         self.uia.call("invoke","Скопировать версию")
+        first_feedback_at = time.monotonic()
         wait_for(lambda:clipboard.GetData()==f"Net Lights {version}",5,"About copied actual version")
+        wait_for(lambda:self.uia.call("exists","Версия скопирована."),5,"Copy feedback is visible")
+        assert self.uia.call("rect", version) == version_rect_before, "Copy feedback reflowed About"
+        feedback_rect = self.uia.call("rect", "Версия скопирована.")
+        outer = self.api.outer(hwnd)
+        assert feedback_rect[0] >= outer[0]+outer[2]/2 and feedback_rect[1] >= outer[1]+outer[3]/2, "Copy feedback isn't in the lower-right corner"
+        assert feedback_rect[2] <= outer[0]+outer[2] and feedback_rect[3] <= outer[1]+outer[3], "Copy feedback is outside its window"
+        time.sleep(max(0., .9-(time.monotonic()-first_feedback_at)))
+        assert self.uia.call("exists","Версия скопирована."), "The first feedback expired before the repeated action"
+        self.uia.call("invoke","Скопировать версию")
+        time.sleep(1.2)
+        assert self.uia.call("exists","Версия скопирована."), "An older deadline dismissed repeated feedback"
+        feedback_nodes = [r for r in self.uia.call("inventory") if r["visible"] and r["kind"]=="Text" and r["name"]=="Версия скопирована."]
+        assert len(feedback_nodes)==1, "Repeated copy produced duplicate notifications"
+        wait_for(lambda:not self.uia.call("exists","Версия скопирована."),5,"Copy feedback auto-dismisses")
         self.uia.call("invoke","Источники и лицензии")
         self.visible_control("Файлы лицензий")
         self.capture("fluent-about-licenses")
@@ -1888,14 +1947,14 @@ class Runner:
                 candidates=[r for r in self.uia.call("inventory") if r["kind"]=="Button" and r["visible"] and
                             r["name"] in (anchor,anchor+", текущий раздел")]
                 assert len(candidates)==1, f"Settings anchor missing: {anchor}"
-                r=candidates[0]["rect"]
-                self.api.click(hwnd,((r[0]+r[2])//2,(r[1]+r[3])//2))
+                self.uia.call("invoke",candidates[0]["name"])
                 def reached():
                     a,b,c,d=self.content_bounds()
                     r=self.uia.call("rect",target)
                     return self.uia.call("exists",anchor+", текущий раздел") and a<=r[0]<r[2]<=c and b<=r[1]<r[3]<=d
                 wait_for(reached,5,f"Settings anchor scrolled to {anchor}")
             self.capture("fluent-settings-wide")
+            self.settings_scroll_sections()
             self.api.wheel(hwnd,self.content_point(),-3840)
             wait_for(lambda:self.uia.call("exists","Приложение, текущий раздел"),5,"anchor follows manual bottom scroll")
             narrow=self.resize_fitted(round(680*scale),original_height)
@@ -1918,7 +1977,38 @@ class Runner:
             wait_for(lambda:self.setting("windowWidth")==original_width and self.setting("windowHeight")==original_height,5,"Restored window dimensions persisted")
         self.page("Состояние")
         assert self.process.pid==pid and self.process.poll() is None
-        return dict(tabs=heights,compact_buttons=24,arrow_home_end=True,about_version=version,clipboard_in_guest=True,settings_anchors=True,narrow=True,navigation_motion=motion,cursor_affordances=cursors)
+        return dict(tabs=heights,toolbar_buttons=32,arrow_home_end=True,about_version=version,clipboard_in_guest=True,settings_anchors=True,narrow=True,navigation_motion=motion,cursor_affordances=cursors)
+
+    def inline_event_details(self):
+        self.page("Состояние")
+        candidates=[r for r in self.uia.call("inventory") if r["kind"]=="Button" and
+                    re.match(r"^\d{2}\.\d{2} \d{2}:\d{2}:\d{2}\s",r["name"])]
+        assert candidates, "Fixture must expose recent event buttons"
+        label=candidates[0]["name"]
+        self.visible_control(label)
+        self.uia.call("invoke",label)
+        wait_for(lambda:self.uia.call("exists","Подробности события"),description="event expanded inline")
+        self.visible_control("Подробности события")
+        row=self.uia.call("rect",label)
+        details=self.uia.call("rect","Подробности события")
+        assert details[1]>=row[3]-2, "Details must be below their row, not in a separate card above history"
+        assert details[1]-row[3]<self.meta["dpi"]/96*70, "Expanded details detached from event row"
+        self.capture("overview-inline-event")
+        self.uia.call("invoke",label)
+        wait_for(lambda:not self.uia.call("exists","Подробности события"),description="same event collapses")
+        self.uia.call("invoke",label)
+        wait_for(lambda:self.uia.call("exists","Подробности события"),description="event reopens")
+        hwnd=self.uia.hwnd
+        assert self.api.owner(hwnd)==self.process.pid
+        self.api.post(hwnd,0x0100,0x1b,1)
+        self.api.post(hwnd,0x0101,0x1b,0xc0000001)
+        wait_for(lambda:not self.uia.call("exists","Подробности события"),description="Escape clears event selection")
+        self.uia.call("invoke",label)
+        self.visible_control("Снять выделение")
+        self.uia.call("invoke","Снять выделение")
+        wait_for(lambda:not self.uia.call("exists","Подробности события") and
+                 not self.uia.call("exists","Снять выделение"),description="visible action clears event and outline")
+        return dict(inline_geometry=True,same_event_toggle=True,escape=True,clear_action=True,physical_input=False)
 
     def overview_interactions(self):
         from PIL import Image
@@ -1972,7 +2062,7 @@ class Runner:
         tooltip = wait_for(readout, description="общая подсказка различает два направления в один момент")
         self.capture("overview-linked-tooltip")
         self.api.click(self.uia.hwnd,target)
-        self.visible_control("Выбранное событие")
+        self.visible_control("Подробности события")
         self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,(target[0],outer[1]+100))
         history = profile_json_snapshot(self.profile, "availability-history.json")
         local = lambda value: dt.datetime.fromisoformat(value.replace("Z","+00:00")).astimezone().strftime("%d.%m %H:%M:%S")
@@ -2530,6 +2620,7 @@ class Runner:
             if self.meta["locale_required"]:
                 self.check("state-no-duplicate-provider-world", self.state_heading_counts)
             if not self.meta["fixture"]["maximum_history"]:
+                self.check("inline-event-toggle-escape-and-clear",self.inline_event_details)
                 self.check("overview-linked-selection-zoom-and-addresses",self.overview_interactions)
             self.check("default-debug-off", self.default_debug_off)
             for page in PAGES[:2]:
@@ -2604,6 +2695,24 @@ class Runner:
 
 
 def uia_retry_selftest():
+    valid = dict(enabled=True, functional=False, seconds=3600, country=True, maximum=True, coverage=False, hosted=True)
+    validate_resource_mode(**valid)
+    for field, value in [("functional", True), ("seconds", 20), ("country", False), ("maximum", False), ("coverage", True), ("hosted", False)]:
+        bad = dict(valid, **{field:value})
+        try:
+            validate_resource_mode(**bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Hosted resource guard accepted invalid {field}")
+    from types import SimpleNamespace
+    title=SimpleNamespace(element_info=SimpleNamespace(control_type="Text"))
+    button=SimpleNamespace(element_info=SimpleNamespace(control_type="Button"))
+    tab=SimpleNamespace(element_info=SimpleNamespace(control_type="TabItem"))
+    assert invocation_candidates([title,button])==[button]
+    assert invocation_candidates([button,title])==[button]
+    assert invocation_candidates([title])==[]
+    assert invocation_candidates([tab,title])==[tab]
     """No COM, windows or physical input; exercise the actual query policy."""
     from unittest.mock import patch
 
@@ -3051,6 +3160,8 @@ def main():
     parser.add_argument("--maximum-history", action="store_true", help="70 000 наблюдений, 70 000 периодов стран и 10 000 интервалов доступности")
     parser.add_argument("--functional-evidence", action="store_true",
                         help="Функциональные native UI-проверки на Windows Server; визуальная приёмка Windows 11 остаётся NOT RUN")
+    parser.add_argument("--hosted-resource-evidence", action="store_true",
+                        help="Часовой ресурсный прогон на GitHub-hosted Windows; визуальная приёмка Windows 11 остаётся NOT RUN")
     parser.add_argument("--coverage-instrumented", action="store_true",
                         help="Сборка с покрытием: плавность проверяется отдельно на обычном exe")
     parser.add_argument("--enable-country-for-measurement", action="store_true",
@@ -3070,7 +3181,7 @@ def main():
     except (OSError, ValueError) as error:
         parser.error(str(error))
     output.mkdir(parents=True, exist_ok=False)
-    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy, args.coverage_instrumented,frameprobe,args.frameprobe_sha256)
+    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy, args.coverage_instrumented,frameprobe,args.frameprobe_sha256,args.hosted_resource_evidence)
     runner.run(args.inventory_only)
     print(json.dumps(dict(result="NOT RUN" if runner.measurement_blocked else "PASS", output=str(output), screenshots=len(runner.captures), resource_seconds=args.measure_seconds), ensure_ascii=False), flush=True)
     if runner.measurement_blocked:

@@ -1,11 +1,13 @@
 mod export;
-mod journal;
+mod network_log;
+pub(crate) use network_log::geo_notice;
+pub(crate) mod journal;
 use anyhow::Result;
 use chrono::Utc;
 use journal::Journal;
 use netlights_core::{
     diagnostics::Diagnostics,
-    geo::GeoService,
+    geo::{GeoDiagnostic, GeoService},
     history::*,
     locale::{Language, LocalizedText},
     model::*,
@@ -57,6 +59,7 @@ pub struct State {
     pub traffic_limit: Option<u64>,
     pub traffic_baseline: Option<u64>,
     pub database_status: [String; 2],
+    pub geo_diagnostic: Option<GeoDiagnostic>,
     pub export_path: Option<PathBuf>,
     pub export_busy: bool,
     pub shutting_down: bool,
@@ -72,6 +75,7 @@ pub struct Backend {
     done: Arc<AtomicBool>,
     _thread: Option<thread::JoinHandle<()>>,
     closed_reported: bool,
+    journal: Journal,
 }
 impl Backend {
     pub fn start(profile: Profile, isolated: bool, suppress_updates: bool) -> Result<Self> {
@@ -95,6 +99,7 @@ impl Backend {
             traffic_limit: None,
             traffic_baseline: None,
             database_status: ["Не загружена".into(), "Не загружена".into()],
+            geo_diagnostic: None,
             export_path: None,
             export_busy: false,
             shutting_down: false,
@@ -112,10 +117,14 @@ impl Backend {
         let done = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let finished = done.clone();
+        let journal = Journal::new(&profile.root);
+        #[cfg(not(test))]
+        journal::install_panic_hook(journal.clone());
+        let worker_journal = journal.clone();
         let worker = thread::Builder::new()
             .name("netlights-monitor".into())
             .spawn(move || {
-                let journal = Journal::new(&profile.root);
+                let journal = worker_journal;
                 journal.event("runtime-start");
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -152,10 +161,14 @@ impl Backend {
             done,
             _thread: Some(worker),
             closed_reported: false,
+            journal,
         })
     }
     pub fn command(&self, command: Command) -> bool {
         self.sender.try_send(command).is_ok()
+    }
+    pub(crate) fn journal(&self) -> Journal {
+        self.journal.clone()
     }
     pub fn current(&self) -> Arc<State> {
         self.state.borrow().clone()
@@ -205,12 +218,18 @@ struct RuntimePolicy {
     suppress_updates: bool,
 }
 enum Event {
+    GeoStatus {
+        epoch: u64,
+        generation: u64,
+        diagnostic: GeoDiagnostic,
+    },
     Geo {
         epoch: u64,
         generation: u64,
         observation: Box<LocationObservation>,
         versions: [String; 2],
         quota_failed: bool,
+        diagnostic: Option<GeoDiagnostic>,
     },
     Update {
         text: LocalizedText,
@@ -246,12 +265,32 @@ async fn geo_loop(
             service = GeoService::new(root.clone(), traffic.clone()).ok();
         }
         let Some(service) = service.as_mut() else {
-            tokio::select! { _ = tokio::time::sleep(Duration::from_secs(30)) => {}, _ = control.changed() => {} }
+            let monitor_epoch = *epoch.borrow();
+            let mut diagnostic = geo_local_failure(state.seconds);
+            diagnostic.primary.deferred = true;
+            if events
+                .send(Event::GeoStatus {
+                    epoch: monitor_epoch,
+                    generation: state.generation,
+                    diagnostic,
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::select! { _ = tokio::time::sleep(Duration::from_secs(state.seconds)) => {}, change = control.changed() => { if change.is_err() { break; } } }
             continue;
         };
         let monitor_epoch = *epoch.borrow();
         let observation = tokio::select! {
-            result = service.observe() => result.ok(),
+            result = service.observe() => match result {
+                Ok(observation) => Some(observation),
+                Err(_) => {
+                    if events.send(Event::GeoStatus { epoch: monitor_epoch, generation: state.generation, diagnostic: geo_local_failure(state.seconds) }).await.is_err() { break; }
+                    None
+                }
+            },
             change = control.changed() => { if change.is_err() { break; } service.network_changed(); continue; }
         };
         if let Some(observation) = observation {
@@ -274,6 +313,7 @@ async fn geo_loop(
                 observation: Box::new(observation),
                 versions,
                 quota_failed: service.quota_failure().is_some(),
+                diagnostic: service.diagnostic(state.seconds),
             };
             // Closing the consumer wakes a blocked publisher during shutdown.
             // An interval change mustn't discard a successfully observed IP.
@@ -289,6 +329,21 @@ async fn geo_loop(
     }
     if let Some(mut service) = service {
         service.shutdown().await;
+    }
+}
+
+fn geo_local_failure(seconds: u64) -> GeoDiagnostic {
+    let at = Utc::now();
+    GeoDiagnostic {
+        observed_utc: at,
+        primary: netlights_core::geo::GeoSourceDiagnostic {
+            issue: Some(netlights_core::geo::GeoIssue::LocalResource),
+            ..Default::default()
+        },
+        fallback: None,
+        ip_mismatch: false,
+        confirmed: false,
+        next_attempt_utc: at + chrono::Duration::seconds(seconds.min(86400) as i64),
     }
 }
 
@@ -347,6 +402,7 @@ async fn run(
     let mut save_requested = false;
     let mut guard = TrafficGuard::default();
     let mut next_update = Instant::now() + Duration::from_secs(30);
+    let mut network_log = network_log::NetworkLog::default();
     let installed = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.join("unins000.exe").is_file()))
@@ -402,17 +458,20 @@ async fn run(
                     Command::Pause(paused) => { monitor.set_paused(paused, now); cancel_sender.send_modify(|g| *g += 1); journal.event(if paused { "paused" } else { "resumed" }); },
                     Command::CheckNow => monitor.request_check(now),
                     Command::Suspend => {
+                        state.geo_diagnostic = None;
                         suspended = true; profile.availability.close(Utc::now()); profile.locations.close(profile.locations.last_observed_utc.unwrap_or(Utc::now()));
                         cancel_sender.send_modify(|g| *g += 1); geo_sender.send_modify(|g| g.restart(false)); journal.event("power-suspend");
                         start_save(&profile, state.settings_generation, &persisted, &mut save_task);
                     },
                     Command::Resume | Command::NetworkChanged(true) => {
+                        state.geo_diagnostic = None;
                         suspended = false; monitor.new_epoch(now); cancel_sender.send_modify(|g| *g += 1); epoch_sender.send_replace(monitor.epoch());
                         monitor.network_unavailable = !netlights_core::platform::network_available();
                         geo_sender.send_modify(|g| g.restart(profile.settings.geo_country_detection_enabled&&!monitor.network_unavailable));
                         for t in &transports { t.recycle(); } journal.event("network-epoch");
                     },
                     Command::NetworkChanged(false) => {
+                        state.geo_diagnostic = None;
                         monitor.network_unavailable = true; cancel_sender.send_modify(|g| *g += 1);geo_sender.send_modify(|g| g.restart(false));
                         profile.locations.close(profile.locations.last_observed_utc.unwrap_or(Utc::now()));
                     },
@@ -438,7 +497,7 @@ async fn run(
                                 g.seconds = profile.settings.country_polling_seconds as u64;
                             });
                         }
-                        if previous_geo && !profile.settings.geo_country_detection_enabled { profile.locations.close(profile.locations.last_observed_utc.unwrap_or(Utc::now())); }
+                        if previous_geo && !profile.settings.geo_country_detection_enabled { state.geo_diagnostic = None; profile.locations.close(profile.locations.last_observed_utc.unwrap_or(Utc::now())); }
                         save_requested = true;
                     },
                     Command::Diagnose(id) => {
@@ -465,6 +524,9 @@ async fn run(
             result = probes.join_next_with_id(), if !probes.is_empty() => {
                 if let Some(Ok((id,(work, result,detail)))) = result {
                     probe_owners.remove(&id);
+                    if work.epoch == monitor.epoch() && !work.manual && result.outcome != Outcome::Cancelled
+                        && let Some(index) = state.monitor.groups.iter().find(|g| g.group == work.endpoint.group).and_then(|g| g.endpoints.iter().position(|e| e.endpoint.id == work.endpoint.id))
+                        && let Some(code) = network_log.probe(work.endpoint.group, index, &result, Instant::now()) { journal.event(&code); }
                     if work.manual { state.diagnostic = diagnostic_text(&result, detail.as_ref()); }
                     monitor.complete(&work, result, started.elapsed().as_millis() as u64, Utc::now());
                 } else {
@@ -482,6 +544,11 @@ async fn run(
                 changed = true;
             },
             _ = auxiliary.join_next(), if !auxiliary.is_empty() => {},
+        }
+        if let Some(report) = &state.geo_diagnostic {
+            for code in network_log.geo(report, Instant::now()) {
+                journal.event(&code);
+            }
         }
         changed |=
             prune_locations_if_due(&mut profile, &mut last_prune, Instant::now(), Utc::now());
@@ -636,12 +703,26 @@ fn apply_event(
     network_active: bool,
 ) -> bool {
     match event {
+        Event::GeoStatus {
+            epoch: observed_epoch,
+            generation: observed_generation,
+            diagnostic,
+        } => {
+            if observed_epoch == epoch
+                && observed_generation == generation
+                && profile.settings.geo_country_detection_enabled
+                && network_active
+            {
+                state.geo_diagnostic = Some(diagnostic);
+            }
+        }
         Event::Geo {
             epoch: observed_epoch,
             generation: observed_generation,
             observation,
             versions,
             quota_failed,
+            diagnostic,
         } => {
             if observed_epoch == epoch
                 && observed_generation == generation
@@ -650,6 +731,7 @@ fn apply_event(
             {
                 profile.locations.observe(*observation);
                 state.database_status = versions;
+                state.geo_diagnostic = diagnostic;
                 if quota_failed {
                     warn(
                         &mut state.warnings,
@@ -943,6 +1025,78 @@ mod tests {
     use super::*;
     use std::fs;
     #[test]
+    fn geo_failures_are_explained_in_both_languages_and_old_generations_cannot_replace_them() {
+        use netlights_core::geo::{GeoIssue, GeoSourceDiagnostic};
+        let mut profile = fixture_profile();
+        profile.settings.geo_country_detection_enabled = true;
+        let mut state = fixture_state(&profile);
+        let at = Utc::now();
+        let report = GeoDiagnostic {
+            observed_utc: at,
+            primary: GeoSourceDiagnostic {
+                issue: Some(GeoIssue::Deadline),
+                elapsed_ms: 5000,
+                ..Default::default()
+            },
+            fallback: Some(GeoSourceDiagnostic {
+                issue: Some(GeoIssue::RateLimit),
+                http_status: Some(429),
+                retry_until: Some(at + chrono::Duration::seconds(600)),
+                ..Default::default()
+            }),
+            confirmed: false,
+            ip_mismatch: false,
+            next_attempt_utc: at + chrono::Duration::seconds(10),
+        };
+        for (epoch, generation, active) in [(4, 11, true), (5, 10, true), (5, 11, false)] {
+            apply_event(
+                Event::GeoStatus {
+                    epoch,
+                    generation,
+                    diagnostic: report.clone(),
+                },
+                &mut profile,
+                &mut state,
+                5,
+                11,
+                active,
+            );
+            assert!(state.geo_diagnostic.is_none());
+        }
+        apply_event(
+            Event::GeoStatus {
+                epoch: 5,
+                generation: 11,
+                diagnostic: report,
+            },
+            &mut profile,
+            &mut state,
+            5,
+            11,
+            true,
+        );
+        assert!(
+            profile.locations.observations.is_empty(),
+            "A runtime failure mustn't fabricate an IP observation"
+        );
+        let ru = geo_notice(&state, Language::Ru).unwrap();
+        assert!(ru.contains("country.is: ответ не получен"));
+        assert!(ru.contains("HTTP 429"));
+        assert!(ru.contains("Повтор запланирован"));
+        let en = geo_notice(&state, Language::En).unwrap();
+        assert!(en.contains("the request timed out"));
+        assert!(en.contains("Next attempt scheduled"));
+        let recovered = state.geo_diagnostic.as_mut().unwrap();
+        recovered.primary.issue = None;
+        recovered.fallback = None;
+        recovered.confirmed = true;
+        assert!(geo_notice(&state, Language::Ru).is_none());
+        state.settings.geo_country_detection_enabled = false;
+        state.monitor.network_unavailable = true;
+        assert!(geo_notice(&state, Language::Ru).is_none());
+        fs::remove_dir_all(profile.root).unwrap();
+    }
+    #[test]
     fn disabled_country_history_expires_without_creating_observations_or_changing_os_clock() {
         let mut profile = fixture_profile();
         profile.settings.geo_country_detection_enabled = false;
@@ -1066,6 +1220,7 @@ mod tests {
             traffic_limit: None,
             traffic_baseline: None,
             database_status: ["old-v2".into(), "old-ip".into()],
+            geo_diagnostic: None,
             export_path: None,
             export_busy: false,
             shutting_down: false,
@@ -1106,6 +1261,7 @@ mod tests {
                     observation: Box::new(observation(at + chrono::Duration::seconds(10), "JP")),
                     versions: ["new-v2".into(), "new-ip".into()],
                     quota_failed: true,
+                    diagnostic: None,
                 },
                 &mut profile,
                 &mut state,
@@ -1142,6 +1298,7 @@ mod tests {
             observation: Box::new(observation(at + chrono::Duration::seconds(10), "DE")),
             versions: ["stale-v2".into(), "stale-ip".into()],
             quota_failed: true,
+            diagnostic: None,
         };
         profile.settings.geo_country_detection_enabled = false;
         control.restart(false);
@@ -1169,6 +1326,7 @@ mod tests {
                 observation: Box::new(observation(at + chrono::Duration::seconds(30), "DE")),
                 versions: ["fresh-v2".into(), "fresh-ip".into()],
                 quota_failed: false,
+                diagnostic: None,
             },
             &mut profile,
             &mut state,
@@ -1207,6 +1365,7 @@ mod tests {
                     )),
                     versions: ["new-v2".into(), "new-ip".into()],
                     quota_failed: true,
+                    diagnostic: None,
                 },
                 &mut profile,
                 &mut state,

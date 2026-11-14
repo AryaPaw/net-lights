@@ -138,6 +138,14 @@ impl Error for ConnectFailure {
 }
 #[derive(Debug)]
 struct DnsFailure(io::Error);
+#[derive(Debug)]
+struct ResponseSizeLimit;
+impl fmt::Display for ResponseSizeLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Response exceeds its size limit")
+    }
+}
+impl Error for ResponseSizeLimit {}
 impl fmt::Display for DnsFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("DNS resolution failed")
@@ -447,6 +455,15 @@ impl Transport {
         probe.elapsed_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
         probe
     }
+    pub fn failure_code(error: &anyhow::Error) -> &'static str {
+        if error.is::<tokio::time::error::Elapsed>() {
+            "deadline"
+        } else if error.is::<ResponseSizeLimit>() {
+            "response-size"
+        } else {
+            classify_error(error).failure.unwrap_or("local-resource")
+        }
+    }
     pub async fn get(
         &self,
         url: &Url,
@@ -480,7 +497,7 @@ impl Transport {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
             {
-                anyhow::ensure!(length <= maximum as u64, "Response exceeds its size limit");
+                anyhow::ensure!(length <= maximum as u64, ResponseSizeLimit);
             }
             let mut body = response.into_body();
             let mut bytes = Vec::new();
@@ -488,7 +505,7 @@ impl Transport {
                 if let Ok(data) = frame?.into_data() {
                     anyhow::ensure!(
                         bytes.len().saturating_add(data.len()) <= maximum,
-                        "Response exceeds its size limit"
+                        ResponseSizeLimit
                     );
                     bytes.extend_from_slice(&data);
                 }
@@ -695,6 +712,29 @@ pub fn retry_after(status: u16, header: Option<&str>, now: DateTime<Utc>) -> u64
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn public_failure_codes_preserve_request_timeout_dns_tls_and_size_categories() {
+        let timeout = tokio::time::timeout(Duration::from_millis(1), std::future::pending::<()>())
+            .await
+            .unwrap_err();
+        assert_eq!(Transport::failure_code(&timeout.into()), "deadline");
+        let dns = ConnectFailure::Network(Box::new(DnsFailure(io::Error::new(
+            io::ErrorKind::NotFound,
+            "token=private-fixture",
+        ))));
+        assert_eq!(Transport::failure_code(&anyhow::Error::new(dns)), "dns");
+        let tls = ConnectFailure::Tls(io::Error::other(rustls::Error::General(
+            "private-fixture".into(),
+        )));
+        assert_eq!(
+            Transport::failure_code(&anyhow::Error::new(tls)),
+            "tls-protocol"
+        );
+        assert_eq!(
+            Transport::failure_code(&anyhow::Error::new(ResponseSizeLimit)),
+            "response-size"
+        );
+    }
     use crate::model::{Endpoint, Group};
     use std::sync::atomic::AtomicUsize;
     use tokio::{io::AsyncReadExt, net::TcpListener, task::JoinSet};

@@ -56,6 +56,20 @@ function New-OwnedDirectory([string]$Root, [string]$Path) {
     Assert-Unlinked $Path
 }
 
+function Test-ApprovedLocalDependency($Package, [string]$BaseRoot = $repositoryRoot) {
+    if ($Package.source -or $Package.name -cnotin @('gpui-pre','gpui-pre-windows') -or
+        $Package.version -cne '0.3.12' -or $Package.license -cne 'Apache-2.0') { return $false }
+    $sourceRoot = [IO.Path]::GetFullPath((Join-Path $BaseRoot ('native/vendor/' + $Package.name)))
+    $manifest = [IO.Path]::GetFullPath([string]$Package.manifest_path)
+    if (-not $manifest.Equals((Join-Path $sourceRoot 'Cargo.toml'), [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    Assert-Unlinked $sourceRoot
+    $license = Join-Path $sourceRoot 'LICENSE-APACHE'
+    $notice = Join-Path $sourceRoot 'NOTICE.NetLights-patch.txt'
+    if (-not [IO.File]::Exists($license) -or -not [IO.File]::Exists($notice) -or
+        ([IO.FileInfo]::new($notice)).Length -gt 4096 -or ([IO.FileInfo]::new($notice)).Length -lt 32) { return $false }
+    return (Get-FileHash -LiteralPath $license -Algorithm SHA256).Hash -ceq '752DAF2FB234CA4A1FA372C073FE127F44B7B90FD2529AE44273A64F9D53DA7A'
+}
+
 function Write-NewText([string]$Root, [string]$Path, [string]$Text) {
     Assert-InRoot $Root $Path
     Assert-Unlinked $Path
@@ -341,6 +355,20 @@ function Invoke-CollectorSelfTest {
     $source = Join-Path $fixture 'source'; $destination = Join-Path $fixture 'output'
     New-OwnedDirectory $fixture $source; New-OwnedDirectory $fixture $destination
     try {
+        foreach ($dependencyName in @('gpui-pre','gpui-pre-windows')) {
+        $localPatch = Join-Path $fixture ('native/vendor/' + $dependencyName)
+        New-OwnedDirectory $fixture $localPatch
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot ('native/vendor/' + $dependencyName + '/LICENSE-APACHE')) -Destination (Join-Path $localPatch 'LICENSE-APACHE')
+        Write-NewText $fixture (Join-Path $localPatch 'NOTICE.NetLights-patch.txt') 'A bounded project patch notice for the approved Windows dependency.'
+        $localPackage = @{ source = $null; name = $dependencyName; version = '0.3.12'; license = 'Apache-2.0'; manifest_path = (Join-Path $localPatch 'Cargo.toml') }
+        if (-not (Test-ApprovedLocalDependency $localPackage $fixture)) { throw 'Self-test: approved local dependency was rejected.' }
+        foreach ($field in @('name', 'version', 'license', 'manifest_path', 'source')) {
+            $invalidLocal = $localPackage.Clone(); $invalidLocal[$field] = $(if ($field -eq 'manifest_path') { Join-Path $source 'Cargo.toml' } else { 'unapproved' })
+            if (Test-ApprovedLocalDependency $invalidLocal $fixture) { throw 'Self-test: an unapproved local dependency was accepted.' }
+        }
+        [IO.File]::WriteAllText((Join-Path $localPatch 'LICENSE-APACHE'), 'modified license')
+        if (Test-ApprovedLocalDependency $localPackage $fixture) { throw 'Self-test: a modified upstream license was accepted.' }
+        }
         Write-NewText $fixture (Join-Path $source 'LICENSE') 'fixture-license'
         Write-NewText $fixture (Join-Path $source 'LICENSE-LUCIDE') 'fixture-asset-attribution'
         Write-NewText $fixture (Join-Path $source 'LEGAL.txt') 'fixture-declared-license'
@@ -470,7 +498,9 @@ try {
         $entry = [ordered]@{ name = $name; version = $version; spdx = $package.license; repository = (Safe-Repository $package.repository); status = 'missing-source-license'; directory = "$name-$version"; files = @(); reasons = @(); warnings = @(); supplementFiles = @(); registryLicenseTextMissing = $false }
         if ($entry.directory.Length -gt 120) { throw 'Package directory name exceeds its limit.' }
         try {
-            if (-not $package.source -or $package.source -notmatch '^(registry|sparse)\+') { throw 'unsupported-non-registry-source' }
+            $approvedLocalPatch = Test-ApprovedLocalDependency $package
+            if (-not $approvedLocalPatch -and (-not $package.source -or $package.source -notmatch '^(registry|sparse)\+')) { throw 'unsupported-non-registry-source' }
+            if ($approvedLocalPatch) { $entry['sourceKind'] = 'project-local-patch'; $entry['patchNotice'] = 'NOTICE.NetLights-patch.txt' }
             if (-not $package.license -and -not $package.license_file) { throw 'manifest-does-not-declare-license' }
             $sourceRoot = [IO.Path]::GetDirectoryName([string]$package.manifest_path)
             $found = Find-LicenseFiles $sourceRoot $package.license_file
@@ -516,7 +546,7 @@ $index = [ordered]@{ schema = 1; generatedUtc = [DateTimeOffset]::UtcNow.ToStrin
 Write-NewText $licenseRoot (Join-Path $licenseRoot 'index.json') ($index | ConvertTo-Json -Depth 12)
 $notice = [Text.StringBuilder]::new()
 [void]$notice.AppendLine('Net Lights: уведомления о сторонних компонентах')
-[void]$notice.AppendLine('Собраны файлы лицензий, авторских прав и уведомлений из локального Cargo registry и явно указанных дополнительных источников. Их происхождение и контрольные суммы записаны в index.json.')
+[void]$notice.AppendLine('Собраны файлы лицензий, авторских прав и уведомлений из локального Cargo registry, явно разрешённого локального патча и указанных дополнительных источников. Их происхождение и контрольные суммы записаны в index.json.')
 [void]$notice.AppendLine('Сам сборщик работает офлайн и не запускает сборку. Дополнительные тексты лицензий подготовлены отдельно по указанным адресам источников.')
 [void]$notice.AppendLine('Перечень содержит разрешённый граф Windows, включая зависимости сборки и тестов. Лицензия самого Net Lights поставляется отдельно в LICENSE.')
 [void]$notice.AppendLine('SPDX и адрес репозитория получены из манифестов издателей. Наличие файлов не является заключением о выполнении всех юридических требований.')

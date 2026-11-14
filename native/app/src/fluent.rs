@@ -7,6 +7,7 @@ use gpui_kit::{
 pub const FONT: &str = "Segoe UI Variable Text";
 pub const DISPLAY_FONT: &str = "Segoe UI Variable Display";
 pub const BODY: f32 = 13.;
+pub const PAGE_TOP_INSET: f32 = 16.;
 pub const BUTTON: f32 = 32.;
 pub const COMPACT_BUTTON: f32 = 24.;
 pub const TAB: f32 = 32.;
@@ -23,18 +24,35 @@ gpui_kit::assets::icon_assets!(
 pub struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if path == "brand/net-lights.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "../../assets/brand.svg"
+            ))));
+        }
         match SettingsAssets.load(path)? {
             Some(bytes) => Ok(Some(bytes)),
             None => gpui_kit::assets::Assets.load(path),
         }
     }
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        if path == "brand/" {
+            return Ok(vec!["brand/net-lights.svg".into()]);
+        }
         let mut entries = gpui_kit::assets::Assets.list(path)?;
         entries.extend(SettingsAssets.list(path)?);
         entries.sort();
         entries.dedup();
         Ok(entries)
     }
+}
+pub fn brand_mark(size: f32) -> impl IntoElement {
+    img("brand/net-lights.svg")
+        .size(px(size))
+        .object_fit(ObjectFit::Contain)
+}
+pub fn navigation_transition() -> gpui_kit::base::motion::Transition {
+    gpui_kit::base::motion::Transition::new(std::time::Duration::from_millis(250))
+        .ease(gpui_kit::base::animation::cubic_bezier(0.33, 0., 0.1, 1.))
 }
 
 pub fn button(id: impl Into<ElementId>) -> Button {
@@ -87,6 +105,18 @@ pub fn hover(cx: &App) -> Hsla {
         .into()
 }
 
+// Compile and test the exact runtime source, without starting a GPU window.
+#[cfg(test)]
+mod argus_scroll_patch {
+    use gpui_kit::{Pixels, Point, point, px};
+    mod engine {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../vendor/gpui-pre/src/elements/smooth_scroll.rs"
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Assets;
@@ -94,6 +124,7 @@ mod tests {
     #[test]
     fn selected_fluent_icons_and_default_kit_icons_are_both_available() {
         for path in [
+            "brand/net-lights.svg",
             "icons/gauge.svg",
             "icons/map-pin.svg",
             "icons/languages.svg",

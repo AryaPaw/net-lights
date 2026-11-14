@@ -1,32 +1,71 @@
 use super::*;
 
-const SECTIONS: [&str; 3] = ["Проверки и трафик", "Локация", "Приложение"];
+use super::settings_navigation::{SECTIONS, section_at_scroll};
+use gpui_kit::base::motion::{MotionStatus, TransitionState};
 fn settings_group() -> Div {
     div().w_full().flex().flex_col().gap(px(4.))
 }
 
 impl NetLights {
+    pub(super) fn pick_settings_section(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.settings_scroll_destination = None;
+        self.settings_scroll_motion = TransitionState::default();
+        self.settings_target = Some(index);
+        self.settings_section = index;
+        self.settings_picked = true;
+        cx.notify();
+    }
     pub(super) fn settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if let Some(index) = self.settings_target.take() {
             if let Some(bounds) = self.settings_scroll.bounds_for_item(index) {
                 let target = (self.settings_scroll.bounds().top() - bounds.top())
                     .max(-self.settings_scroll.max_offset().y)
                     .min(px(0.));
-                self.settings_scroll.set_offset(point(px(0.), target));
+                self.settings_scroll_motion.sample(
+                    self.settings_scroll.offset().y,
+                    crate::fluent::navigation_transition(),
+                    window,
+                    cx,
+                );
+                self.settings_scroll_destination = Some(target);
             } else {
                 self.settings_target = Some(index);
                 window.request_animation_frame();
             }
         }
-        if !self.settings_picked {
-            self.settings_section = if self.settings_scroll.max_offset().y > px(0.)
-                && -self.settings_scroll.offset().y >= self.settings_scroll.max_offset().y - px(4.)
-            {
-                SECTIONS.len() - 1
-            } else {
-                self.settings_scroll.top_item().min(SECTIONS.len() - 1)
-            };
+        if let Some(target) = self.settings_scroll_destination {
+            let target = target.max(-self.settings_scroll.max_offset().y).min(px(0.));
+            let motion = self.settings_scroll_motion.sample(
+                target,
+                crate::fluent::navigation_transition(),
+                window,
+                cx,
+            );
+            self.settings_scroll.set_offset(point(px(0.), motion.value));
+            if matches!(motion.status, MotionStatus::Idle | MotionStatus::Finished) {
+                self.settings_scroll_destination = None;
+            }
         }
+        if !self.settings_picked && self.settings_scroll.max_offset().y > px(0.) {
+            let container = self.settings_scroll.bounds();
+            let headers: Option<Vec<f32>> = (0..SECTIONS.len())
+                .map(|index| {
+                    self.settings_scroll
+                        .bounds_for_item(index)
+                        .map(|b| f32::from(b.top() - container.top()))
+                })
+                .collect();
+            if let Some(headers) = headers {
+                self.settings_section = section_at_scroll(
+                    &headers,
+                    f32::from(container.size.height),
+                    -f32::from(self.settings_scroll.offset().y),
+                    f32::from(self.settings_scroll.max_offset().y),
+                );
+            }
+        }
+        self.settings_navigation
+            .update(cx, |nav, cx| nav.set(self.settings_section, cx));
         let narrow = window.viewport_size().width <= px(924.);
         let lead = if narrow {
             0.
@@ -165,11 +204,12 @@ impl NetLights {
                     .child(
                         crate::fluent::button("settings-folder")
                             .label(tr(cx, "Открыть папку настроек"))
+                            .disabled_with_cursor(self.shell_job.is_some())
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if platform::open_settings(&this.root).is_err() {
-                                    this.notice = "Не удалось открыть папку настроек.".into();
-                                    cx.notify();
-                                }
+                                this.open_shell(
+                                    crate::shell::Target::Directory(this.root.clone()),
+                                    cx,
+                                );
                             })),
                     )
                     .child(
@@ -216,8 +256,9 @@ impl NetLights {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.settings_scroll)
+            .lock_scroll_axis()
             .px(px(4.))
-            .pt(px(4.))
+            .pt(px(crate::fluent::PAGE_TOP_INSET))
             .pb(px(32.))
             .flex()
             .flex_col()
@@ -237,71 +278,21 @@ impl NetLights {
                             .child(group)
                     }),
             )
-            .on_scroll(cx.listener(|this, _, _, cx| {
+            .on_scroll(cx.listener(|this, _: &ScrollEvent, _, cx| {
                 this.settings_picked = false;
+                this.settings_target = None;
+                this.settings_scroll_destination = None;
+                this.settings_scroll_motion = TransitionState::default();
                 cx.notify();
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.settings_picked = false;
-                    cx.notify();
-                }),
-            );
-        let selected = self.settings_section;
+            }));
         let rail = div().absolute().inset_0().flex().justify_center().child(
             div().w_full().max_w(px(width)).relative().child(
                 div()
-                    .id("settings-navigation")
                     .absolute()
                     .left_0()
-                    .top(px(4.))
+                    .top(px(crate::fluent::PAGE_TOP_INSET))
                     .w(px(crate::fluent::SETTINGS_RAIL))
-                    .role(Role::Navigation)
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .children(SECTIONS.into_iter().enumerate().map(|(index, label)| {
-                        let chosen = index == selected;
-                        crate::fluent::button(("settings-nav", index))
-                            .h(px(36.))
-                            .justify_start()
-                            .px(px(14.))
-                            .border_0()
-                            .bg(transparent_black())
-                            .rounded(px(6.))
-                            .accessibility_label(if chosen {
-                                format!(
-                                    "{}, {}",
-                                    tr(cx, label),
-                                    language(cx).choose("текущий раздел", "current section")
-                                )
-                            } else {
-                                tr(cx, label)
-                            })
-                            .when(chosen, |b| {
-                                b.bg(surface(cx))
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left_0()
-                                            .top(px(8.))
-                                            .w(px(3.))
-                                            .h(px(18.))
-                                            .rounded(px(2.))
-                                            .bg(cx.theme().primary),
-                                    )
-                            })
-                            .label(tr(cx, label))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.settings_target = Some(index);
-                                this.settings_section = index;
-                                this.settings_picked = true;
-                                cx.notify();
-                            }))
-                    })),
+                    .child(self.settings_navigation.clone()),
             ),
         );
         div()
@@ -310,7 +301,15 @@ impl NetLights {
             .min_h_0()
             .px(px(12.))
             .child(body)
+            .vertical_scrollbar(&self.settings_scroll)
             .when(!narrow, |d| d.child(rail))
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.settings_picked = false;
+                this.settings_target = None;
+                this.settings_scroll_destination = None;
+                this.settings_scroll_motion = TransitionState::default();
+                cx.notify();
+            }))
             .into_any_element()
     }
 }

@@ -126,10 +126,11 @@ function Get-Scope([string]$Relative) {
     switch -Regex ($name) {
         '^native/core/src/(monitor|history|model|countries|locale|lib)\.rs$' { return 'Domain' }
         '^native/core/src/(transport|geo|geoip|geoip_store|diagnostics|traffic)\.rs$' { return 'Networking' }
+        '^native/core/src/geo/diagnostics\.rs$' { return 'Networking' }
         '^native/core/src/update\.rs$' { return 'Updates' }
         '^native/core/src/(platform|persistence)\.rs$' { return 'App' }
-        '^native/app/src/(main|view|geometry|location_rows|charts|dashboard|fluent|backend|tray|window_os|text)\.rs$' { return 'App' }
-        '^native/app/src/(view/(state|settings|locations|diagnostics|about|navigation)|charts/timeline|backend/(journal|export))\.rs$' { return 'App' }
+        '^native/app/src/(main|view|geometry|location_rows|charts|dashboard|fluent|shell|backend|tray|window_os|text)\.rs$' { return 'App' }
+        '^native/app/src/(view/(state|settings|settings_navigation|locations|diagnostics|about|navigation)|charts/timeline|backend/(journal|export|network_log))\.rs$' { return 'App' }
         '^native/update-agent/src/(main|win|snapshot|metadata|marker)\.rs$' { return 'Agent' }
         '^native/update-agent/src/process_tests\.rs$' { return 'Fixture' }
         default { throw "Unclassified runtime source: $name" }
@@ -205,7 +206,11 @@ function Invoke-SelfTest {
         @('native/app/src/dashboard.rs','App'),
         @('native/app/src/charts/timeline.rs','App'),
         @('native/app/src/fluent.rs','App'),
+        @('native/app/src/shell.rs','App'),
+        @('native/app/src/view/settings_navigation.rs','App'),
         @('native/app/src/view/about.rs','App'),
+        @('native/app/src/backend/network_log.rs','App'),
+        @('native/core/src/geo/diagnostics.rs','Networking'),
         @('native/app/src/view/navigation.rs','App')
     )) {
         if((Get-Scope $scope[0]) -cne $scope[1]) {throw 'A new runtime module escaped its required coverage scope.'}

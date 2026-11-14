@@ -24,6 +24,7 @@ pub struct ChartModel {
     pub buckets: Vec<FrequencyBucket>,
     pub emphasize: bool,
     source: Option<SourceHistory>,
+    country_history: bool,
     #[cfg(test)]
     detail_builds: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -71,6 +72,7 @@ impl ChartModel {
             buckets: vec![],
             emphasize: false,
             source: None,
+            country_history: false,
             #[cfg(test)]
             detail_builds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -348,6 +350,7 @@ pub fn locations(
         .collect();
     let mut model = ChartModel::empty(start, end);
     model.segments = segments;
+    model.country_history = true;
     model
 }
 pub fn source(
@@ -653,9 +656,10 @@ impl Chart {
         }
         let geometry = self.geometry.borrow();
         let i = ((x * geometry.width as f32) as usize).min(geometry.width.saturating_sub(1));
+        let layout = PlotLayout::for_model(&self.model);
         let hits = if (0. ..12.).contains(&y) {
             &geometry.marker_hits
-        } else if (12. ..=28.).contains(&y) {
+        } else if (layout.top..=layout.top + layout.band).contains(&y) {
             &geometry.hits
         } else {
             return None;
@@ -677,6 +681,32 @@ fn frequency_max(buckets: &[FrequencyBucket]) -> usize {
         .max(4)
         .div_ceil(4)
         * 4
+}
+#[derive(Clone, Copy)]
+struct PlotLayout {
+    plot: f32,
+    band: f32,
+    top: f32,
+    axis: f32,
+}
+impl PlotLayout {
+    fn for_model(model: &ChartModel) -> Self {
+        if model.country_history {
+            Self {
+                plot: 64.,
+                band: 24.,
+                top: 20.,
+                axis: 32.,
+            }
+        } else {
+            Self {
+                plot: 42.,
+                band: 16.,
+                top: 12.,
+                axis: 30.,
+            }
+        }
+    }
 }
 impl Render for Chart {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -700,14 +730,15 @@ impl Render for Chart {
         let hover = self.hover;
         let pointer = self.pointer;
         let is_frequency = !model.buckets.is_empty();
-        let height = if is_frequency { 138. } else { 42. };
+        let layout = PlotLayout::for_model(&model);
+        let height = if is_frequency { 138. } else { layout.plot };
         let mut root = div()
             .id("plot")
             .relative()
             .w_full()
             .font_family("Segoe UI")
             .text_size(px(12.))
-            .h(px(height + 30.))
+            .h(px(height + layout.axis))
             .when(is_frequency, |d| d.pl(px(26.)))
             .cursor_crosshair()
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
@@ -756,8 +787,12 @@ impl Render for Chart {
                     move |bounds, _, window, cx| {
                         let w: f32 = bounds.size.width.into();
                         let origin = bounds.origin;
-                        let y = origin.y + px(if is_frequency { 8. } else { 12. });
-                        let h = if is_frequency { height - 16. } else { 16. };
+                        let y = origin.y + px(if is_frequency { 8. } else { layout.top });
+                        let h = if is_frequency {
+                            height - 16.
+                        } else {
+                            layout.band
+                        };
                         let rect = |a: f32, b: f32| {
                             Bounds::new(
                                 point(origin.x + px(a), y),
@@ -794,7 +829,10 @@ impl Render for Chart {
                                         None,
                                     );
                                     let _ = line.paint(
-                                        point(origin.x + px((a + b) / 2.) - line.width / 2., y),
+                                        point(
+                                            origin.x + px((a + b) / 2.) - line.width / 2.,
+                                            y + px((h - 16.) / 2.),
+                                        ),
                                         px(16.),
                                         TextAlign::Left,
                                         None,
@@ -924,8 +962,8 @@ impl Render for Chart {
                 deferred(
                     div()
                         .absolute()
-                        .when(below, |d| d.top(px(height + 38.)))
-                        .when(!below, |d| d.bottom(px(height + 26.)))
+                        .when(below, |d| d.top(px(height + layout.axis + 8.)))
+                        .when(!below, |d| d.bottom(px(height + layout.axis + 8.)))
                         .right_0()
                         .max_w(px(430.).min(self.bounds.get().size.width))
                         .p_3()
@@ -1433,7 +1471,10 @@ mod tests {
             chart.model.segments[chart.hit(0.125, 6.).unwrap()].label,
             "FR"
         );
-        assert_eq!(chart.hit(0.105, 40.), None);
+        assert!(chart.hit(0.105, 40.).is_some());
+        assert!(chart.hit(0.105, 44.).is_some());
+        assert_eq!(chart.hit(0.105, 45.), None);
+        assert_eq!(chart.hit(0.105, 16.), None);
         // Tiny point at the period boundary is reachable only in the marker lane.
         let point = locations(
             &LocationHistory {

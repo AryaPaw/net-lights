@@ -101,6 +101,8 @@ try {
     $version = [regex]::Match($manifest,'(?m)^version = "([^"]+)"').Groups[1].Value
     if (-not $version -or $version -ne $props.Project.PropertyGroup.Version) { throw 'Canonical and compatibility versions differ.' }
     Invoke-Cargo 'format' @('fmt','--all','--','--check')
+    & rustfmt --edition 2024 --check native/vendor/gpui-pre/src/elements/div.rs native/vendor/gpui-pre/src/elements/list.rs native/vendor/gpui-pre/src/elements/smooth_scroll.rs *> (Join-Path $results 'format-scroll-patch.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Local GPUI scroll patch format FAIL.' }
     Invoke-Cargo 'lint' (@('clippy','--all-targets') + $common + @('--','-D','warnings'))
     # Run every workspace package once, with critical headless paths first.
     # A core failure shouldn't wait for the large GPUI test executable to link.
@@ -115,6 +117,7 @@ try {
     foreach ($package in $packages) {
         Invoke-Cargo ("tests-" + $package.name) (@('test','--package',$package.name) + $packageArguments + @('--','--test-threads=1'))
     }
+    Invoke-Cargo 'tests-gpui-cursor-patch' (@('test','--package','gpui-pre-windows','--lib') + $packageArguments + @('netlights_cursor_tests','--','--test-threads=1'))
     Assert-SourceUnchanged
     $published = Join-Path $results 'publish'
     & (Join-Path $PSScriptRoot 'publish.ps1') -OutputDirectory $published -Configuration $Configuration

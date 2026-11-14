@@ -24,3 +24,4 @@ handoff/
 *.snupkg
 .DS_Store
 Thumbs.db
+native/vendor/**/.cargo-ok

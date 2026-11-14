@@ -33,7 +33,7 @@ pub(super) fn write(state: &State, root: &Path) -> Result<PathBuf> {
     for (name, data) in [
         (
             "snapshot.json",
-            serde_json::json!({"groups":groups,"paused":state.monitor.paused}),
+            serde_json::json!({"groups":groups,"paused":state.monitor.paused,"country":state.geo_diagnostic}),
         ),
         (
             "versions.json",

@@ -191,6 +191,12 @@ const TEXT: &[(&str, &str)] = &[
     ),
     ("Исходный код", "Source code"),
     ("Файлы лицензий", "License files"),
+    ("Подробности события", "Event details"),
+    ("Снять выделение", "Clear selection"),
+    (
+        "Не удалось показать файлы лицензий.",
+        "Couldn't show the license files.",
+    ),
     (
         "Архив лицензий отсутствует рядом с программой. Он включён в готовую сборку.",
         "The license archive is missing beside the application. It's included in the published build.",

@@ -25,6 +25,28 @@ fn handle(window: &Window) -> Option<HWND> {
     }
 }
 
+/// Shows an isolated inspection window at the bottom without activating it.
+pub fn show_inactive(window: &Window) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_BOTTOM, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    };
+    let Some(hwnd) = handle(window) else {
+        return false;
+    };
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(HWND_BOTTOM),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        )
+        .is_ok()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClipboardError {
     OwnerUnavailable,

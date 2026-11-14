@@ -4,6 +4,13 @@ impl NetLights {
     pub(super) fn locations_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let lang = language(cx);
         let mut body = div().flex().flex_col().gap_3().child(self.period(cx));
+        if let Some(reason) = crate::backend::geo_notice(&self.state, lang) {
+            body = body.child(
+                panel(cx)
+                    .child(section_title("Определение страны", cx))
+                    .child(muted(reason, cx)),
+            );
+        }
         if let Some(through) = self.state.locations.capacity_truncated_through_utc {
             let through = charts::local_time(through);
             body = body.child(muted(
@@ -78,7 +85,12 @@ impl NetLights {
                     )
                 }),
         );
-        div().p_4().pb_0().child(body).into_any_element()
+        div()
+            .p_4()
+            .pt(px(crate::fluent::PAGE_TOP_INSET))
+            .pb_0()
+            .child(body)
+            .into_any_element()
     }
 
     pub(super) fn location_row(&self, index: usize, cx: &App) -> AnyElement {
