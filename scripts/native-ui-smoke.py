@@ -268,6 +268,26 @@ def wait_for(predicate, timeout=8, description="условие"):
     raise TimeoutError(f"Не выполнено за {timeout} с: {description}; {last_error or ''}")
 
 
+def clipboard_equals(read, expected, busy_error):
+    try:
+        return read() == expected
+    except busy_error as error:
+        # Clipboard ownership is exclusive. Retry only this transient
+        # OpenClipboard failure inside the caller's existing bounded wait.
+        if error.args[:2] != (5, "OpenClipboard"):
+            raise
+        return False
+
+
+def notification_rect_inside(read_rect, outer):
+    rect = read_rect()
+    x,y,width,height = outer
+    if (rectangle_inside(rect, (x,y,x+width,y+height)) and
+            rect[0] >= x+width/2 and rect[1] >= y+height/2):
+        return rect
+    return False
+
+
 def startup_navigation_label(setting, system_ui_language=None):
     if setting not in (None, "ru", "en", "system"):
         raise ValueError("Saved UI language isn't a supported canonical setting")
@@ -1900,6 +1920,7 @@ class Runner:
         self.meta["cursor_affordances"]=cursors
         self.page("Состояние")
         from pywinauto import clipboard
+        import pywintypes
         pid, hwnd = self.process.pid, self.uia.hwnd
         original = self.api.outer(hwnd)
         _,_,original_width,original_height=original
@@ -1941,13 +1962,16 @@ class Runner:
         version_rect_before = self.uia.call("rect", version)
         self.uia.call("invoke","Скопировать версию")
         first_feedback_at = time.monotonic()
-        wait_for(lambda:clipboard.GetData()==f"Net Lights {version}",5,"About copied actual version")
+        wait_for(lambda:clipboard_equals(clipboard.GetData,f"Net Lights {version}",pywintypes.error),5,"About copied actual version")
         wait_for(lambda:self.uia.call("exists","Версия скопирована."),5,"Copy feedback is visible")
         assert self.uia.call("rect", version) == version_rect_before, "Copy feedback reflowed About"
-        feedback_rect = self.uia.call("rect", "Версия скопирована.")
         outer = self.api.outer(hwnd)
-        assert feedback_rect[0] >= outer[0]+outer[2]/2 and feedback_rect[1] >= outer[1]+outer[3]/2, "Copy feedback isn't in the lower-right corner"
-        assert feedback_rect[2] <= outer[0]+outer[2] and feedback_rect[3] <= outer[1]+outer[3], "Copy feedback is outside its window"
+        # GPUI Kit enters from 96 px below the final position over 400 ms.
+        # Keep the geometry assertion strict, but measure the settled toast.
+        feedback_rect = wait_for(lambda:notification_rect_inside(
+            lambda:self.uia.call("rect", "Версия скопирована."),outer),1,"Copy feedback settles inside the lower-right corner")
+        self.meta["copy_feedback"] = dict(rect=feedback_rect,outer=outer,
+            elapsed_milliseconds=round((time.monotonic()-first_feedback_at)*1000,1))
         time.sleep(max(0., .9-(time.monotonic()-first_feedback_at)))
         assert self.uia.call("exists","Версия скопирована."), "The first feedback expired before the repeated action"
         self.uia.call("invoke","Скопировать версию")
@@ -2778,6 +2802,7 @@ def uia_retry_selftest():
     run("invoke", [removed], RuntimeError, 1)
     run("inventory", [RuntimeError("unrelated failure")], RuntimeError, 1)
     run("inventory", [removed], TimeoutError, 1, timeout=1, clock=[10, 10, 11.01])
+    notification_wait_selftest()
     pointer_capture_selftest()
     adaptive_viewport_selftest()
     profile_snapshot_selftest()
@@ -2803,6 +2828,52 @@ def uia_retry_selftest():
         else:
             raise AssertionError("CI pointer policy skipped actual identity verification")
     print("RUN - PASS: bounded read-only UIA retry and four failure controls; no COM or input")
+
+
+def notification_wait_selftest():
+    from unittest.mock import Mock, patch
+
+    class ClipboardError(Exception):
+        pass
+
+    reader = Mock(side_effect=[ClipboardError(5,"OpenClipboard","busy"),"expected"])
+    with patch.object(time,"sleep"), patch.object(time,"monotonic",side_effect=[10,10,10.08]):
+        assert wait_for(lambda:clipboard_equals(reader,"expected",ClipboardError),1)
+    assert reader.call_count == 2
+    assert not clipboard_equals(lambda:"wrong value","expected",ClipboardError)
+    for code,function in ((6,"OpenClipboard"),(5,"GetClipboardData")):
+        fault = ClipboardError(code,function,"failure")
+        try:
+            clipboard_equals(Mock(side_effect=fault),"expected",ClipboardError)
+        except ClipboardError as error:
+            assert error is fault
+        else:
+            raise AssertionError("An unrelated clipboard error was hidden")
+    stuck = Mock(side_effect=ClipboardError(5,"OpenClipboard","busy"))
+    with patch.object(time,"sleep"), patch.object(time,"monotonic",side_effect=[10,10,11.01]):
+        try:
+            wait_for(lambda:clipboard_equals(stuck,"expected",ClipboardError),1)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("Permanent clipboard contention didn't fail")
+
+    outer = [-100,20,1000,800]
+    settled = [600,740,880,800]
+    moving = Mock(side_effect=[[600,840,880,900],settled])
+    with patch.object(time,"sleep"), patch.object(time,"monotonic",side_effect=[10,10,10.08]):
+        assert wait_for(lambda:notification_rect_inside(moving,outer),1) == settled
+    assert moving.call_count == 2
+    for rect in ([600,740,901,800],[600,740,880,821],[-101,740,880,800],[0,100,200,130]):
+        assert not notification_rect_inside(lambda:rect,outer)
+    with patch.object(time,"sleep"), patch.object(time,"monotonic",side_effect=[10,10,11.01]):
+        try:
+            wait_for(lambda:notification_rect_inside(lambda:[600,840,880,900],outer),1)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("A permanently clipped notification was accepted")
+    print("RUN - PASS: bounded clipboard contention and notification entry; permanent faults remain failures; no OS calls")
 
 
 def adaptive_viewport_selftest():
