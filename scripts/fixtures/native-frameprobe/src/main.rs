@@ -172,14 +172,7 @@ fn main() -> std::process::ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let environment =
         ["GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "CI"].map(|key| std::env::var(key).ok());
-    if arguments
-        .first()
-        .is_some_and(|value| value == "--capture-roi")
-    {
-        let Some(spec) = capture::parse(&arguments) else {
-            capture::error("invalid_arguments", 0);
-            return std::process::ExitCode::from(2);
-        };
+    if let Some(spec) = capture::parse(&arguments) {
         #[cfg(windows)]
         let (_, code) = run_guarded(
             &arguments,

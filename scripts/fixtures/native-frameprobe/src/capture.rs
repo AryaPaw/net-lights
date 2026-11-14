@@ -2,9 +2,15 @@ use std::collections::VecDeque;
 
 #[derive(Clone, Copy)]
 pub struct Spec {
+    backend: Backend,
     hwnd: usize,
     pid: u32,
     roi: [i32; 4],
+}
+#[derive(Clone, Copy)]
+enum Backend {
+    Wgc,
+    Dxgi,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Geometry {
@@ -19,10 +25,16 @@ struct FrameLayout {
     local: [u32; 4],
 }
 pub fn parse(arguments: &[String]) -> Option<Spec> {
-    if arguments.len() != 7 || arguments[0] != "--capture-roi" {
+    if arguments.len() != 7 {
         return None;
     }
+    let backend = match arguments[0].as_str() {
+        "--capture-roi" => Backend::Wgc,
+        "--capture-dxgi-roi" => Backend::Dxgi,
+        _ => return None,
+    };
     let spec = Spec {
+        backend,
         hwnd: arguments[1].parse().ok()?,
         pid: arguments[2].parse().ok()?,
         roi: [
@@ -153,7 +165,10 @@ fn captured_qpc(
         .checked_mul(i128::from(frequency))
         .and_then(|ticks| i64::try_from(ticks / 10_000_000).ok())
         .ok_or(Failure("capture_timestamp_overflow", 0))?;
-    if value <= 0 {
+    checked_qpc(value, received_qpc, previous)
+}
+fn checked_qpc(value: i64, received_qpc: i64, previous: i64) -> Result<i64, Failure> {
+    if value <= 0 || received_qpc <= 0 {
         return Err(Failure("capture_timestamp_invalid", 0));
     }
     if value < previous {
@@ -166,6 +181,22 @@ fn captured_qpc(
         return Err(Failure("capture_timestamp_future", 0));
     }
     Ok(value)
+}
+fn desktop_frame_time(
+    present: i64,
+    accumulated: u32,
+    metadata: u32,
+    mouse: i64,
+    received: i64,
+    previous: i64,
+) -> Result<Option<i64>, Failure> {
+    if present == 0 && accumulated == 0 && metadata == 0 && mouse > 0 && mouse <= received {
+        return Ok(None);
+    }
+    if accumulated != 1 {
+        return Err(Failure("accumulated_frames", 0));
+    }
+    checked_qpc(present, received, previous).map(Some)
 }
 pub fn error(code: &'static str, hresult: i32) {
     println!("{{\"kind\":\"error\",\"code\":\"{code}\",\"hresult\":{hresult}}}");
@@ -304,6 +335,43 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn desktop_present_clock_is_raw_qpc_and_rejects_missing_or_invalid_image_times() {
+        assert_eq!(
+            checked_qpc(17_123_456_789, 17_123_456_800, 17_123_456_700).ok(),
+            Some(17_123_456_789)
+        );
+        for (present, received, previous) in [
+            (0, 100, 0),
+            (-1, 100, 0),
+            (101, 100, 0),
+            (100, 101, 100),
+            (99, 101, 100),
+            (100, 0, 0),
+        ] {
+            assert!(checked_qpc(present, received, previous).is_err());
+        }
+    }
+    #[test]
+    fn pointer_updates_never_replace_images_or_hide_missing_image_times() {
+        assert_eq!(desktop_frame_time(0, 0, 0, 99, 100, 90).ok(), Some(None));
+        assert_eq!(
+            desktop_frame_time(98, 1, 8, 99, 100, 90).ok(),
+            Some(Some(98))
+        );
+        for event in [
+            (0, 0, 0, 0, 100, 90),
+            (0, 0, 0, 101, 100, 90),
+            (0, 0, 8, 99, 100, 90),
+            (0, 1, 0, 99, 100, 90),
+            (98, 2, 8, 99, 100, 90),
+            (101, 1, 8, 99, 100, 90),
+        ] {
+            assert!(
+                desktop_frame_time(event.0, event.1, event.2, event.3, event.4, event.5).is_err()
+            );
+        }
     }
     #[test]
     fn capture_arguments_cannot_bypass_the_hosted_identity_guard() {

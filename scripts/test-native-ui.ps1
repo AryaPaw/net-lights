@@ -228,10 +228,10 @@ function Assert-FrameprobeEvidence($Evidence,[string]$ExpectedHash) {
     $workers=@($Evidence.metadata.navigation_capture_workers)
     if($workers.Count -ne 3 -or @($workers.pid|Sort-Object -Unique).Count -ne 3) {throw 'Three owned native frame producers are required.'}
     foreach($worker in $workers) {
-        foreach($field in @('pid','exit_code','frames','frequency','end_qpc')) {
+        foreach($field in @('pid','exit_code','frames','frequency','end_qpc','pointer_updates')) {
             if($worker.$field -isnot [long] -and $worker.$field -isnot [int]) {throw 'Native frame producer numeric evidence is invalid.'}
         }
-        if($worker.pid -lt 1 -or $worker.sha256 -ine $ExpectedHash -or $worker.mode -cne 'Windows.Graphics.Capture' -or
+        if($worker.pid -lt 1 -or $worker.sha256 -ine $ExpectedHash -or $worker.mode -cne 'DXGI Desktop Duplication' -or $worker.pointer_updates -lt 0 -or $worker.pointer_updates -gt 512 -or
            $worker.cleanup -cne 'PASS' -or $worker.exit_code -ne 0 -or $worker.frames -lt 1 -or $worker.frames -gt 512 -or $worker.frequency -le 0 -or $worker.frequency -gt 10000000000 -or $worker.end_qpc -lt 1) {throw 'Native frame producer cleanup or clock evidence is incomplete.'}
     }
 }
@@ -333,9 +333,9 @@ if($SelfTest) {
         $rejected=$false;try{Assert-UiEvidence $bad 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64) -ExpectCoverageInstrumented $true -ExpectNavigationMeasurement $false}catch{$rejected=$true}
         if(-not $rejected){throw "Invalid instrumented $kind evidence was accepted."}
     }
-    $capture=@{metadata=@{navigation_frameprobe_sha256=('d'*64);navigation_capture_workers=@(1..3|ForEach-Object {@{pid=$_;sha256=('d'*64);mode='Windows.Graphics.Capture';cleanup='PASS';exit_code=0;frames=3;frequency=1000;end_qpc=10000}})}}
+    $capture=@{metadata=@{navigation_frameprobe_sha256=('d'*64);navigation_capture_workers=@(1..3|ForEach-Object {@{pid=$_;sha256=('d'*64);mode='DXGI Desktop Duplication';cleanup='PASS';exit_code=0;frames=3;frequency=1000;end_qpc=10000;pointer_updates=0}})}}
     Assert-FrameprobeEvidence $capture ('d'*64)
-    foreach($kind in @('hash','missing','duplicate','cleanup','exit','clock')) {
+    foreach($kind in @('hash','missing','duplicate','cleanup','exit','clock','source','pointer-bound')) {
         $bad=ConvertFrom-Json (ConvertTo-Json $capture -Depth 12)
         switch($kind) {
             'hash'{$bad.metadata.navigation_frameprobe_sha256=('e'*64)}
@@ -344,6 +344,8 @@ if($SelfTest) {
             'cleanup'{$bad.metadata.navigation_capture_workers[0].cleanup='PENDING'}
             'exit'{$bad.metadata.navigation_capture_workers[0].exit_code=7}
             'clock'{$bad.metadata.navigation_capture_workers[0].frequency=0}
+            'source'{$bad.metadata.navigation_capture_workers[0].mode='Windows.Graphics.Capture'}
+            'pointer-bound'{$bad.metadata.navigation_capture_workers[0].pointer_updates=513}
         }
         $rejected=$false;try{Assert-FrameprobeEvidence $bad ('d'*64)}catch{$rejected=$true}
         if(-not $rejected){throw "Invalid native capture $kind evidence was accepted."}
@@ -635,7 +637,7 @@ try {
 
 try {
     # The observer mustn't inherit the application's coverage instrumentation.
-    # These pure helper tests don't create a window or invoke capture APIs.
+    # Guard and CLI tests don't create a window or invoke capture APIs.
     Assert-HostedRunner
     $frameManifest=Join-Path $repository 'scripts/fixtures/native-frameprobe/Cargo.toml'
     Assert-Unlinked $frameManifest

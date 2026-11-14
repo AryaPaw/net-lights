@@ -40,6 +40,8 @@ use windows::Win32::UI::{
     },
 };
 use windows::core::{IInspectable, Interface, factory};
+#[path = "capture_dxgi.rs"]
+mod dxgi;
 type Result<T> = std::result::Result<T, Failure>;
 fn checked<T>(value: windows::core::Result<T>, code: &'static str) -> Result<T> {
     value.map_err(|error| Failure(code, error.code().0))
@@ -278,6 +280,9 @@ impl State {
     }
 }
 fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write) -> Result<()> {
+    if matches!(spec.backend, Backend::Dxgi) {
+        return dxgi::capture(spec, signals, output);
+    }
     let _dpi = Dpi::enter()?;
     let geometry = geometry(spec)?;
     checked(unsafe { RoInitialize(RO_INIT_MULTITHREADED) }, "winrt")?;
@@ -427,8 +432,11 @@ fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write) -> Result
         "frame_handler",
     )?);
     checked(capture.session.StartCapture(), "capture_start")?;
-    writeln!(output, "{{\"kind\":\"ready\",\"frequency\":{frequency}}}")
-        .map_err(|_| Failure("parent_output", 0))?;
+    writeln!(
+        output,
+        "{{\"kind\":\"ready\",\"frequency\":{frequency},\"source\":\"Windows.Graphics.Capture\"}}"
+    )
+    .map_err(|_| Failure("parent_output", 0))?;
     loop {
         if signals.stop.load(Ordering::Acquire) && !capture.closed {
             capture.close()?;

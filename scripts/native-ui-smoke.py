@@ -610,7 +610,7 @@ class Win32:
 
 
 class NavigationProtocol:
-    """Bounded native WGC stream; timestamps belong to the captured frames."""
+    """Bounded presented-desktop stream with native QPC timestamps."""
     MAX_LINE=65536*8+256
     def __init__(self,width,height):
         if type(width) is not int or type(height) is not int or not 0<width<=8192 or not 0<height<=256 or width*height>65536:
@@ -620,6 +620,7 @@ class NavigationProtocol:
         self.last_qpc=-1
         self.ended=False
         self.count=self.byte_count=0
+        self.pointer_count=0
 
     def accept(self,line):
         if not line or len(line)>self.MAX_LINE or not line.endswith(b"\n"):
@@ -643,9 +644,15 @@ class NavigationProtocol:
                 raise RuntimeError("Malformed native capture error")
             raise RuntimeError(f"Native capture failed: {record['code']} ({record['hresult']})")
         if kind=="ready":
-            if self.frequency is not None or set(record)!={"kind","frequency"} or type(record["frequency"]) is not int or not 0<record["frequency"]<=10**10:
+            if self.frequency is not None or set(record)!={"kind","frequency","source"} or record["source"]!="DXGI Desktop Duplication" or type(record["frequency"]) is not int or not 0<record["frequency"]<=10**10:
                 raise RuntimeError("Invalid native capture readiness")
             self.frequency=record["frequency"]
+        elif kind=="pointer":
+            if self.frequency is None or set(record)!={"kind","qpc"} or type(record["qpc"]) is not int or not 0<record["qpc"]<2**63:
+                raise RuntimeError("Invalid native pointer-only update")
+            self.pointer_count+=1
+            if self.pointer_count>512:
+                raise RuntimeError("Native pointer update count exceeded its bound")
         elif kind in ("frame","end"):
             expected={"kind","qpc","width","height","pixels"} if kind=="frame" else {"kind","qpc"}
             qpc=record.get("qpc")
@@ -794,9 +801,10 @@ class NavigationFrames:
             return None
         if record["kind"]=="ready" and record["frequency"]!=self.clock.frequency:
             raise RuntimeError("Native capture and input QPC clocks differ")
-        if record["kind"]=="frame":
+        if record["kind"] in ("frame","pointer"):
             if record["qpc"]>self.clock.now():
                 raise RuntimeError("Native capture timestamp is ahead of the common QPC clock")
+        if record["kind"]=="frame":
             self.frames.append(record)
         return record
 
@@ -806,12 +814,12 @@ class NavigationFrames:
         environment=os.environ.copy()
         for key in ("LLVM_PROFILE_FILE","LLVM_PROFILE_FILE_NAME","RUSTFLAGS","CARGO_ENCODED_RUSTFLAGS"):
             environment.pop(key,None)
-        self.process=subprocess.Popen([str(helper),"--capture-roi",str(self.hwnd),str(self.pid),*map(str,self.band)],
+        self.process=subprocess.Popen([str(helper),"--capture-dxgi-roi",str(self.hwnd),str(self.pid),*map(str,self.band)],
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=environment,
             creationflags=NO_CONSOLE,bufsize=64*1024)
-        self.report=dict(pid=self.process.pid,sha256=self.digest,mode="Windows.Graphics.Capture",cleanup="PENDING")
+        self.report=dict(pid=self.process.pid,sha256=self.digest,mode="DXGI Desktop Duplication",cleanup="PENDING")
         self.reports.append(self.report)
-        self.reader=threading.Thread(target=self._read,name="navigation-wgc-reader",daemon=True)
+        self.reader=threading.Thread(target=self._read,name="navigation-dxgi-reader",daemon=True)
         try:
             self.reader.start()
             deadline=time.monotonic()+5
@@ -864,7 +872,7 @@ class NavigationFrames:
         self.process.stdin.close()
         self.process.stdout.close()
         self.finished=True
-        self.report.update(cleanup="PASS",exit_code=code,frames=len(self.frames),frequency=self.clock.frequency)
+        self.report.update(cleanup="PASS",exit_code=code,frames=len(self.frames),frequency=self.clock.frequency,pointer_updates=self.protocol.pointer_count)
 
     def abort(self):
         if self.process:
@@ -1760,6 +1768,8 @@ class Runner:
         left=min(r[0] for r in rectangles.values())
         right=max(r[2] for r in rectangles.values())
         band=(left,top,right,bottom)
+        a,b,c,d=self.api.client_rect(hwnd)
+        self.meta["navigation_pointer_parking"]=self.input_policy.send_mouse_path(self.api,hwnd,pid,(c-24,d-24))
         clock=QpcClock(self.api.kernel)
         def source():
             return NavigationFrames(self.api,self.input_policy,hwnd,pid,band,self.frameprobe,self.frameprobe_sha,
@@ -1789,7 +1799,7 @@ class Runner:
             finish=center(target)
             (self.output/f"navigation-motion-{len(results)}-trace.json").write_text(
                 json.dumps(dict(initial=initial,initial_qpc=initial_frame["qpc"],target=finish,epoch_qpc=epoch,frequency=clock.frequency,
-                                source="Windows.Graphics.Capture",samples=[dict(seconds=t,x=x,qpc=qpc) for t,x,_,qpc in frames]),indent=2),encoding="utf-8")
+                                source="DXGI Desktop Duplication",samples=[dict(seconds=t,x=x,qpc=qpc) for t,x,_,qpc in frames]),indent=2),encoding="utf-8")
             for index,(_,_,image,_) in enumerate(frames):
                 image.save(self.output/f"navigation-motion-{len(results)}-frame-{index:02}.png")
             evidence=navigation_frame_evidence(initial,finish,[(t,x) for t,x,_,_ in frames],scale,self.coverage_instrumented)
@@ -2993,7 +3003,7 @@ def navigation_motion_selftest():
     for epoch,frequency in ((True,1000),(1,False),(-1,1000),(1,0)):
         rejected(lambda:navigation_observation_frames([],epoch,frequency))
     rejected(lambda:navigation_observation_frames([dict(qpc=900)],1000,1000))
-    ready=dict(kind="ready",frequency=1000)
+    ready=dict(kind="ready",frequency=1000,source="DXGI Desktop Duplication")
     frame=dict(kind="frame",qpc=100,width=16,height=1,pixels="ffc24cff"*16)
     end=dict(kind="end",qpc=400)
     encode=lambda value:(json.dumps(value,separators=(",",":"))+"\n").encode("ascii")
@@ -3008,6 +3018,14 @@ def navigation_motion_selftest():
     top_down=rows.accept(encode(dict(frame,height=2,pixels=packed.hex())))["pixels"]
     assert top_down[:64]==decoded["pixels"] and top_down[64:]==bytes((3,2,1,255))*16
     protocol.accept(encode(end));protocol.eof()
+    pointer=NavigationProtocol(16,1);pointer.accept(encode(ready));pointer.accept(encode(frame))
+    pointer.accept(encode(dict(kind="pointer",qpc=125)))
+    assert pointer.count==1 and pointer.last_qpc==100 and pointer.pointer_count==1
+    for bad in (dict(kind="pointer",qpc=0),dict(kind="pointer",qpc=True),dict(kind="pointer",qpc=125,pixels="ff")):
+        rejected(lambda:pointer.accept(encode(bad)))
+    pointer.pointer_count=512
+    rejected(lambda:pointer.accept(encode(dict(kind="pointer",qpc=126))))
+    rejected(lambda:NavigationProtocol(16,1).accept(encode(dict(ready,source="Windows.Graphics.Capture"))))
     rejected(lambda:protocol.accept(encode(end)))
     for bad in (dict(frame,qpc=99),dict(frame,qpc=True),dict(frame,width=15),dict(frame,pixels="zz"*64),dict(frame,pixels="ff"),dict(kind="unknown")):
         p=NavigationProtocol(16,1);p.accept(encode(ready));p.accept(encode(frame))
@@ -3051,7 +3069,7 @@ def navigation_motion_selftest():
                                  SimpleNamespace(frequency=1000,now=lambda:10000))
         capture.events=queue.Queue(maxsize=queue_size)
         def launch(arguments,**options):
-            assert arguments[1:]==["--capture-roi","23","17","0","0","16","1"]
+            assert arguments[1:]==["--capture-dxgi-roi","23","17","0","0","16","1"]
             assert all(key not in options["env"] for key in ("LLVM_PROFILE_FILE","LLVM_PROFILE_FILE_NAME","RUSTFLAGS","CARGO_ENCODED_RUSTFLAGS"))
             assert options["stderr"]==subprocess.PIPE
             return process

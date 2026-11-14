@@ -23,10 +23,10 @@ pub(super) struct Signals {
 }
 impl Signals {
     pub(super) fn fail(&self, failure: Failure) {
-        if let Ok(mut slot) = self.failure.lock() {
-            if slot.is_none() {
-                *slot = Some(failure);
-            }
+        if let Ok(mut slot) = self.failure.lock()
+            && slot.is_none()
+        {
+            *slot = Some(failure);
         }
         self.abort.store(true, Ordering::Release);
         self.stop.store(true, Ordering::Release);
