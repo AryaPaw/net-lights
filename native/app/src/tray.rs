@@ -1413,6 +1413,22 @@ mod tests {
         };
         assert!(visible(MAIN_ICON));
         assert!(visible(COUNTRY_ICON));
+        for id in [MAIN_ICON, COUNTRY_ICON] {
+            assert!(unsafe {
+                Shell_NotifyIconW(
+                    NIM_DELETE,
+                    &NOTIFYICONDATAW {
+                        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                        hWnd: hwnd,
+                        uID: id,
+                        ..Default::default()
+                    },
+                )
+                .as_bool()
+            });
+        }
+        assert!(!visible(MAIN_ICON));
+        assert!(!visible(COUNTRY_ICON));
         unsafe {
             PostMessageW(
                 Some(hwnd),
@@ -1422,7 +1438,12 @@ mod tests {
             )
             .unwrap();
         }
-        thread::sleep(Duration::from_millis(200));
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while (!host.ready() || !visible(MAIN_ICON) || !visible(COUNTRY_ICON))
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
         assert!(host.ready());
         assert!(visible(MAIN_ICON));
         assert!(visible(COUNTRY_ICON));

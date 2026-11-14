@@ -723,8 +723,8 @@ def native_clock_diagnostic(raw):
         if not raw.strip().startswith(b"{") or not raw.strip().endswith(b"}"):
             raise ValueError()
         pairs=json.loads(raw.decode("ascii"),object_pairs_hook=lambda pairs:pairs)
-        expected={"duration","frequency","received_qpc","previous_qpc"}
-        if not isinstance(pairs,list) or len(pairs)!=4 or {key for key,_ in pairs}!=expected:
+        expected={"duration","frequency","acquired_qpc","received_qpc","previous_qpc"}
+        if not isinstance(pairs,list) or len(pairs)!=5 or {key for key,_ in pairs}!=expected:
             raise ValueError()
         if any(type(value) is not int or not -(2**63)<=value<2**63 for _,value in pairs):
             raise ValueError()
@@ -3056,7 +3056,7 @@ def navigation_motion_selftest():
     scenario(complete,False,start_failure=True)
     scenario([dict(ready,frequency=999),frame,end],False)
     scenario([ready,dict(frame,qpc=10001),dict(end,qpc=10002)],False)
-    diagnostic=dict(duration=-1,frequency=1000,received_qpc=123,previous_qpc=124)
+    diagnostic=dict(duration=-1,frequency=1000,acquired_qpc=120,received_qpc=123,previous_qpc=124)
     assert native_clock_diagnostic(encode(diagnostic))==diagnostic
     assert native_clock_diagnostic(b"") is None
     for invalid in (b"x"*8193,encode(dict(diagnostic,frequency=True)),encode(dict(diagnostic,duration=2**63)),

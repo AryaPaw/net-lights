@@ -171,24 +171,11 @@ impl State {
         }
         let frame = FrameGuard(checked(pool.TryGetNextFrame(), "next_frame")?);
         let duration = checked(frame.0.SystemRelativeTime(), "frame_timestamp")?.Duration;
-        let mut received_qpc = 0;
+        let mut acquired_qpc = 0;
         checked(
-            unsafe { QueryPerformanceCounter(&mut received_qpc) },
-            "frame_qpc",
+            unsafe { QueryPerformanceCounter(&mut acquired_qpc) },
+            "acquired_qpc",
         )?;
-        let qpc = match captured_qpc(duration, self.frequency, received_qpc, self.queue.last_qpc) {
-            Ok(value) => value,
-            Err(error) => {
-                if !self.clock_diagnosed {
-                    self.clock_diagnosed = true;
-                    eprintln!(
-                        "{{\"duration\":{duration},\"frequency\":{},\"received_qpc\":{received_qpc},\"previous_qpc\":{}}}",
-                        self.frequency, self.queue.last_qpc
-                    );
-                }
-                return Err(error);
-            }
-        };
         let size = checked(frame.0.ContentSize(), "frame_size")?;
         let layout = bind_frame_layout(
             self.spec.roi,
@@ -268,6 +255,25 @@ impl State {
             });
         }
         unsafe { self.context.Unmap(&self.staging, 0) };
+        // Check compositor time after GPU readback has completed.
+        let mut received_qpc = 0;
+        checked(
+            unsafe { QueryPerformanceCounter(&mut received_qpc) },
+            "frame_qpc",
+        )?;
+        let qpc = match captured_qpc(duration, self.frequency, received_qpc, self.queue.last_qpc) {
+            Ok(value) => value,
+            Err(error) => {
+                if !self.clock_diagnosed {
+                    self.clock_diagnosed = true;
+                    eprintln!(
+                        "{{\"duration\":{duration},\"frequency\":{},\"acquired_qpc\":{acquired_qpc},\"received_qpc\":{received_qpc},\"previous_qpc\":{}}}",
+                        self.frequency, self.queue.last_qpc
+                    );
+                }
+                return Err(error);
+            }
+        };
         self.queue.push(Frame { qpc, pixels })
     }
 }

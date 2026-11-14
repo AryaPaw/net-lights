@@ -284,6 +284,28 @@ mod tests {
         }
     }
     #[test]
+    fn compositor_timestamp_remains_unchanged_after_readback_completion() {
+        let duration = 11_414_531_250;
+        let frequency = 10_000_000;
+        let callback_qpc = 11_414_472_960;
+        let readback_complete_qpc = 11_414_600_000;
+        let previous = 11_414_218_750;
+        assert!(captured_qpc(duration, frequency, callback_qpc, previous).is_err());
+        assert_eq!(
+            captured_qpc(duration, frequency, readback_complete_qpc, previous).ok(),
+            Some(duration)
+        );
+        assert!(
+            captured_qpc(
+                readback_complete_qpc + 1,
+                frequency,
+                readback_complete_qpc,
+                previous
+            )
+            .is_err()
+        );
+    }
+    #[test]
     fn capture_arguments_cannot_bypass_the_hosted_identity_guard() {
         let args = ["--capture-roi", "12", "34", "0", "0", "100", "10"].map(String::from);
         let (_, code) = crate::run_guarded(

@@ -120,6 +120,14 @@ try {
         Invoke-Cargo ("tests-" + $package.name) (@('test','--package',$package.name) + $packageArguments + @('--','--test-threads=1'))
     }
     Invoke-Cargo 'tests-gpui-cursor-patch' (@('test','--package','gpui-pre-windows','--lib') + $packageArguments + @('netlights_cursor_tests','--','--test-threads=1'))
+    if ($env:GITHUB_ACTIONS -ceq 'true') {
+        . (Join-Path $PSScriptRoot 'ci-environment.ps1')
+        Assert-HostedRunner
+        Invoke-Cargo 'tests-tray-shell' (@('test','--package','netlights-app','--bin','netlights') + $packageArguments + @('tray::tests::synthetic_taskbar_created_restores_both_owned_icons','--','--ignored','--exact','--test-threads=1'))
+        if (-not (Select-String -LiteralPath (Join-Path $results 'tests-tray-shell.log') -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored;')) { throw 'The isolated shell test was not executed.' }
+    } else {
+        Write-Host 'NOT RUN: interactive tray-shell verification requires the disposable hosted runner.'
+    }
     Assert-SourceUnchanged
     $published = Join-Path $results 'publish'
     & (Join-Path $PSScriptRoot 'publish.ps1') -OutputDirectory $published -Configuration $Configuration
