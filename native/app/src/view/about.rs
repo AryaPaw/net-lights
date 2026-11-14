@@ -1,7 +1,7 @@
 use super::*;
 use gpui_kit::component::{Icon, IconName};
 
-use gpui_kit::component::notification::{Notification, NotificationDelivery};
+use gpui_kit::component::notification::{Notification, NotificationDelivery, NotificationType};
 pub(super) struct CopyVersionNotice;
 fn copy_version_message(copied: bool, lang: Language) -> (&'static str, Duration) {
     if copied {
@@ -40,11 +40,17 @@ impl NetLights {
 
     fn present_copy_feedback(&mut self, copied: bool, window: &mut Window, cx: &mut Context<Self>) {
         let (message, lifetime) = copy_version_message(copied, language(cx));
-        let note = if copied {
-            Notification::success(message)
+        let kind = if copied {
+            NotificationType::Success
         } else {
-            Notification::error(message)
+            NotificationType::Error
         };
+        let note = Notification::new().with_type(kind).content(move |_, _, _| {
+            div()
+                .text_sm()
+                .child(text!(id = "copy-version-feedback-message", message))
+                .into_any_element()
+        });
         window.push_notification(
             note.id::<CopyVersionNotice>()
                 .placement(Anchor::BottomRight)
