@@ -63,6 +63,85 @@ def settings_selection(names):
     return selected[0].split(",")[0]
 
 
+class SettingsSelectionLog:
+    """Copied event data only; safe to drain without COM round trips."""
+    LABELS={name+", текущий раздел" for name in ("Проверки и трафик","Локация","Приложение")}
+
+    def __init__(self):
+        self.events=queue.Queue(maxsize=128)
+        self.failed=threading.Event()
+        self.closed=threading.Event()
+        self.lock=threading.Lock()
+
+    def append(self, value):
+        with self.lock:
+            if self.closed.is_set() or not isinstance(value,str) or value not in self.LABELS:
+                return
+            try:
+                self.events.put_nowait(dict(name=value.split(",")[0],received=time.monotonic()))
+            except BaseException:
+                # COM callbacks mustn't leak exceptions across the ABI.
+                self.failed.set()
+
+    def fail(self):
+        with self.lock:
+            if not self.closed.is_set():
+                self.failed.set()
+
+    def finish(self):
+        with self.lock:
+            self.closed.set()
+
+    def drain(self):
+        with self.lock:
+            if self.failed.is_set():
+                raise RuntimeError("Settings accessibility event buffer failed or overflowed")
+            result=[]
+            while True:
+                try:
+                    result.append(self.events.get_nowait())
+                except queue.Empty:
+                    return result
+
+
+class SettingsNameWatch:
+    """Add/remove on the one MTA owner; callbacks never query the provider."""
+    def __init__(self, automation, element, handler, log, property_id, scope):
+        self.automation,self.element,self.handler,self.log=automation,element,handler,log
+        self.owner=threading.get_ident()
+        self.active=False
+        properties=(ct.c_int*1)(property_id)
+        automation.AddPropertyChangedEventHandlerNativeArray(element,scope,None,handler,properties,1)
+        self.active=True
+
+    def close(self):
+        if threading.get_ident()!=self.owner:
+            raise RuntimeError("UIA subscription must be removed by its MTA owner")
+        if self.active:
+            self.log.finish()
+            self.automation.RemovePropertyChangedEventHandler(self.element,self.handler)
+            self.active=False
+        # Don't force-release handler: UIA may still hold a COM reference for a
+        # late callback. Its data remains valid, and closed callbacks do nothing.
+
+
+def settings_name_handler(uia, log):
+    import comtypes
+
+    class Handler(comtypes.COMObject):
+        _com_interfaces_=[uia.UIA_dll.IUIAutomationPropertyChangedEventHandler]
+
+        def HandlePropertyChangedEvent(self, sender, property_id, new_value):
+            if property_id==uia.UIA_dll.UIA_NamePropertyId:
+                try:
+                    log.append(getattr(new_value,"value",new_value))
+                except BaseException:
+                    log.fail()
+            return 0
+
+    return Handler()
+
+
 def drag_time_bounds(domain_start, domain_end, left, right, start_x, end_x):
     if domain_end<=domain_start or not left<=min(start_x,end_x)<max(start_x,end_x)<=right:
         raise ValueError("Drag coordinates must lie inside a positive time domain and plot")
@@ -1075,6 +1154,7 @@ class Automation:
         app = window = specification = control = info = None
         controls = []
         walker = child_element = None
+        settings_watch = handler = uia = None
         try:
             try:
                 ole = ct.OleDLL("ole32")
@@ -1091,6 +1171,9 @@ class Automation:
                 command, arguments, reply = self.requests.get()
                 try:
                     if command == "stop":
+                        if settings_watch is not None:
+                            settings_watch.close()
+                            settings_watch=None
                         reply.put(None)
                         return
                     if command == "interactions":
@@ -1100,6 +1183,8 @@ class Automation:
                     elif initialization_error is not None:
                         raise RuntimeError(f"UIA initialization failed: {initialization_error}")
                     elif command == "connect":
+                        if settings_watch is not None:
+                            raise RuntimeError("Cannot reconnect while settings event observation is active")
                         pid = arguments[0]
                         api = Win32()
                         hwnd = wait_for(lambda: api.visible_owned_window(pid, "Net Lights"), 15,
@@ -1134,6 +1219,23 @@ class Automation:
                         # Enumerating every rectangle/runtime-id/offscreen flag
                         # can miss a short, genuinely displayed intermediate state.
                         value=settings_selection([c.element_info.name for c in window.descendants(control_type="Button")])
+                    elif command == "settings-watch-start":
+                        if settings_watch is not None:
+                            raise RuntimeError("Settings event observation is already active")
+                        initial=settings_selection([c.element_info.name for c in window.descendants(control_type="Button")])
+                        if initial!="Проверки и трафик":
+                            raise RuntimeError("Settings event observation didn't start at the first section")
+                        uia=IUIA()
+                        value=SettingsSelectionLog()
+                        handler=settings_name_handler(uia,value)
+                        settings_watch=SettingsNameWatch(uia.iuia,window.element_info.element,handler,value,
+                            uia.UIA_dll.UIA_NamePropertyId,uia.UIA_dll.TreeScope_Subtree)
+                    elif command == "settings-watch-stop":
+                        if settings_watch is None:
+                            raise RuntimeError("Settings event observation isn't active")
+                        settings_watch.close()
+                        settings_watch=None
+                        value=None
                     else:
                         name = arguments[0]
                         controls = [c for c in window.descendants() if c.element_info.name == name]
@@ -1207,11 +1309,16 @@ class Automation:
                         failure.uia_hresult = hresult & 0xffffffff
                     reply.put(failure)
         finally:
-            app = window = specification = control = info = None
-            controls = []
-            walker = child_element = None
-            if com_initialized:
-                ole.CoUninitialize()
+            try:
+                if settings_watch is not None:
+                    settings_watch.close()
+            finally:
+                settings_watch = handler = uia = None
+                app = window = specification = control = info = None
+                controls = []
+                walker = child_element = None
+                if com_initialized:
+                    ole.CoUninitialize()
 
     def close(self):
         if self.thread.is_alive():
@@ -1906,6 +2013,7 @@ class Runner:
         hwnd,pid=self.uia.hwnd,self.process.pid
         original=self.api.outer(hwnd)
         scale=self.meta["dpi"]/96.
+        events=None
         try:
             self.resize_fitted(original[2],min(original[3],round(860*scale)))
             label="Проверки и трафик, текущий раздел" if self.uia.call("exists","Проверки и трафик, текущий раздел") else "Проверки и трафик"
@@ -1914,23 +2022,37 @@ class Runner:
             seen=["Проверки и трафик"]
             trace=dict(viewport=self.api.outer(hwnd),sections=seen,samples=[])
             self.meta["settings_scroll_sections"]=trace
+            events=self.uia.call("settings-watch-start")
+            events.drain()
+            trace["method"]="UIA_NamePropertyId events on the owned window"
             started=time.monotonic()
             for notch in range(8):
+                assert self.api.owner(hwnd)==pid
                 self.api.wheel(hwnd,self.content_point(),-120)
                 until=time.monotonic()+.4
                 while time.monotonic()<until:
-                    selected=self.uia.call("settings-selection")
-                    if len(trace["samples"])<160:
-                        trace["samples"].append(dict(notch=notch,seconds=round(time.monotonic()-started,3),selected=selected))
-                    if selected and seen[-1]!=selected:seen.append(selected)
+                    for event in events.drain():
+                        if event["received"]<started:
+                            continue
+                        selected=event["name"]
+                        if len(trace["samples"])>=128:
+                            raise RuntimeError("Settings accessibility observation exceeded its event bound")
+                        trace["samples"].append(dict(notch=notch,seconds=round(event["received"]-started,3),selected=selected))
+                        if seen[-1]!=selected:seen.append(selected)
                     time.sleep(.01)
-                if seen[-1]=="Приложение":break
+                if "Локация" in seen and "Приложение" in seen:break
             assert "Локация" in seen, f"Ordinary wheel skipped the country section: {seen}"
-            assert seen[-1]=="Приложение", f"Wheel never reached the final section: {seen}"
-            return dict(single_notch_sections=seen,physical_input=False)
+            assert "Приложение" in seen, f"Wheel never reached the final section: {seen}"
+            assert self.uia.call("settings-selection")=="Приложение", "The final actual selection differs from the observed events"
+            return dict(selected_events=seen,physical_input=False,event_method=trace["method"])
         finally:
-            assert self.api.owner(hwnd)==pid
-            if not self.api.user.SetWindowPos(hwnd,None,*original,0x14):raise ct.WinError(ct.get_last_error())
+            try:
+                if events is not None:
+                    self.uia.call("settings-watch-stop")
+                    events.drain()  # Also reject a callback failure during final verification.
+            finally:
+                assert self.api.owner(hwnd)==pid
+                if not self.api.user.SetWindowPos(hwnd,None,*original,0x14):raise ct.WinError(ct.get_last_error())
 
     def fluent_controls(self):
         assert self.input_policy, "Fluent interaction requires the isolated input policy"
@@ -2822,6 +2944,7 @@ def uia_retry_selftest():
     run("inventory", [RuntimeError("unrelated failure")], RuntimeError, 1)
     run("inventory", [removed], TimeoutError, 1, timeout=1, clock=[10, 10, 11.01])
     notification_wait_selftest()
+    settings_events_selftest()
     pointer_capture_selftest()
     adaptive_viewport_selftest()
     profile_snapshot_selftest()
@@ -2847,6 +2970,91 @@ def uia_retry_selftest():
         else:
             raise AssertionError("CI pointer policy skipped actual identity verification")
     print("RUN - PASS: bounded read-only UIA retry and four failure controls; no COM or input")
+
+
+def settings_events_selftest():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    log=SettingsSelectionLog()
+    for value in (None,123,"unrelated text","Локация"):
+        log.append(value)
+    assert log.drain()==[]
+    with patch.object(time,"monotonic",return_value=10.):
+        log.append("Локация, текущий раздел")
+    assert log.drain()==[dict(name="Локация",received=10.)]
+    assert log.drain()==[]
+    overflow=SettingsSelectionLog()
+    for _ in range(129):
+        overflow.append("Приложение, текущий раздел")
+    try:
+        overflow.drain()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("Accessibility event overflow produced usable evidence")
+    closed=SettingsSelectionLog()
+    closed.finish()
+    closed.append("Локация, текущий раздел")
+    closed.fail()
+    assert closed.drain()==[]
+
+    calls=[]
+    def add(element,scope,cache,handler,properties,count):
+        assert (element,scope,cache,handler,count)==("owned-element",4,None,"handler",1)
+        assert properties[0]==30005
+        calls.append("add")
+    def remove(element,handler):
+        assert (element,handler)==("owned-element","handler")
+        calls.append("remove")
+    api=SimpleNamespace(AddPropertyChangedEventHandlerNativeArray=add,RemovePropertyChangedEventHandler=remove)
+    watch=SettingsNameWatch(api,"owned-element","handler",log,30005,4)
+    with patch.object(threading,"get_ident",return_value=watch.owner+1):
+        try:
+            watch.close()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("UIA subscription was removed from a foreign thread")
+    assert calls==["add"] and watch.active
+    watch.close()
+    watch.close()
+    assert calls==["add","remove"] and not watch.active and log.closed.is_set()
+    fault=RuntimeError("remove failed")
+    def fail_remove(*_):
+        raise fault
+    api.RemovePropertyChangedEventHandler=fail_remove
+    failed=SettingsNameWatch(api,"owned-element","handler",SettingsSelectionLog(),30005,4)
+    try:
+        failed.close()
+    except RuntimeError as error:
+        assert error is fault
+    else:
+        raise AssertionError("UIA unsubscribe failure was hidden")
+    assert failed.active and failed.log.closed.is_set()
+    api.RemovePropertyChangedEventHandler=remove
+    failed.close()
+
+    dll=SimpleNamespace(IUIAutomationPropertyChangedEventHandler=object,UIA_NamePropertyId=30005)
+    with patch.dict(sys.modules,{"comtypes":SimpleNamespace(COMObject=object)}):
+        callback_log=SettingsSelectionLog()
+        handler=settings_name_handler(SimpleNamespace(UIA_dll=dll),callback_log)
+        assert handler.HandlePropertyChangedEvent(None,30006,"Локация, текущий раздел")==0
+        assert callback_log.drain()==[]
+        assert handler.HandlePropertyChangedEvent(None,30005,SimpleNamespace(value="Локация, текущий раздел"))==0
+        assert callback_log.drain()[0]["name"]=="Локация"
+        class BrokenValue:
+            @property
+            def value(self):
+                raise RuntimeError("invalid variant")
+        assert handler.HandlePropertyChangedEvent(None,30005,BrokenValue())==0
+        try:
+            callback_log.drain()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("A callback conversion failure produced usable evidence")
+    print("RUN - PASS: bounded copied accessibility events, property filtering, MTA lifetime and cleanup failure controls; no COM or input")
 
 
 def notification_wait_selftest():
