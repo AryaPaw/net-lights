@@ -8,6 +8,9 @@ try {
     $output = [IO.Path]::GetFullPath($OutputDirectory)
     if ((Test-Path -LiteralPath $output) -and @(Get-ChildItem -LiteralPath $output -Force).Count) { throw 'Publish needs an empty staging directory; use run-local.ps1 for transactional replacement.' }
     [string[]]$configurationArguments = @(if ($Configuration -eq 'Release') { '--release' })
+    # Offline license metadata includes locked development dependencies too.
+    & cargo fetch --locked --target x86_64-pc-windows-msvc
+    if ($LASTEXITCODE -ne 0) { throw 'Locked publish dependency fetch failed.' }
     & cargo build --workspace --locked --target-dir artifacts/rust-target -j 4 @configurationArguments
     if ($LASTEXITCODE -ne 0) { throw "Native publish build failed ($LASTEXITCODE)" }
     New-Item -ItemType Directory -Path $output -Force | Out-Null

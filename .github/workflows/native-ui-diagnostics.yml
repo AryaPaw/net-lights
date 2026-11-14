@@ -28,7 +28,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            artifacts/tools
             artifacts/rust-target
+            artifacts/rust-coverage-target
       - name: Prepare isolated functional desktop
         run: |
           uv python install 3.11

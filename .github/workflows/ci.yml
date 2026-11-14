@@ -232,6 +232,7 @@ jobs:
             ~/.cargo/git
             artifacts/tools
             artifacts/rust-target
+            artifacts/rust-coverage-target
       - name: Install pinned Rust toolchain
         run: |
           $channel = [regex]::Match((Get-Content rust-toolchain.toml -Raw), '(?m)^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$').Groups[1].Value
