@@ -2,6 +2,13 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      resource_run:
+        description: 'Run the full one-hour resource measurement'
+        type: boolean
+        required: false
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -194,7 +201,7 @@ jobs:
           name: upgrade-${{ matrix.scenario }}-${{ matrix.release }}
           path: artifacts/ci-upgrade-*
   resources:
-    if: github.ref == 'refs/heads/codex/1.7.0-ci'
+    if: github.ref == 'refs/heads/codex/1.7.0-ci' && github.event_name == 'workflow_dispatch' && inputs.resource_run
     runs-on: windows-2022
     timeout-minutes: 120
     env:
