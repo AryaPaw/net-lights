@@ -1,7 +1,10 @@
 use super::*;
 
 use super::settings_navigation::{SECTIONS, section_at_scroll};
-use gpui_kit::base::motion::{MotionStatus, TransitionState};
+use gpui_kit::base::{
+    ElementExt,
+    motion::{MotionStatus, TransitionState},
+};
 fn settings_group() -> Div {
     div().w_full().flex().flex_col().gap(px(4.))
 }
@@ -44,24 +47,6 @@ impl NetLights {
             self.settings_scroll.set_offset(point(px(0.), motion.value));
             if matches!(motion.status, MotionStatus::Idle | MotionStatus::Finished) {
                 self.settings_scroll_destination = None;
-            }
-        }
-        if !self.settings_picked && self.settings_scroll.max_offset().y > px(0.) {
-            let container = self.settings_scroll.bounds();
-            let headers: Option<Vec<f32>> = (0..SECTIONS.len())
-                .map(|index| {
-                    self.settings_scroll
-                        .bounds_for_item(index)
-                        .map(|b| f32::from(b.top() - container.top()))
-                })
-                .collect();
-            if let Some(headers) = headers {
-                self.settings_section = section_at_scroll(
-                    &headers,
-                    f32::from(container.size.height),
-                    -f32::from(self.settings_scroll.offset().y),
-                    f32::from(self.settings_scroll.max_offset().y),
-                );
             }
         }
         self.settings_navigation
@@ -250,6 +235,8 @@ impl NetLights {
             .when(!self.state.update_status.is_empty(), |d| {
                 d.child(muted(self.state.update_status.get(language(cx)), cx))
             });
+        let scroll = self.settings_scroll.clone();
+        let owner = cx.entity().downgrade();
         let body = div()
             .id("settings-content")
             .size_full()
@@ -303,6 +290,54 @@ impl NetLights {
             .child(body)
             .vertical_scrollbar(&self.settings_scroll)
             .when(!narrow, |d| d.child(rail))
+            .on_prepaint(move |_, window, cx| {
+                // The shared engine advances the offset in prepaint, after the
+                // page has rendered. Follow that actual position on every
+                // presented scroll frame, without extra page invalidation
+                // solely to update the navigation rail.
+                let maximum = scroll.max_offset().y;
+                if maximum <= px(0.) {
+                    return;
+                }
+                let container = scroll.bounds();
+                let headers: Option<Vec<f32>> = (0..SECTIONS.len())
+                    .map(|index| {
+                        scroll
+                            .bounds_for_item(index)
+                            .map(|b| f32::from(b.top() - container.top()))
+                    })
+                    .collect();
+                let Some(headers) = headers else { return };
+                let index = section_at_scroll(
+                    &headers,
+                    f32::from(container.size.height),
+                    -f32::from(scroll.offset().y),
+                    f32::from(maximum),
+                );
+                let needs_update = owner
+                    .read_with(cx, |this, _| {
+                        this.page == Page::Settings
+                            && !this.settings_picked
+                            && this.settings_section != index
+                    })
+                    .unwrap_or(false);
+                if !needs_update {
+                    return;
+                }
+                let owner = owner.clone();
+                window.defer(cx, move |_, cx| {
+                    let _ = owner.update(cx, |this, cx| {
+                        if this.page == Page::Settings
+                            && !this.settings_picked
+                            && this.settings_section != index
+                        {
+                            this.settings_section = index;
+                            this.settings_navigation
+                                .update(cx, |nav, cx| nav.set(index, cx));
+                        }
+                    });
+                });
+            })
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
                 this.settings_picked = false;
                 this.settings_target = None;

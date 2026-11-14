@@ -54,6 +54,15 @@ def rectangle_inside(rect, bounds):
     return a<=rect[0]<rect[2]<=c and b<=rect[1]<rect[3]<=d
 
 
+def settings_selection(names):
+    sections=("Проверки и трафик","Локация","Приложение")
+    selected=[name for name in names if name in tuple(s+", текущий раздел" for s in sections)]
+    present=[name.split(",")[0] for name in names if name in sections or name in selected]
+    if len(selected)!=1 or len(present)!=3 or set(present)!=set(sections):
+        raise RuntimeError("Settings must expose three distinct navigation buttons and one selected section")
+    return selected[0].split(",")[0]
+
+
 def drag_time_bounds(domain_start, domain_end, left, right, start_x, end_x):
     if domain_end<=domain_start or not left<=min(start_x,end_x)<max(start_x,end_x)<=right:
         raise ValueError("Drag coordinates must lie inside a positive time domain and plot")
@@ -1055,7 +1064,7 @@ class Automation:
                 return result
             # A live refresh can remove a descendant during enumeration. Only
             # repeat read-only queries, under the original shared deadline.
-            if (command in ("inventory", "exists", "rect", "value", "selected") and attempt < 2
+            if (command in ("inventory", "exists", "rect", "value", "selected", "settings-selection") and attempt < 2
                     and getattr(result, "uia_hresult", None) == 0x80040201):
                 self.interactions.append(dict(method="UIA-read-retry", command=command, attempt=attempt+1))
                 continue
@@ -1120,6 +1129,11 @@ class Automation:
                             value.append(dict(name=info.name, kind=info.control_type, id=info.automation_id,
                                 runtime_id=[int(part) for part in info.element.GetRuntimeId()] if info.control_type=="Button" else None,
                                 rect=[rectangle.left, rectangle.top, rectangle.right, rectangle.bottom], visible=control.is_visible()))
+                    elif command == "settings-selection":
+                        # Sample only the required accessible button labels.
+                        # Enumerating every rectangle/runtime-id/offscreen flag
+                        # can miss a short, genuinely displayed intermediate state.
+                        value=settings_selection([c.element_info.name for c in window.descendants(control_type="Button")])
                     else:
                         name = arguments[0]
                         controls = [c for c in window.descendants() if c.element_info.name == name]
@@ -1898,11 +1912,16 @@ class Runner:
             self.uia.call("invoke",label)
             time.sleep(.35)
             seen=["Проверки и трафик"]
-            for _ in range(8):
+            trace=dict(viewport=self.api.outer(hwnd),sections=seen,samples=[])
+            self.meta["settings_scroll_sections"]=trace
+            started=time.monotonic()
+            for notch in range(8):
                 self.api.wheel(hwnd,self.content_point(),-120)
                 until=time.monotonic()+.4
                 while time.monotonic()<until:
-                    selected=next((r["name"].split(",")[0] for r in self.uia.call("inventory") if r["kind"]=="Button" and ", текущий раздел" in r["name"]),None)
+                    selected=self.uia.call("settings-selection")
+                    if len(trace["samples"])<160:
+                        trace["samples"].append(dict(notch=notch,seconds=round(time.monotonic()-started,3),selected=selected))
                     if selected and seen[-1]!=selected:seen.append(selected)
                     time.sleep(.01)
                 if seen[-1]=="Приложение":break
@@ -2796,7 +2815,7 @@ def uia_retry_selftest():
 
     removed = RuntimeError("owned descendant removed")
     removed.uia_hresult = 0x80040201
-    for command in ("inventory", "exists", "rect", "value", "selected"):
+    for command in ("inventory", "exists", "rect", "value", "selected", "settings-selection"):
         run(command, [removed, "fresh"], "fresh", 2)
     run("inventory", [removed]*3, RuntimeError, 3)
     run("invoke", [removed], RuntimeError, 1)
@@ -2880,6 +2899,19 @@ def adaptive_viewport_selftest():
     from types import SimpleNamespace
     from unittest.mock import patch
     bounds=(0,100,1000,900)
+    sections=["Проверки и трафик","Локация","Приложение"]
+    for index in range(3):
+        names=sections.copy()
+        names[index]+=", текущий раздел"
+        assert settings_selection(names+["other button"])==sections[index]
+    for names in (sections,sections[:2],["Локация, текущий раздел"]*3,
+                  ["Проверки и трафик, текущий раздел","Локация, текущий раздел","Приложение"]):
+        try:
+            settings_selection(names)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Ambiguous or missing settings selection was accepted")
     domain_start=dt.datetime(2026,11,13,9,49,20,tzinfo=dt.timezone.utc)
     domain_end=domain_start+dt.timedelta(hours=1)
     projected=drag_time_bounds(domain_start,domain_end,35,1414,421,958)
