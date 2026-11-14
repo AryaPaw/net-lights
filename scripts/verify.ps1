@@ -4,12 +4,14 @@ param(
     [switch]$NativeUI,
     [switch]$FunctionalUI,
     [switch]$Legacy,
-    [switch]$ResourceRun
+    [switch]$ResourceRun,
+    [switch]$Preflight
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($NativeUI -and $FunctionalUI) { throw 'Select visual NativeUI or FunctionalUI evidence, not both.' }
 if ($ResourceRun -and $FunctionalUI) { throw 'ResourceRun requires visual UI evidence, not offline FunctionalUI.' }
+if ($Preflight -and ($NativeUI -or $FunctionalUI -or $Legacy -or $ResourceRun)) { throw 'Preflight is a separate headless check, not full verification.' }
 $root = Split-Path -Parent $PSScriptRoot
 $savedRustupToolchain = [Environment]::GetEnvironmentVariable('RUSTUP_TOOLCHAIN','Process')
 $savedPythonOptimize = [Environment]::GetEnvironmentVariable('PYTHONOPTIMIZE','Process')
@@ -52,12 +54,29 @@ try {
     }
     $sourceSnapshot = Get-SourceSnapshot
     $sourceSnapshot | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $results 'source-before.json') -Encoding utf8
+    [Environment]::SetEnvironmentVariable('PYTHONOPTIMIZE',$null,'Process')
+    # Parse every maintained PowerShell entry point before expensive compilation.
+    $syntaxErrors = @(
+        foreach ($script in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -Recurse -File) {
+            $tokens=$null; $parseErrors=$null
+            [Management.Automation.Language.Parser]::ParseFile($script.FullName,[ref]$tokens,[ref]$parseErrors) | Out-Null
+            foreach ($parseError in $parseErrors) { '{0}:{1}: {2}' -f [IO.Path]::GetRelativePath($root,$script.FullName),$parseError.Extent.StartLineNumber,$parseError.Message }
+        }
+    )
+    $syntaxErrors | Set-Content -LiteralPath (Join-Path $results 'powershell-syntax.log') -Encoding utf8
+    if ($syntaxErrors.Count) { throw 'PowerShell syntax checks FAIL; see powershell-syntax.log.' }
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-resource-stability.ps1') -SelfTest *> (Join-Path $results 'resource-gate-selftest.log')
     if ($LASTEXITCODE -ne 0) { throw 'Resource analyzer controls FAIL.' }
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-native-ui.ps1') -SelfTest *> (Join-Path $results 'ui-isolation-controls.log')
     if ($LASTEXITCODE -ne 0) { throw 'UI isolation controls FAIL.' }
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'collect-native-licenses.ps1') -SelfTest *> (Join-Path $results 'license-controls.log')
     if ($LASTEXITCODE -ne 0) { throw 'License collector controls FAIL.' }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'check-native-coverage.ps1') -SelfTest *> (Join-Path $results 'coverage-gate-controls.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Coverage gate controls FAIL.' }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-native-coverage.ps1') -SelfTest *> (Join-Path $results 'coverage-runner-controls.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Coverage runner controls FAIL.' }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-sandbox-update.ps1') -SelfTest *> (Join-Path $results 'sandbox-controls.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Sandbox identity and safety controls FAIL.' }
     function Invoke-Cargo([string]$Name,[string[]]$Arguments) {
         $log = Join-Path $results "$Name.log"
         Write-Host "RUN: cargo $($Arguments -join ' ')"
@@ -65,37 +84,12 @@ try {
         if ($LASTEXITCODE -ne 0) { Get-Content -LiteralPath $log -Tail 100; throw "$Name FAIL ($LASTEXITCODE): $log" }
         Get-Content -LiteralPath $log -Tail 8
     }
-    # Coverage is part of this entry point. Its tool is local to the workspace;
-    # LLVM tools must match the project's pinned Rust compiler, not a system LLVM.
     $nativeRustChannel = [regex]::Match(
         (Get-Content -LiteralPath (Join-Path $root 'rust-toolchain.toml') -Raw),
         '(?m)^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$'
     ).Groups[1].Value
     if (-not $nativeRustChannel) { throw 'The native test toolchain must be pinned to an exact Rust version.' }
     [Environment]::SetEnvironmentVariable('RUSTUP_TOOLCHAIN',$nativeRustChannel,'Process')
-    [Environment]::SetEnvironmentVariable('PYTHONOPTIMIZE',$null,'Process')
-    $nativeCoverageVersion = '0.9.1'
-    $nativeTools = Join-Path $root 'artifacts/tools'
-    $nativeToolBuild = Join-Path $root 'artifacts/rust-test-tools-target'
-    $nativeCoverageTool = Join-Path $nativeTools 'bin/cargo-llvm-cov.exe'
-    foreach ($ownedPath in @($nativeCoverageTool,$nativeToolBuild)) {
-        for ($part = $ownedPath; $part; $part = [IO.Path]::GetDirectoryName($part)) {
-            if ((Test-Path -LiteralPath $part) -and
-                ((Get-Item -LiteralPath $part -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-                throw 'Native verification tools cannot pass through a reparse point.'
-            }
-        }
-    }
-    & rustup component add llvm-tools-preview --toolchain $nativeRustChannel *> (Join-Path $results 'llvm-tools-bootstrap.log')
-    if ($LASTEXITCODE -ne 0) { Get-Content -LiteralPath (Join-Path $results 'llvm-tools-bootstrap.log') -Tail 30; throw 'Pinned LLVM tools setup failed.' }
-    if (-not (Test-Path -LiteralPath $nativeCoverageTool -PathType Leaf)) {
-        Invoke-Cargo 'coverage-tool-bootstrap' @("+$nativeRustChannel",'install','cargo-llvm-cov','--version',$nativeCoverageVersion,'--locked','--root',$nativeTools,'--target-dir',$nativeToolBuild)
-    }
-    & $nativeCoverageTool llvm-cov --version *> (Join-Path $results 'coverage-tool-version.log')
-    if ($LASTEXITCODE -ne 0 -or
-        (Get-Content -LiteralPath (Join-Path $results 'coverage-tool-version.log') -Raw).Trim() -cne "cargo-llvm-cov $nativeCoverageVersion") {
-        throw 'The workspace coverage tool has a different version; the existing executable was retained.'
-    }
     [string[]]$cargoProfileArguments = @(if ($Configuration -eq 'Release') { '--release' })
     $common = @('--workspace','--locked','--target-dir','artifacts/rust-target','-j','4') + $cargoProfileArguments
     [xml]$props = Get-Content -LiteralPath Directory.Build.props -Raw
@@ -120,6 +114,40 @@ try {
         Invoke-Cargo ("tests-" + $package.name) (@('test','--package',$package.name) + $packageArguments + @('--','--test-threads=1'))
     }
     Invoke-Cargo 'tests-gpui-cursor-patch' (@('test','--package','gpui-pre-windows','--lib') + $packageArguments + @('netlights_cursor_tests','--','--test-threads=1'))
+    $frameArguments=@('--manifest-path','scripts/fixtures/native-frameprobe/Cargo.toml','--locked','--target-dir','artifacts/frameprobe-target','-j','4')+$cargoProfileArguments
+    Invoke-Cargo 'format-frameprobe' @('fmt','--manifest-path','scripts/fixtures/native-frameprobe/Cargo.toml','--','--check')
+    Invoke-Cargo 'lint-frameprobe' (@('clippy','--all-targets')+$frameArguments+@('--','-D','warnings'))
+    Invoke-Cargo 'tests-frameprobe' (@('test')+$frameArguments+@('--','--test-threads=1'))
+    if ($Preflight) {
+        Assert-SourceUnchanged
+        Write-Host "RUN - PASS: headless $Configuration preflight (syntax, controls, format, Clippy, workspace and frameprobe tests). Logs: $results"
+        Write-Host 'NOT RUN: GUI, published-process smoke, runtime coverage, installed upgrade, motion and resource measurement. Preflight is not full verification.'
+        return
+    }
+    # Full verification still requires runtime coverage. Install its pinned tools
+    # only after cheap checks have passed; preflight never needs them.
+    $nativeCoverageVersion = '0.9.1'
+    $nativeTools = Join-Path $root 'artifacts/tools'
+    $nativeToolBuild = Join-Path $root 'artifacts/rust-test-tools-target'
+    $nativeCoverageTool = Join-Path $nativeTools 'bin/cargo-llvm-cov.exe'
+    foreach ($ownedPath in @($nativeCoverageTool,$nativeToolBuild)) {
+        for ($part = $ownedPath; $part; $part = [IO.Path]::GetDirectoryName($part)) {
+            if ((Test-Path -LiteralPath $part) -and
+                ((Get-Item -LiteralPath $part -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'Native verification tools cannot pass through a reparse point.'
+            }
+        }
+    }
+    & rustup component add llvm-tools-preview --toolchain $nativeRustChannel *> (Join-Path $results 'llvm-tools-bootstrap.log')
+    if ($LASTEXITCODE -ne 0) { Get-Content -LiteralPath (Join-Path $results 'llvm-tools-bootstrap.log') -Tail 30; throw 'Pinned LLVM tools setup failed.' }
+    if (-not (Test-Path -LiteralPath $nativeCoverageTool -PathType Leaf)) {
+        Invoke-Cargo 'coverage-tool-bootstrap' @("+$nativeRustChannel",'install','cargo-llvm-cov','--version',$nativeCoverageVersion,'--locked','--root',$nativeTools,'--target-dir',$nativeToolBuild)
+    }
+    & $nativeCoverageTool llvm-cov --version *> (Join-Path $results 'coverage-tool-version.log')
+    if ($LASTEXITCODE -ne 0 -or
+        (Get-Content -LiteralPath (Join-Path $results 'coverage-tool-version.log') -Raw).Trim() -cne "cargo-llvm-cov $nativeCoverageVersion") {
+        throw 'The workspace coverage tool has a different version; the existing executable was retained.'
+    }
     if ($env:GITHUB_ACTIONS -ceq 'true') {
         . (Join-Path $PSScriptRoot 'ci-environment.ps1')
         Assert-HostedRunner
@@ -133,8 +161,6 @@ try {
     & (Join-Path $PSScriptRoot 'publish.ps1') -OutputDirectory $published -Configuration $Configuration
     & (Join-Path $PSScriptRoot 'test-published.ps1') -PublishDirectory $published -ResultsDirectory (Join-Path $results 'published-smoke')
     & (Join-Path $PSScriptRoot 'test-local-publish-transaction.ps1') -ResultsDirectory (Join-Path $results 'local-publish')
-    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-sandbox-update.ps1') -SelfTest *> (Join-Path $results 'sandbox-controls.log')
-    if ($LASTEXITCODE -ne 0) { throw 'Sandbox identity and safety controls FAIL.' }
     Assert-SourceUnchanged
     # Always exercise the normal payload, separately from coverage instrumentation.
     # Visual Windows 11/resource acceptance remains an explicit requested mode.
