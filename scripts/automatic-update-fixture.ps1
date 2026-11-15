@@ -87,6 +87,14 @@ function Invoke-AutomaticUpgrade {
         Write-Host 'RUN: start bounded HTTPS fixture'
         $python = (& uv --cache-dir (Join-Path $repository 'artifacts/uv-cache') python find 3.11)
         Assert-Condition ($LASTEXITCODE -eq 0 -and [IO.File]::Exists($python)) 'The pinned fixture Python runtime is unavailable.'
+        # uv's minor-version directory can be a junction to its exact runtime.
+        # Resolve that tool-owned alias, then apply the unchanged no-link guard.
+        $runtimeDirectory = [IO.DirectoryInfo]::new([IO.Path]::GetDirectoryName($python))
+        if ($runtimeDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            $runtimeDirectory = $runtimeDirectory.ResolveLinkTarget($true)
+            Assert-Condition ($null -ne $runtimeDirectory -and $runtimeDirectory -is [IO.DirectoryInfo]) 'The Python runtime alias doesn''t resolve to a directory.'
+        }
+        $python = Join-Path $runtimeDirectory.FullName ([IO.Path]::GetFileName($python))
         $proxy = Start-Owned $python @((Join-Path $PSScriptRoot 'fixtures/automatic-update-feed.py'),'--directory',$private)
         $wait = [Diagnostics.Stopwatch]::StartNew()
         $ready = $null
