@@ -1,0 +1,71 @@
+name: promote-verified-release
+on:
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        required: true
+      source_run:
+        type: string
+        required: true
+      dry_run:
+        type: boolean
+        required: true
+permissions:
+  contents: write
+  actions: read
+jobs:
+  promote:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    env:
+      CI: true
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN: ${{ inputs.source_run }}
+      PROMOTION_CHANNEL: ${{ inputs.channel }}
+      PROMOTION_DRY_RUN: ${{ inputs.dry_run }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Read the verified CI identity
+        id: source
+        run: |
+          . scripts/ci-environment.ps1
+          Assert-HostedRunner
+          if (-not $env:SOURCE_RUN) {
+            if ($env:GITHUB_REF_TYPE -cne 'tag') { throw 'A source CI run or annotated release tag is required.' }
+            $annotation = (& git for-each-ref '--format=%(contents)' ('refs/tags/' + $env:GITHUB_REF_NAME)) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or $annotation.Length -gt 4096) { throw 'Invalid release tag annotation.' }
+            $matches = [regex]::Matches($annotation,'(?m)^Verified-CI-Run: ([1-9][0-9]{0,15})\s*$')
+            if ($matches.Count -ne 1) { throw 'Annotated tag must identify exactly one verified CI run.' }
+            $env:SOURCE_RUN = $matches[0].Groups[1].Value
+          }
+          if ($env:SOURCE_RUN -cnotmatch '^[1-9][0-9]{0,15}$') { throw 'Invalid source CI run ID.' }
+          'run=' + $env:SOURCE_RUN >> $env:GITHUB_OUTPUT
+          'SOURCE_RUN=' + $env:SOURCE_RUN >> $env:GITHUB_ENV
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: native-upgrade-payload
+          path: artifacts/release-input/native
+          run-id: ${{ steps.source.outputs.run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: bridge-upgrade-payload
+          path: artifacts/release-input/bridge
+          run-id: ${{ steps.source.outputs.run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: upgrade-Automatic-v1.6.0
+          path: artifacts/release-input/automatic
+          run-id: ${{ steps.source.outputs.run }}
+          github-token: ${{ github.token }}
+      - name: Validate and promote exact installed-tested bytes
+        run: |
+          $dry = $env:PROMOTION_DRY_RUN -ceq 'true'
+          scripts/promote-verified-release.ps1 -Channel $env:PROMOTION_CHANNEL -SourceRun $env:SOURCE_RUN -DryRun:$dry

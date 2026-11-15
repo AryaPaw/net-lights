@@ -81,6 +81,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Installed update fixture controls FAIL.' }
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'prepare-bridge.ps1') -SelfTest *> (Join-Path $results 'bridge-controls.log')
     if ($LASTEXITCODE -ne 0) { throw 'Compatibility bridge scope controls FAIL.' }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'promote-verified-release.ps1') -SelfTest *> (Join-Path $results 'release-promotion-controls.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Verified release promotion controls FAIL.' }
     & uv run --offline --cache-dir (Join-Path $root 'artifacts/uv-cache') --python 3.11 python (Join-Path $PSScriptRoot 'fixtures/automatic-update-feed.py') --self-test *> (Join-Path $results 'automatic-feed-controls.log')
     if ($LASTEXITCODE -ne 0) { throw 'Automatic update feed controls FAIL.' }
     function Invoke-Cargo([string]$Name,[string[]]$Arguments) {

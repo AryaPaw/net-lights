@@ -1,98 +1,28 @@
 name: release
 on:
   push:
-    tags:
-      - "v*.*.*"
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: 'Successful full CI run for a promotion dry-run'
+        type: string
+        required: true
+      channel:
+        type: choice
+        options: [native, bridge]
+        default: native
 permissions:
   contents: write
-  id-token: write
-  attestations: write
+  actions: read
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   release:
-    if: github.ref_name != 'v1.6.1'
-    runs-on: windows-2022
-    timeout-minutes: 90
-    env:
-      CI: true
-      CARGO_LLVM_COV_SETUP: "no"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Functional UI test tools
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "0.11.7"
-          enable-cache: false
-      - name: Python for offline UI controls
-        shell: pwsh
-        run: |
-          uv python install 3.11
-          if ($LASTEXITCODE -ne 0) { throw 'Python bootstrap failed.' }
-      - name: Verify disposable desktop identity
-        shell: pwsh
-        run: scripts/prepare-ci-desktop.ps1 -FunctionalUI -ResultsDirectory TestResults/desktop
-      - name: Rust toolchain
-        shell: pwsh
-        run: |
-          $channel = [regex]::Match((Get-Content rust-toolchain.toml -Raw), '(?m)^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$').Groups[1].Value
-          if (-not $channel) { throw 'Rust toolchain must be pinned in rust-toolchain.toml.' }
-          rustup toolchain install $channel --profile minimal --component rustfmt --component clippy --no-self-update
-          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain setup failed.' }
-      - name: Version
-        id: ver
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $version = $tag.TrimStart("v")
-          if ($tag -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Release tag has an invalid version: $tag" }
-          [xml]$props = Get-Content Directory.Build.props
-          if ($version -cne $props.Project.PropertyGroup.Version) { throw "Tag $tag differs from Directory.Build.props version $($props.Project.PropertyGroup.Version)" }
-          echo "version=$version" >> $env:GITHUB_OUTPUT
-      - name: Verify build, tests and mandatory offline coverage
-        shell: pwsh
-        run: scripts/verify.ps1 -FunctionalUI -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}"
-      - name: Require navigation measurement before packaging and publication
-        shell: pwsh
-        run: |
-          $exe = (Resolve-Path "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/publish/NetLights.exe").Path
-          scripts/test-native-ui.ps1 -FunctionalUI -NavigationMeasurement -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/motion"
-      - name: Upload test and coverage results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: release-test-results
-          path: TestResults
-          if-no-files-found: warn
-      - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
-      - name: Installer
-        shell: pwsh
-        run: |
-          $v = "${{ steps.ver.outputs.version }}"
-          $candidates = @(
-            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-            "$env:LOCALAPPDATA\Programs\InnoSetup6\ISCC.exe"
-          )
-          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $iscc) { throw "Inno Setup compiler (ISCC.exe) was not found." }
-          $publish = (Resolve-Path "TestResults/${{ github.run_id }}-${{ github.run_attempt }}/publish").Path
-          & $iscc "/DMyAppVersion=$v" "/DPublishDir=$publish" /Oartifacts "/FNetLights-Setup-win-x64-$v" installer/net-lights.iss
-          if ($LASTEXITCODE -ne 0) { throw "Installer build failed: $LASTEXITCODE" }
-      - name: GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          files: |
-            artifacts/NetLights-Setup-win-x64-*.exe
-          generate_release_notes: false
-          fail_on_unmatched_files: true
-          make_latest: 'false'
-          body: |
-            Если не уверены, скачайте **NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe** и запустите его. Права администратора не нужны.
-
-            | Что нужно | Файл |
-            | --- | --- |
-            | **Установка** на обычный 64-bit ПК (Intel/AMD) | [NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NetLights-Setup-win-x64-${{ steps.ver.outputs.version }}.exe) |
-
-            Нужен Windows 11 x64. Нативная сборка на Rust, отдельный .NET Runtime не нужен. Автообновление скачивает Setup и ставит его тихим установщиком.
+    if: github.ref_name != 'v1.6.1' && (github.event_name == 'push' || github.ref == 'refs/heads/codex/1.7.0-ci')
+    uses: ./.github/workflows/promote-release.yml
+    with:
+      channel: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'native' }}
+      source_run: ${{ inputs.source_run || '' }}
+      dry_run: ${{ github.event_name == 'workflow_dispatch' }}
