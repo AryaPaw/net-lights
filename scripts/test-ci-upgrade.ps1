@@ -6,7 +6,7 @@ param(
     [string]$NativeInstaller,
     [string]$NativePublishDirectory,
     [string]$ResultsDirectory = ('artifacts/ci-upgrade-' + [Guid]::NewGuid().ToString('N')),
-    [ValidateSet('All','Direct','Bridge','LegacyFailures')][string]$Scenario = 'All',
+    [ValidateSet('All','Direct','Bridge','Automatic','LegacyFailures')][string]$Scenario = 'All',
     [ValidateSet('v1.6.0','v1.4.2')][string]$ReleaseTag = 'v1.6.0',
     [string]$BaselineSha256,
     [long]$BaselineBytes,
@@ -27,6 +27,7 @@ $published160Bytes = 59140690
 $utf8 = [Text.UTF8Encoding]::new($false)
 $ownedProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
 $ownsFixture = $false
+$automaticChainRunning = $false
 
 function Assert-Condition([bool]$Value, [string]$Message) {
     if (-not $Value) { throw $Message }
@@ -170,7 +171,10 @@ function Test-Negative([scriptblock]$Body, [string]$Message) {
     Assert-Condition $rejected $Message
 }
 
+. (Join-Path $PSScriptRoot 'automatic-update-fixture.ps1')
+
 if ($SelfTest) {
+    Test-AutomaticFeedCertificate
     $frames = @(Get-SafeErrorLines "at Assert-Condition, C:\private\token-secret.ps1: line 32`nat Run, C:\private\token-secret.ps1: line 130")
     if ($frames.Count -ne 2 -or $frames[0] -ne 32 -or $frames[1] -ne 130) { throw 'Safe assertion frames lost source positions.' }
     if (@(Get-SafeErrorLines 'https://private.invalid/?token=secret').Count) { throw 'A non-stack secret became diagnostic output.' }
@@ -231,7 +235,7 @@ Assert-Condition ((Get-Item -LiteralPath $BaselineInstaller).Length -eq $Baselin
 Assert-Condition ([IO.Path]::GetFileName($BaselineInstaller) -ceq ('NetLights-Setup-win-x64-' + $baselineVersion + '.exe')) 'Baseline filename doesn''t match ReleaseTag.'
 $native = Get-Payload $NativeInstaller $NativePublishDirectory '1.7.0'
 $bridge = $null
-if ($Scenario -in @('All','Bridge')) {
+if ($Scenario -in @('All','Bridge','Automatic')) {
     Assert-Condition ($BridgeInstaller -and $BridgePublishDirectory) 'This scenario requires verified bridge inputs.'
     $bridge = Get-Payload $BridgeInstaller $BridgePublishDirectory '1.6.1'
     Assert-BridgeReceipt $bridge $BridgePublishDirectory
@@ -395,7 +399,7 @@ function Get-InstallationState {
 function New-Seed {
     $start = [DateTimeOffset]::UtcNow.AddMinutes(-30)
     $settings = [ordered]@{
-        settingsVersion = 8; autoStart = $false; autoUpdateEnabled = $false
+        settingsVersion = 8; autoStart = $false; autoUpdateEnabled = $automaticChainRunning
         geoCountryDetectionEnabled = $false; geoCountryIconEnabled = $false
         availabilityPollingSeconds = 5; countryPollingSeconds = 10
         windowWidth = 1234; windowHeight = 987; emphasizeShortStatuses = $false
@@ -646,7 +650,7 @@ function Archive-Profile([string]$Name) {
     $zip = [IO.Compression.ZipArchive]::new($stream,[IO.Compression.ZipArchiveMode]::Create,$false)
     try {
         $total = 0L
-        foreach ($relative in @('settings.json','location-history.json','availability-history.json','endpoints.json','updates/result.json','updates/failed-candidate.json')) {
+        foreach ($relative in @('settings.json','location-history.json','availability-history.json','endpoints.json','updates/result.json','updates/failed-candidate.json','updates/phases.jsonl')) {
             $path = Join-Path $data $relative
             if (-not [IO.File]::Exists($path)) { continue }
             Assert-Unlinked $path
@@ -688,12 +692,41 @@ function Reset-OwnedFixture([string]$ArchiveName) {
         }
     }
     Archive-Profile $ArchiveName
+    # Automatic updates start their own agents, outside Start-Owned's list.
+    # An unresolved installer/agent must never race fixture uninstall or reuse.
+    foreach ($agent in @(Get-Process NetLights.UpdateAgent -ErrorAction SilentlyContinue)) {
+        try {
+            $null = $agent.SafeHandle
+            if ($agent.HasExited) { continue }
+            $agentPath = $agent.MainModule.FileName
+            Assert-Condition (-not [string]::IsNullOrWhiteSpace($agentPath)) 'An active update agent can''t be identified; fixture cleanup is refused.'
+            $directory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($agentPath))
+            $isOwnedStage = [IO.Path]::GetDirectoryName($directory) -ieq $updates -and [IO.Path]::GetFileName($directory) -cmatch '^[0-9a-f]{32}$'
+            Assert-Condition (-not $isOwnedStage -or $agent.HasExited) 'An automatic update agent is still active; evidence was archived and fixture uninstall/reuse is refused.'
+        } finally { $agent.Dispose() }
+    }
     if ([IO.Directory]::Exists($install)) {
         $null = Get-RegistrySnapshot
         $uninstall = Join-Path $install 'unins000.exe'
         Assert-Unlinked $uninstall
+        if (-not [IO.File]::Exists($uninstall)) {
+            throw [IO.FileNotFoundException]::new('The owned fixture uninstaller is missing. Evidence was archived; automatic cleanup is refused.')
+        }
         $process = Start-Owned $uninstall @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART')
         Assert-Condition ((Wait-Owned $process 120) -eq 0) 'The owned installation uninstaller failed.'
+        # Inno's temporary clone terminates the original process BEFORE deleting
+        # its executable. Don't remove/recreate that path while the clone still
+        # owns the final delete, or it can delete the next case's uninstaller.
+        # https://jrsoftware.org/inno-setup/documentation/topic_uninstexitcodes.htm
+        $uninstallCleanup = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            Assert-Unlinked $uninstall
+            try { $null = [IO.File]::GetAttributes($uninstall) }
+            catch [IO.FileNotFoundException] { break }
+            catch [IO.DirectoryNotFoundException] { break }
+            Assert-Condition ($uninstallCleanup.Elapsed.TotalSeconds -lt 15) 'The owned uninstaller clone hasn''t deleted its executable; fixture paths won''t be reused.'
+            Start-Sleep -Milliseconds 50
+        } while ($true)
     }
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($productKey)
     try { Assert-Condition ($null -eq $key) 'Uninstall retained a product registration; it wasn''t manually deleted.' }
@@ -728,7 +761,9 @@ try {
             Add-Check 'published-baseline-direct-native-success' 'PASS' @{ attempt = $attempt; native = $nativeEvidence }
         }
     }
-    if ($Scenario -in @('All','LegacyFailures')) {
+    # Historical rollback defects remain available as explicit diagnostics.
+    # The user removed rollback from mandatory acceptance on 2026-11-15.
+    if ($Scenario -eq 'LegacyFailures') {
         foreach ($mode in @('wrong-version','health')) {
             Invoke-Case ('legacy-' + $mode) {
                 $oldSha = Install-Baseline
@@ -749,6 +784,12 @@ try {
                 $evidence['legacySafety'] = if ($evidence.allPassed) { 'PASS' } else { 'KNOWN LIMITATION - safety assertions failed; this remains a failing case' }
                 Add-Check ('published-baseline-' + $mode + '-failure-safety') $(if ($evidence.allPassed) { 'PASS' } else { 'FAIL' }) $evidence
             }
+        }
+    }
+    if ($Scenario -in @('All','Automatic')) {
+        Invoke-Case 'automatic' {
+            $evidence = Invoke-AutomaticUpgrade
+            Add-Check 'published-baseline-automatic-bridge-native' 'PASS' $evidence
         }
     }
     if ($Scenario -in @('All','Bridge')) {

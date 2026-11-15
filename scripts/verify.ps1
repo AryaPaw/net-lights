@@ -77,6 +77,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Coverage runner controls FAIL.' }
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-sandbox-update.ps1') -SelfTest *> (Join-Path $results 'sandbox-controls.log')
     if ($LASTEXITCODE -ne 0) { throw 'Sandbox identity and safety controls FAIL.' }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-ci-upgrade.ps1') -SelfTest *> (Join-Path $results 'upgrade-controls.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Installed update fixture controls FAIL.' }
+    & uv run --offline --cache-dir (Join-Path $root 'artifacts/uv-cache') --python 3.11 python (Join-Path $PSScriptRoot 'fixtures/automatic-update-feed.py') --self-test *> (Join-Path $results 'automatic-feed-controls.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Automatic update feed controls FAIL.' }
     function Invoke-Cargo([string]$Name,[string[]]$Arguments) {
         $log = Join-Path $results "$Name.log"
         Write-Host "RUN: cargo $($Arguments -join ' ')"

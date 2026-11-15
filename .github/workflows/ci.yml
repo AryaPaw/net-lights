@@ -9,6 +9,11 @@ on:
         type: boolean
         required: false
         default: false
+      upgrade_payload_run:
+        description: 'Diagnostic automatic chain only, using verified payloads from this CI run ID; empty runs full CI'
+        type: string
+        required: false
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -16,6 +21,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   windows:
+    if: ${{ !inputs.upgrade_payload_run }}
     runs-on: windows-2022
     timeout-minutes: 90
     env:
@@ -112,6 +118,7 @@ jobs:
             artifacts/rust-target
             artifacts/rust-coverage-target
   bridge:
+    if: ${{ !inputs.upgrade_payload_run }}
     runs-on: windows-2022
     timeout-minutes: 45
     outputs:
@@ -165,7 +172,7 @@ jobs:
             release: v1.6.0
           - scenario: Bridge
             release: v1.6.0
-          - scenario: LegacyFailures
+          - scenario: Automatic
             release: v1.6.0
           - scenario: Direct
             release: v1.4.2
@@ -173,6 +180,17 @@ jobs:
             release: v1.4.2
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        if: matrix.scenario == 'Automatic'
+        with:
+          version: '0.11.7'
+          enable-cache: false
+      - name: Prepare automatic HTTPS fixture runtime
+        if: matrix.scenario == 'Automatic'
+        shell: pwsh
+        run: |
+          uv python install 3.11
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture Python bootstrap failed.' }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: native-upgrade-payload
@@ -200,6 +218,71 @@ jobs:
         with:
           name: upgrade-${{ matrix.scenario }}-${{ matrix.release }}
           path: artifacts/ci-upgrade-*
+  automatic-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && inputs.upgrade_payload_run && github.ref == 'refs/heads/codex/1.7.0-ci'
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CI: true
+      SOURCE_RUN: ${{ inputs.upgrade_payload_run }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Validate diagnostic reuse of unchanged product inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:SOURCE_RUN -cnotmatch '^[1-9][0-9]{0,15}$') { throw 'Expected a completed source CI run ID.' }
+          $source = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Source run lookup failed.' }
+          if ($source.head_branch -cne 'codex/1.7.0-ci' -or $source.path -cne '.github/workflows/ci.yml' -or $source.status -cne 'completed' -or $source.head_repository.full_name -cne $env:GITHUB_REPOSITORY) { throw 'Source run identity is invalid.' }
+          $jobs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN/jobs?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $jobs.total_count -gt 100) { throw 'Source job inventory is unavailable or exceeds its bound.' }
+          foreach ($name in @('windows','bridge')) {
+            $matching = @($jobs.jobs | Where-Object name -CEQ $name)
+            if ($matching.Count -ne 1 -or $matching[0].conclusion -cne 'success') { throw 'Source build/verification jobs must have succeeded.' }
+          }
+          $changed = @(git diff --name-only $source.head_sha $env:GITHUB_SHA)
+          if ($LASTEXITCODE -ne 0) { throw 'Source comparison failed.' }
+          $allowed = @('scripts/test-ci-upgrade.ps1','scripts/automatic-update-fixture.ps1','scripts/fixtures/automatic-update-feed.py','scripts/verify.ps1','.github/workflows/ci.yml','.cursor/skills/net-lights-ship/SKILL.md')
+          if (@($changed | Where-Object { $_ -cnotin $allowed }).Count) { throw 'Product or packaging inputs changed; run full CI instead.' }
+          New-Item -ItemType Directory -Path artifacts/ci-upgrade-source | Out-Null
+          @{sourceRun=$env:SOURCE_RUN;sourceCommit=$source.head_sha;diagnosticCommit=$env:GITHUB_SHA;unchangedProductInputs=$true;fullCI='NOT RUN'} | ConvertTo-Json | Set-Content artifacts/ci-upgrade-source/identity.json
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: native-upgrade-payload
+          path: artifacts/native-ci
+          run-id: ${{ inputs.upgrade_payload_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: bridge-upgrade-payload
+          path: artifacts/bridge-1.6.1-ci
+          run-id: ${{ inputs.upgrade_payload_run }}
+          github-token: ${{ github.token }}
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: '0.11.7'
+          enable-cache: false
+      - name: Run real automatic old-to-bridge-to-native chain
+        run: |
+          uv python install 3.11
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture Python bootstrap failed.' }
+          scripts/test-ci-upgrade.ps1 -Scenario Automatic -BaselineInstaller artifacts/bridge-1.6.1-ci/NetLights-Setup-win-x64-1.6.0.exe -BridgeInstaller artifacts/bridge-1.6.1-ci/setup/NetLights-Setup-win-x64-1.6.1.exe -BridgePublishDirectory artifacts/bridge-1.6.1-ci/publish -NativeInstaller artifacts/native-ci/setup/NetLights-Setup-win-x64-1.7.0.exe -NativePublishDirectory artifacts/native-ci/publish -ResultsDirectory artifacts/ci-upgrade-Automatic
+      - name: Upload automatic chain evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: automatic-upgrade-diagnostic
+          path: artifacts/ci-upgrade-*
+          if-no-files-found: error
   motion:
     needs: windows
     if: ${{ !cancelled() && needs.windows.outputs.native_package == 'true' }}
