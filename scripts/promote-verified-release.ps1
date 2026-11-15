@@ -45,6 +45,22 @@ function Assert-Asset([object]$Asset,[string]$Name,[string]$Sha,[long]$Bytes,[st
     Require ($Asset.name -ceq $Name -and $Asset.state -ceq 'uploaded' -and $Asset.size -eq $Bytes -and $Asset.digest -ieq ('sha256:' + $Sha)) 'The GitHub asset doesn''t match the installed-tested installer.'
     Require ($Asset.browser_download_url -ceq ('https://github.com/AryaPaw/net-lights/releases/download/' + $Tag + '/' + $Name)) 'Unexpected public installer URL.'
 }
+function Resolve-ReleaseId([object[]]$Inventory,[string]$Tag) {
+    Require ($Inventory.Count -lt 100) 'Release inventory exceeds its bound.'
+    $selected=@($Inventory | Where-Object tag_name -CEQ $Tag)
+    Require ($selected.Count -eq 1 -and [string]$selected[0].id -cmatch '^[1-9][0-9]{0,15}$') 'Cannot identify exactly one release ID for this tag.'
+    return [long]$selected[0].id
+}
+function Assert-PreparedAsset([object]$Release,[object]$Asset,[string]$Name,[string]$Sha,[long]$Bytes,[string]$Tag) {
+    Require ($Release.tag_name -ceq $Tag) 'Prepared release tag differs from the authorized version.'
+    if ($Release.draft) {
+        $prefix='https://github.com/AryaPaw/net-lights/releases/tag/'
+        Require ($Release.html_url.StartsWith($prefix,[StringComparison]::Ordinal)) 'Unexpected draft release URL.'
+        $downloadTag=$Release.html_url.Substring($prefix.Length)
+        Require ($downloadTag -ceq $Tag -or $downloadTag -cmatch '^untagged-[a-f0-9]{20,64}$') 'Unexpected draft download tag.'
+        Assert-Asset $Asset $Name $Sha $Bytes $downloadTag
+    } else { Assert-Asset $Asset $Name $Sha $Bytes $Tag }
+}
 function Assert-Unlinked([string]$Path) {
     for ($part=[IO.Path]::GetFullPath($Path);$part;$part=[IO.Path]::GetDirectoryName($part)) {
         try { $attributes=[IO.File]::GetAttributes($part) }
@@ -88,6 +104,19 @@ if ($SelfTest) {
     Assert-Asset $asset $asset.name ('a'*64) 123 'v1.7.0'
     Negative { Assert-Asset $asset $asset.name ('b'*64) 123 'v1.7.0' }
     $asset.digest=$null;Negative { Assert-Asset $asset $asset.name ('a'*64) 123 'v1.7.0' }
+    Require ((Resolve-ReleaseId @(@{tag_name='v1.7.0';id=123}) 'v1.7.0') -eq 123) 'Cannot resolve a valid draft ID.'
+    Negative { Resolve-ReleaseId @() 'v1.7.0' }
+    Negative { Resolve-ReleaseId @(@{tag_name='v1.7.0';id=1},@{tag_name='v1.7.0';id=2}) 'v1.7.0' }
+    Negative { Resolve-ReleaseId @(@{tag_name='v1.7.0';id=-1}) 'v1.7.0' }
+    $draft=@{tag_name='v1.7.0';draft=$true;html_url='https://github.com/AryaPaw/net-lights/releases/tag/untagged-0123456789abcdef0123'}
+    $asset.digest='sha256:'+('a'*64)
+    $asset.browser_download_url='https://github.com/AryaPaw/net-lights/releases/download/untagged-0123456789abcdef0123/'+$asset.name
+    Assert-PreparedAsset $draft $asset $asset.name ('a'*64) 123 'v1.7.0'
+    Negative { Assert-PreparedAsset $draft $asset $asset.name ('b'*64) 123 'v1.7.0' }
+    Negative { Assert-PreparedAsset $draft $asset $asset.name ('a'*64) 123 'v1.6.1' }
+    $draft.draft=$false;Negative { Assert-PreparedAsset $draft $asset $asset.name ('a'*64) 123 'v1.7.0' }
+    $draft.draft=$true;$draft.html_url='https://github.com/other/net-lights/releases/tag/untagged-0123456789abcdef0123'
+    Negative { Assert-PreparedAsset $draft $asset $asset.name ('a'*64) 123 'v1.7.0' }
     Write-Output 'RUN - PASS: release source, mandatory CI and exact public asset identity controls. No network, tag or release was changed.'
     return
 }
@@ -172,7 +201,8 @@ if(-not $existing.Count) {
     & gh release create $tag --repo AryaPaw/net-lights --verify-tag --target $releaseCommit --draft --latest=false --title $tag --notes-file (Join-Path $repository ('docs/releases/'+$version+'.md'))
     Require ($LASTEXITCODE -eq 0) 'Draft release creation failed.'
 }
-$current=Api ('releases/tags/'+$tag)
+$releaseId=Resolve-ReleaseId @(Api 'releases?per_page=100') $tag
+$current=Api ('releases/'+$releaseId)
 $assets=@($current.assets | Where-Object name -CEQ $name)
 Require ($assets.Count -le 1 -and @($current.assets | Where-Object name -CNE $name).Count -eq 0) 'Unexpected release assets; refusing to overwrite or delete them.'
 if(-not $assets.Count) {
@@ -182,14 +212,14 @@ if(-not $assets.Count) {
 }
 $deadline=[Diagnostics.Stopwatch]::StartNew()
 do {
-    $current=Api ('releases/tags/'+$tag)
+    $current=Api ('releases/'+$releaseId)
     $assets=@($current.assets | Where-Object name -CEQ $name)
     Require ($assets.Count -eq 1) 'Uploaded asset is missing or duplicated.'
     if($assets[0].digest){break}
     Require ($deadline.Elapsed.TotalSeconds -lt 60) 'GitHub hasn''t supplied the mandatory installer digest; draft is retained.'
     Start-Sleep -Seconds 2
 } while($true)
-Assert-Asset $assets[0] $name $record.sha256 $bytes $tag
+Assert-PreparedAsset $current $assets[0] $name $record.sha256 $bytes $tag
 $latest=if($Channel -ceq 'bridge'){'--latest=true'}else{'--latest=false'}
 & gh release edit $tag --repo AryaPaw/net-lights --draft=false --prerelease=false $latest --title $tag --notes-file (Join-Path $repository ('docs/releases/'+$version+'.md'))
 Require ($LASTEXITCODE -eq 0) 'Release publication failed.'

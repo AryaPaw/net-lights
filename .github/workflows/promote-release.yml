@@ -38,8 +38,14 @@ jobs:
           Assert-HostedRunner
           if (-not $env:SOURCE_RUN) {
             if ($env:GITHUB_REF_TYPE -cne 'tag') { throw 'A source CI run or annotated release tag is required.' }
-            $annotation = (& git for-each-ref '--format=%(contents)' ('refs/tags/' + $env:GITHUB_REF_NAME)) -join "`n"
-            if ($LASTEXITCODE -ne 0 -or $annotation.Length -gt 4096) { throw 'Invalid release tag annotation.' }
+            # checkout may replace the runner's annotated tag with its peeled commit.
+            # Read the immutable public tag object instead of that local reference.
+            $tagRef = & gh api ('repos/AryaPaw/net-lights/git/ref/tags/' + $env:GITHUB_REF_NAME) | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $tagRef.object.type -cne 'tag') { throw 'An annotated public release tag is required.' }
+            $tagObject = & gh api ('repos/AryaPaw/net-lights/git/tags/' + $tagRef.object.sha) | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $tagObject.tag -cne $env:GITHUB_REF_NAME -or $tagObject.object.type -cne 'commit' -or $tagObject.object.sha -cne $env:GITHUB_SHA) { throw 'Public release tag does not match this candidate.' }
+            $annotation = $tagObject.message
+            if (-not $annotation -or $annotation.Length -gt 4096) { throw 'Invalid release tag annotation.' }
             $matches = [regex]::Matches($annotation,'(?m)^Verified-CI-Run: ([1-9][0-9]{0,15})\s*$')
             if ($matches.Count -ne 1) { throw 'Annotated tag must identify exactly one verified CI run.' }
             $env:SOURCE_RUN = $matches[0].Groups[1].Value
