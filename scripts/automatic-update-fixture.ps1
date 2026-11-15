@@ -55,6 +55,9 @@ function Test-AutomaticFeedCertificate {
 function Invoke-AutomaticUpgrade {
     Assert-HostedRunner
     Assert-Condition ($ownsFixture -and $ReleaseTag -ceq 'v1.6.0') 'Automatic chain requires the owned pinned 1.6.0 baseline.'
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { Assert-Condition ([Security.Principal.WindowsPrincipal]::new($identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 'The disposable fixture requires an administrative hosted-runner token.' }
+    finally { $identity.Dispose() }
     $private = Join-Path ([IO.Path]::GetTempPath()) ('NetLightsAutoUpdate-' + [Guid]::NewGuid().ToString('N'))
     Assert-Unlinked $private
     Assert-Condition (-not [IO.Path]::Exists($private)) 'Automatic feed directory already exists.'
@@ -72,11 +75,16 @@ function Invoke-AutomaticUpgrade {
             $payloads[$payload.version] = @{ path = $payload.installer; sha256 = $payload.sha256; bytes = (Get-Item -LiteralPath $payload.installer).Length }
         }
         [IO.File]::WriteAllText((Join-Path $private 'config.json'),(@{payloads=$payloads} | ConvertTo-Json -Depth 5),$utf8)
-        $trust = [Security.Cryptography.X509Certificates.X509Store]::new('Root','CurrentUser')
+        # CurrentUser Root invokes a native confirmation dialog. Only inside
+        # this administrative disposable VM, machine Root is noninteractive.
+        # https://github.com/dotnet/runtime/issues/24160
+        Write-Host 'RUN: trust ephemeral HTTPS fixture in the disposable VM'
+        $trust = [Security.Cryptography.X509Certificates.X509Store]::new('Root','LocalMachine')
         $trust.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
         Assert-Condition (@($trust.Certificates | Where-Object Thumbprint -CEQ $certificates.root.Thumbprint).Count -eq 0) 'The ephemeral certificate already exists.'
         $publicRoot = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificates.root.RawData)
         try { $trust.Add($publicRoot); $rootAdded = $true } finally { $publicRoot.Dispose() }
+        Write-Host 'RUN: start bounded HTTPS fixture'
         $python = (& uv --cache-dir (Join-Path $repository 'artifacts/uv-cache') python find 3.11)
         Assert-Condition ($LASTEXITCODE -eq 0 -and [IO.File]::Exists($python)) 'The pinned fixture Python runtime is unavailable.'
         $proxy = Start-Owned $python @((Join-Path $PSScriptRoot 'fixtures/automatic-update-feed.py'),'--directory',$private)
@@ -98,28 +106,17 @@ function Invoke-AutomaticUpgrade {
         # No agent command, staged installer or --exit-local handoff is issued
         # by this test between the baseline and the final 1.7.0 process.
         $script:automaticChainRunning = $true
+        Write-Host 'RUN: install unchanged published 1.6.0 with automatic updates enabled'
         $baselineAgentSha = Install-Baseline
         $baselinePid = (Get-App).Id
         [IO.File]::WriteAllText((Join-Path $private 'armed-1.6.1'),'go',$utf8)
-        $bridgePid = $null
-        $wait.Restart()
-        while (-not $bridgePid) {
-            Assert-Condition ($wait.Elapsed.TotalSeconds -lt 150) 'The old application didn''t automatically install and start bridge 1.6.1.'
-            $owners = @(Get-Process NetLights -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $app })
-            if ($owners.Count -eq 1 -and $owners[0].Id -ne $baselinePid -and (Read-Version $app) -ceq '1.6.1') {
-                Assert-Live $owners[0]
-                Assert-ExactFile $app $bridge.appSha256 160MB
-                Assert-ExactFile (Join-Path $install 'NetLights.UpdateAgent.exe') $bridge.agentSha256 160MB
-                Assert-Seed
-                $bridgePid = $owners[0].Id
-            }
-            if (-not $bridgePid) { Start-Sleep -Milliseconds 100 }
-        }
-        [IO.File]::WriteAllText((Join-Path $private 'armed-1.7.0'),'go',$utf8)
+        Write-Host 'RUN: wait for automatic 1.6.0 -> 1.6.1 -> 1.7.0 without delaying the second hop'
+        # The bridge feed is immediately available. Holding it until the bridge
+        # has lived for several seconds would hide overlapping update handoffs.
         $wait.Restart()
         $final = $null
         while (-not $final) {
-            Assert-Condition ($wait.Elapsed.TotalSeconds -lt 150) 'Bridge didn''t automatically install and start native 1.7.0.'
+            Assert-Condition ($wait.Elapsed.TotalSeconds -lt 240) 'The automatic two-hop chain didn''t install and start native 1.7.0.'
             $statusPath = Join-Path $updates 'result.json'
             if ([IO.File]::Exists($statusPath)) {
                 $candidate = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
@@ -129,8 +126,9 @@ function Invoke-AutomaticUpgrade {
         }
         Assert-AttemptResult $final 'NetLights-Setup-win-x64-1.7.0.exe' $chainStarted ([DateTimeOffset]::UtcNow)
         $owner = Get-App
-        Assert-Condition ($owner.Id -ne $bridgePid -and $owner.Id -ne $baselinePid) 'The final process identity wasn''t replaced.'
+        Assert-Condition ($owner.Id -ne $baselinePid) 'The final process identity wasn''t replaced.'
         Assert-Live $owner
+        Write-Host 'RUN: verify native process, both real agent handoffs and persisted data'
         $stagedAgents = @(foreach ($directory in Get-ChildItem -LiteralPath $updates -Directory) {
             if ($directory.Name -cmatch '^[0-9a-f]{32}$') {
                 $path = Join-Path $directory.FullName 'NetLights.UpdateAgent.exe'
@@ -151,6 +149,18 @@ function Invoke-AutomaticUpgrade {
             }
         }
         $nativeEvidence = Assert-Native @{exitCode=0;success=$final.success}
+        $lifecycle = @(foreach ($file in Get-ChildItem -LiteralPath (Join-Path $data 'diagnostics') -Filter 'runs-*.jsonl' -File) {
+            Assert-Unlinked $file.FullName
+            Assert-Condition ($file.Length -le 2MB) 'The fixture lifecycle journal exceeds its segment bound.'
+            Get-Content -LiteralPath $file.FullName | ForEach-Object { $_ | ConvertFrom-Json }
+        })
+        $bridgeRuns = @($lifecycle | Where-Object { $_.version -ceq '1.6.1' -and $_.code -ceq 'message-loop-starting' })
+        Assert-Condition ($bridgeRuns.Count -eq 1) 'The automatic chain didn''t run exactly one real bridge application.'
+        $bridgePid = $bridgeRuns[0].pid
+        foreach ($code in @('monitor-ready','update-agent-ready-exit-requested')) {
+            Assert-Condition (@($lifecycle | Where-Object { $_.pid -eq $bridgePid -and $_.version -ceq '1.6.1' -and $_.code -ceq $code }).Count -eq 1) 'The bridge didn''t confirm monitoring and automatic handoff.'
+        }
+        Assert-Condition ($owner.Id -ne $bridgePid) 'The final process is still the bridge.'
         $events = Get-Content -LiteralPath (Join-Path $private 'events.json') -Raw | ConvertFrom-Json
         Assert-Condition (@($events | Where-Object { $_.code -match 'reject|error' }).Count -eq 0) 'The automatic fixture rejected a request or had a handler error.'
         foreach ($version in @('1.6.1','1.7.0')) {
@@ -195,7 +205,7 @@ function Invoke-AutomaticUpgrade {
         Assert-Unlinked $private
         $entries = @(Get-ChildItem -LiteralPath $private -Force)
         foreach ($entry in $entries) {
-            Assert-Condition (-not $entry.PSIsContainer -and $entry.Name -cin @('key.pem','leaf.pem','config.json','ready.json','events.json','events.tmp','armed-1.6.1','armed-1.7.0')) 'Unexpected automatic fixture contents prevent cleanup.'
+            Assert-Condition (-not $entry.PSIsContainer -and $entry.Name -cin @('key.pem','leaf.pem','config.json','ready.json','events.json','events.tmp','armed-1.6.1')) 'Unexpected automatic fixture contents prevent cleanup.'
             Assert-Unlinked $entry.FullName
         }
         Remove-Item -LiteralPath $private -Recurse -Force

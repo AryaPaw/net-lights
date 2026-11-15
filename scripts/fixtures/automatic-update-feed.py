@@ -147,7 +147,8 @@ class InnerHandler(Handler):
             self.send_error(403)
             return
         if code in ("latest", "stable"):
-            fixture.wait_armed(version)
+            if code == "latest":
+                fixture.wait_armed(version)
             value = release(version, fixture.payloads[version])
             if code == "stable":
                 value = [value, release("1.6.1", fixture.payloads["1.6.1"])]

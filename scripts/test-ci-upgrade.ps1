@@ -659,6 +659,18 @@ function Archive-Profile([string]$Name) {
             Assert-Condition ($bytes -le 32MB -and $total -le 96MB) 'Fixture archive exceeds its bound.'
             $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$path,$relative,[IO.Compression.CompressionLevel]::Fastest)
         }
+        $diagnostics = Join-Path $data 'diagnostics'
+        if ([IO.Directory]::Exists($diagnostics)) {
+            Assert-Unlinked $diagnostics
+            $journals = @(Get-ChildItem -LiteralPath $diagnostics -Filter 'runs-*.jsonl' -File)
+            Assert-Condition ($journals.Count -le 16) 'Fixture lifecycle journal count exceeds its bound.'
+            foreach ($journal in $journals) {
+                Assert-Unlinked $journal.FullName
+                $total += $journal.Length
+                Assert-Condition ($journal.Length -le 2MB -and $total -le 96MB) 'Fixture lifecycle evidence exceeds its archive bound.'
+                $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$journal.FullName,('diagnostics/' + $journal.Name),[IO.Compression.CompressionLevel]::Fastest)
+            }
+        }
     } finally { $zip.Dispose(); $stream.Dispose() }
     Assert-Condition ((Get-Item -LiteralPath $archive).Length -gt 0) 'The diagnostic archive wasn''t written.'
 }
