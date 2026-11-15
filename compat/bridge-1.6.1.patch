@@ -33,16 +33,24 @@ diff --git a/installer/net-lights.iss b/installer/net-lights.iss
 diff --git a/src/NetLights.App/Hosting/NetLightsContext.cs b/src/NetLights.App/Hosting/NetLightsContext.cs
 --- a/src/NetLights.App/Hosting/NetLightsContext.cs
 +++ b/src/NetLights.App/Hosting/NetLightsContext.cs
-@@ -48,7 +48,7 @@
+@@ -46,11 +46,15 @@
+     private string? _updateNotice;
+     private string? _persistenceWarning;
      private readonly string? _updateHealthEvent;
++    private readonly Task<bool> _incomingUpdateCompletion;
      private int _updateHealthSignaled;
  
 -    public NetLightsContext(string? updateHealthEvent = null)
 +    public NetLightsContext(string? updateHealthEvent = null, bool skipAutomaticUpdates = false)
      {
          _updateHealthEvent = updateHealthEvent;
++        _incomingUpdateCompletion = updateHealthEvent is null
++            ? Task.FromResult(true)
++            : IncomingUpdateBarrier.WaitAsync(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NetLights", "updates"), _diagnosticsCts.Token);
          _uiThreadId = Environment.CurrentManagedThreadId;
-@@ -148,6 +148,13 @@
+         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+         (AppSettings loadedSettings, SettingsLoadStatus loadStatus) = SettingsStore.LoadDetailed();
+@@ -148,6 +152,13 @@
          if (new PendingUpdateStore().TryReadLastFailure(out string? updateError))
          {
              _updateNotice = updateError;
@@ -56,7 +64,7 @@ diff --git a/src/NetLights.App/Hosting/NetLightsContext.cs b/src/NetLights.App/H
          }
  
          _host.SnapshotChanged += OnSnapshot;
-@@ -235,7 +242,7 @@
+@@ -235,13 +246,14 @@
          _countryTray.SetLetterScale(GeoCountryLetterScales.Parse(_settings.GeoCountryLetterSize));
          _countryTray.SetDetectionEnabled(_settings.GeoCountryDetectionEnabled);
          _countryTray.SetTrayIconEnabled(_settings.GeoCountryIconEnabled);
@@ -65,7 +73,15 @@ diff --git a/src/NetLights.App/Hosting/NetLightsContext.cs b/src/NetLights.App/H
              () => _settings.AutoUpdateEnabled,
              ProductInfo.Version,
              Application.ExecutablePath,
-@@ -728,6 +735,7 @@
+             () => _ui.Post(_ => BeginGracefulExit(), null),
+             _updateGate,
+-            _diagnosticsCts.Token);
++            _diagnosticsCts.Token,
++            incomingUpdateCompletion: _incomingUpdateCompletion);
+         if (!string.IsNullOrEmpty(warning))
+         {
+             _icon.BalloonTipTitle = ProductInfo.Name;
+@@ -728,10 +740,17 @@
  
          bool exitRequested = false;
          SilentUpdateOutcome outcome = SilentUpdateOutcome.Failed;
@@ -73,7 +89,17 @@ diff --git a/src/NetLights.App/Hosting/NetLightsContext.cs b/src/NetLights.App/H
          string? downloadDirectory = null;
          try
          {
-@@ -754,7 +762,8 @@
+             _status?.SetManualUpdateState(true, ManualUpdateCopy.Checking);
++            if (!await _incomingUpdateCompletion.ConfigureAwait(true))
++            {
++                RuntimeJournal.Write("manual-update-prior-agent-unconfirmed");
++                _status?.SetManualUpdateState(false, "Обновление отложено: завершение предыдущей установки не подтверждено. Мониторинг работает.");
++                return;
++            }
+             string? applicationDirectory = Path.GetDirectoryName(Application.ExecutablePath);
+             if (string.IsNullOrWhiteSpace(applicationDirectory))
+             {
+@@ -754,7 +773,8 @@
                  feed,
                  new AgentSilentSetupInstaller(Application.ExecutablePath),
                  () => exitRequested = true,
@@ -83,7 +109,7 @@ diff --git a/src/NetLights.App/Hosting/NetLightsContext.cs b/src/NetLights.App/H
          }
          catch (Exception ex)
          {
-@@ -770,7 +779,7 @@
+@@ -770,7 +790,7 @@
              _updateGate.Release();
          }
  
@@ -108,7 +134,43 @@ diff --git a/src/NetLights.App/Hosting/Program.cs b/src/NetLights.App/Hosting/Pr
 diff --git a/src/NetLights.App/Hosting/SilentUpdateRuntime.cs b/src/NetLights.App/Hosting/SilentUpdateRuntime.cs
 --- a/src/NetLights.App/Hosting/SilentUpdateRuntime.cs
 +++ b/src/NetLights.App/Hosting/SilentUpdateRuntime.cs
-@@ -85,7 +85,11 @@
+@@ -14,7 +14,8 @@
+         string processPath,
+         Action requestExit,
+         SemaphoreSlim updateGate,
+-        CancellationToken cancellationToken)
++        CancellationToken cancellationToken,
++        Task<bool>? incomingUpdateCompletion = null)
+     {
+         if (!SilentUpdatePolicy.AllowsBackgroundProcess(Process.GetCurrentProcess().ProcessName))
+         {
+@@ -23,6 +24,25 @@
+ 
+         _ = Task.Run(async () =>
+         {
++            if (incomingUpdateCompletion is not null)
++            {
++                try
++                {
++                    await updateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
++                    try
++                    {
++                        RuntimeJournal.Write("update-prior-agent-wait-started");
++                        if (!await incomingUpdateCompletion.ConfigureAwait(false))
++                        {
++                            RuntimeJournal.Write("update-prior-agent-unconfirmed");
++                            return;
++                        }
++                        RuntimeJournal.Write("update-prior-agent-finished");
++                    }
++                    finally { updateGate.Release(); }
++                }
++                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
++            }
+             CleanupOldStaging();
+             await Loop(autoUpdateEnabled, currentVersion, processPath, requestExit, updateGate, cancellationToken).ConfigureAwait(false);
+         });
+@@ -85,7 +105,11 @@
                          feed,
                          new AgentSilentSetupInstaller(processPath),
                          () => exitRequested = true,
@@ -3603,6 +3665,151 @@ index 0000000..1bf6034
 +        {
 +            SettingsStore.RootDirectory = previous;
 +            Directory.Delete(root, true);
++        }
++    }
++}
+diff --git a/src/NetLights.App/Hosting/IncomingUpdateBarrier.cs b/src/NetLights.App/Hosting/IncomingUpdateBarrier.cs
+new file mode 100644
+--- /dev/null
++++ b/src/NetLights.App/Hosting/IncomingUpdateBarrier.cs
+@@ -0,0 +1,44 @@
++using System.ComponentModel;
++using System.Diagnostics;
++
++namespace NetLights.App;
++
++internal static class IncomingUpdateBarrier
++{
++    // An incoming agent still owns health verification and finalization after
++    // starting this process. Monitoring must run, but another automatic handoff
++    // mustn't exit this process until that agent has actually finished.
++    internal static async Task<bool> WaitAsync(string updatesRoot, CancellationToken cancellationToken,
++        TimeSpan? timeout = null, Func<Process[]>? enumerate = null)
++    {
++        cancellationToken.ThrowIfCancellationRequested();
++        Process[] processes = [];
++        try
++        {
++            string root = Path.GetFullPath(updatesRoot).TrimEnd(Path.DirectorySeparatorChar);
++            processes = (enumerate ?? (() => Process.GetProcessesByName("NetLights.UpdateAgent")))();
++            if (processes.Length > 32) return false;
++            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++            deadline.CancelAfter(timeout ?? TimeSpan.FromSeconds(45));
++            var priorAgents = new List<Process>();
++            foreach (Process process in processes)
++            {
++                _ = process.SafeHandle; // Pin identity before reading its path.
++                if (process.HasExited) continue;
++                string? executable = process.MainModule?.FileName;
++                if (executable is null) return false;
++                string? directory = Path.GetDirectoryName(Path.GetFullPath(executable));
++                if (!string.Equals(Path.GetFileName(executable), "NetLights.UpdateAgent.exe", StringComparison.OrdinalIgnoreCase)
++                    || !string.Equals(Path.GetDirectoryName(directory), root, StringComparison.OrdinalIgnoreCase)
++                    || !Guid.TryParseExact(Path.GetFileName(directory), "N", out _)) continue;
++                priorAgents.Add(process);
++            }
++            await Task.WhenAll(priorAgents.Select(process => process.WaitForExitAsync(deadline.Token))).ConfigureAwait(false);
++            return true;
++        }
++        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return false; }
++        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or IOException
++            or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return false; }
++        finally { foreach (Process process in processes) process.Dispose(); }
++    }
++}
+diff --git a/tests/NetLights.IntegrationTests/IncomingUpdateBarrierTests.cs b/tests/NetLights.IntegrationTests/IncomingUpdateBarrierTests.cs
+new file mode 100644
+--- /dev/null
++++ b/tests/NetLights.IntegrationTests/IncomingUpdateBarrierTests.cs
+@@ -0,0 +1,91 @@
++using System.ComponentModel;
++using System.Diagnostics;
++using NetLights.App;
++using Xunit;
++
++namespace NetLights.IntegrationTests;
++
++public sealed class IncomingUpdateBarrierTests
++{
++    [Fact]
++    public async Task NextHandoffWaitsUntilTheRealPriorAgentProcessExits()
++    {
++        using var fixture = new AgentProcess(ownedStage: true);
++        Task<bool> wait = IncomingUpdateBarrier.WaitAsync(fixture.Root, CancellationToken.None,
++            TimeSpan.FromSeconds(10), fixture.Capture);
++        Assert.False(wait.IsCompleted);
++        Assert.False(fixture.Process.HasExited);
++        fixture.Stop();
++        Assert.True(await wait.WaitAsync(TimeSpan.FromSeconds(5)));
++        Assert.Equal("saved", File.ReadAllText(fixture.Sentinel));
++    }
++
++    [Fact]
++    public async Task TimeoutSuspendsHandoffWithoutKillingAgentOrChangingData()
++    {
++        using var fixture = new AgentProcess(ownedStage: true);
++        Assert.False(await IncomingUpdateBarrier.WaitAsync(fixture.Root, CancellationToken.None,
++            TimeSpan.FromMilliseconds(100), fixture.Capture).WaitAsync(TimeSpan.FromSeconds(5)));
++        Assert.False(fixture.Process.HasExited);
++        Assert.Equal("saved", File.ReadAllText(fixture.Sentinel));
++    }
++
++    [Fact]
++    public async Task AnUnrelatedProcessDoesntBlockOrGetStopped()
++    {
++        using var fixture = new AgentProcess(ownedStage: false);
++        Assert.True(await IncomingUpdateBarrier.WaitAsync(fixture.Root, CancellationToken.None,
++            TimeSpan.FromSeconds(1), fixture.Capture).WaitAsync(TimeSpan.FromSeconds(5)));
++        Assert.False(fixture.Process.HasExited);
++    }
++
++    [Fact]
++    public async Task CancellationDoesntKillThePriorAgent()
++    {
++        using var fixture = new AgentProcess(ownedStage: true);
++        using var cancellation = new CancellationTokenSource();
++        Task<bool> wait = IncomingUpdateBarrier.WaitAsync(fixture.Root, cancellation.Token,
++            TimeSpan.FromSeconds(10), fixture.Capture);
++        cancellation.Cancel();
++        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => wait.WaitAsync(TimeSpan.FromSeconds(5)));
++        Assert.False(fixture.Process.HasExited);
++    }
++
++    [Fact]
++    public async Task AnUnidentifiablePriorAgentFailsClosed()
++        => Assert.False(await IncomingUpdateBarrier.WaitAsync(Path.GetTempPath(), CancellationToken.None,
++            enumerate: () => throw new Win32Exception(5)));
++
++    private sealed class AgentProcess : IDisposable
++    {
++        public string Root { get; } = Path.Combine(Path.GetTempPath(), "nl-incoming-agent-" + Guid.NewGuid().ToString("N"));
++        public Process Process { get; }
++        public string Sentinel => Path.Combine(Root, "saved-history.txt");
++
++        public AgentProcess(bool ownedStage)
++        {
++            string stage = Path.Combine(Root, ownedStage ? Guid.NewGuid().ToString("N") : "unrelated");
++            Directory.CreateDirectory(stage);
++            File.WriteAllText(Sentinel, "saved");
++            string executable = Path.Combine(stage, "NetLights.UpdateAgent.exe");
++            File.Copy(Path.Combine(AppContext.BaseDirectory, "NetLights.TestApp.exe"), executable);
++            foreach (string extension in new[] { ".dll", ".deps.json", ".runtimeconfig.json" })
++                File.Copy(Path.Combine(AppContext.BaseDirectory, "NetLights.TestApp" + extension), Path.Combine(stage, "NetLights.TestApp" + extension));
++            Process = System.Diagnostics.Process.Start(new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true })!;
++            _ = Process.SafeHandle;
++            Assert.False(Process.WaitForExit(50));
++        }
++
++        public Process[] Capture() => [System.Diagnostics.Process.GetProcessById(Process.Id)];
++        public void Stop()
++        {
++            if (!Process.HasExited) Process.Kill(entireProcessTree: true);
++            Assert.True(Process.WaitForExit(5000));
++        }
++        public void Dispose()
++        {
++            try { Stop(); }
++            finally { Process.Dispose(); Directory.Delete(Root, recursive: true); }
 +        }
 +    }
 +}

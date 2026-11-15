@@ -23,7 +23,7 @@ try {
     New-Item -ItemType Directory -Path $results -Force | Out-Null
     function Get-SourceSnapshot {
         $files = [Collections.Generic.List[string]]::new()
-        foreach ($directory in @('native','.cargo','scripts','.github','installer')) {
+        foreach ($directory in @('native','.cargo','scripts','.github','installer','compat')) {
             $path = Join-Path $root $directory
             if (Test-Path -LiteralPath $path) {
                 foreach ($file in Get-ChildItem -LiteralPath $path -Recurse -File -Force) {
@@ -79,6 +79,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Sandbox identity and safety controls FAIL.' }
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-ci-upgrade.ps1') -SelfTest *> (Join-Path $results 'upgrade-controls.log')
     if ($LASTEXITCODE -ne 0) { throw 'Installed update fixture controls FAIL.' }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'prepare-bridge.ps1') -SelfTest *> (Join-Path $results 'bridge-controls.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Compatibility bridge scope controls FAIL.' }
     & uv run --offline --cache-dir (Join-Path $root 'artifacts/uv-cache') --python 3.11 python (Join-Path $PSScriptRoot 'fixtures/automatic-update-feed.py') --self-test *> (Join-Path $results 'automatic-feed-controls.log')
     if ($LASTEXITCODE -ne 0) { throw 'Automatic update feed controls FAIL.' }
     function Invoke-Cargo([string]$Name,[string[]]$Arguments) {

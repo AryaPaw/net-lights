@@ -39,6 +39,7 @@ function Assert-ScopedPatch([string]$Path) {
         'Directory.Build.props','installer/net-lights.iss',
         'src/NetLights.App/Hosting/Program.cs','src/NetLights.App/Hosting/NetLightsContext.cs',
         'src/NetLights.App/Hosting/SilentUpdateRuntime.cs','src/NetLights.UpdateAgent/Program.cs',
+        'src/NetLights.App/Hosting/IncomingUpdateBarrier.cs',
         'src/NetLights.App/Persistence/SettingsStore.cs',
         'src/NetLights.Updates/InstallationSnapshot.cs','src/NetLights.Updates/OwnedInstallationMetadata.cs',
         'src/NetLights.Updates/PendingUpdateStore.cs','src/NetLights.Updates/UpdateRetryStore.cs',
@@ -49,6 +50,7 @@ function Assert-ScopedPatch([string]$Path) {
         'tests/NetLights.UnitTests/AgentSilentSetupInstallerTests.cs','tests/NetLights.UnitTests/SilentUpdateCoordinatorTests.cs',
         'tests/NetLights.UnitTests/BridgeSnapshotTests.cs','tests/NetLights.IntegrationTests/UpdateAgentProgramTests.cs',
         'tests/NetLights.IntegrationTests/BridgeSettingsMigrationTests.cs',
+        'tests/NetLights.IntegrationTests/IncomingUpdateBarrierTests.cs',
         'tests/NetLights.IntegrationTests/GeoCountryTrayTests.cs',
         'tests/NetLights.UnitTests/GitHubReleaseFeedTests.cs','tests/NetLights.UnitTests/UpdateCoordinatorTests.cs',
         'tests/NetLights.TestApp/Program.cs','tests/NetLights.TestInstaller/Program.cs'

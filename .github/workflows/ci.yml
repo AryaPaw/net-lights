@@ -14,6 +14,11 @@ on:
         type: string
         required: false
         default: ''
+      upgrade_rebuild_bridge:
+        description: 'Rebuild and verify a changed compatibility bridge for the diagnostic chain'
+        type: boolean
+        required: false
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -118,7 +123,7 @@ jobs:
             artifacts/rust-target
             artifacts/rust-coverage-target
   bridge:
-    if: ${{ !inputs.upgrade_payload_run }}
+    if: ${{ !inputs.upgrade_payload_run || inputs.upgrade_rebuild_bridge }}
     runs-on: windows-2022
     timeout-minutes: 45
     outputs:
@@ -219,7 +224,8 @@ jobs:
           name: upgrade-${{ matrix.scenario }}-${{ matrix.release }}
           path: artifacts/ci-upgrade-*
   automatic-diagnostic:
-    if: github.event_name == 'workflow_dispatch' && inputs.upgrade_payload_run && github.ref == 'refs/heads/codex/1.7.0-ci'
+    needs: bridge
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.upgrade_payload_run && github.ref == 'refs/heads/codex/1.7.0-ci' && (needs.bridge.result == 'success' || needs.bridge.result == 'skipped') }}
     runs-on: windows-2022
     timeout-minutes: 15
     permissions:
@@ -228,6 +234,7 @@ jobs:
     env:
       CI: true
       SOURCE_RUN: ${{ inputs.upgrade_payload_run }}
+      REBUILD_BRIDGE: ${{ inputs.upgrade_rebuild_bridge }}
     defaults:
       run:
         shell: pwsh
@@ -252,9 +259,10 @@ jobs:
           $changed = @(git diff --name-only $source.head_sha $env:GITHUB_SHA)
           if ($LASTEXITCODE -ne 0) { throw 'Source comparison failed.' }
           $allowed = @('scripts/test-ci-upgrade.ps1','scripts/automatic-update-fixture.ps1','scripts/fixtures/automatic-update-feed.py','scripts/verify.ps1','.github/workflows/ci.yml','.cursor/skills/net-lights-ship/SKILL.md')
+          if ($env:REBUILD_BRIDGE -ceq 'true') { $allowed += @('compat/bridge-1.6.1.patch','scripts/prepare-bridge.ps1') }
           if (@($changed | Where-Object { $_ -cnotin $allowed }).Count) { throw 'Product or packaging inputs changed; run full CI instead.' }
           New-Item -ItemType Directory -Path artifacts/ci-upgrade-source | Out-Null
-          @{sourceRun=$env:SOURCE_RUN;sourceCommit=$source.head_sha;diagnosticCommit=$env:GITHUB_SHA;unchangedProductInputs=$true;fullCI='NOT RUN'} | ConvertTo-Json | Set-Content artifacts/ci-upgrade-source/identity.json
+          @{nativeSourceRun=$env:SOURCE_RUN;nativeSourceCommit=$source.head_sha;bridgeSourceRun=$(if ($env:REBUILD_BRIDGE -ceq 'true') {$env:GITHUB_RUN_ID} else {$env:SOURCE_RUN});diagnosticCommit=$env:GITHUB_SHA;unchangedNativeInputs=$true;fullCI='NOT RUN'} | ConvertTo-Json | Set-Content artifacts/ci-upgrade-source/identity.json
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: native-upgrade-payload
@@ -265,7 +273,7 @@ jobs:
         with:
           name: bridge-upgrade-payload
           path: artifacts/bridge-1.6.1-ci
-          run-id: ${{ inputs.upgrade_payload_run }}
+          run-id: ${{ inputs.upgrade_rebuild_bridge && github.run_id || inputs.upgrade_payload_run }}
           github-token: ${{ github.token }}
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:

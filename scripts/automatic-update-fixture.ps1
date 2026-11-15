@@ -168,6 +168,12 @@ function Invoke-AutomaticUpgrade {
         foreach ($code in @('monitor-ready','update-agent-ready-exit-requested')) {
             Assert-Condition (@($lifecycle | Where-Object { $_.pid -eq $bridgePid -and $_.version -ceq '1.6.1' -and $_.code -ceq $code }).Count -eq 1) 'The bridge didn''t confirm monitoring and automatic handoff.'
         }
+        $barrierFinished = @($lifecycle | Where-Object { $_.pid -eq $bridgePid -and $_.code -ceq 'update-prior-agent-finished' })
+        Assert-Condition ($barrierFinished.Count -eq 1) 'The bridge didn''t finish its incoming update handshake.'
+        $firstRestart = @($phases | Where-Object { $_.pid -eq $agents[0] -and $_.phase -ceq 'process-restarted' })[0]
+        $bridgeReady = @($lifecycle | Where-Object { $_.pid -eq $bridgePid -and $_.code -ceq 'monitor-ready' })[0]
+        $bridgeHandoff = @($lifecycle | Where-Object { $_.pid -eq $bridgePid -and $_.code -ceq 'update-agent-ready-exit-requested' })[0]
+        Assert-Condition ([DateTimeOffset]$bridgeReady.utc -le [DateTimeOffset]$firstRestart.utc -and [DateTimeOffset]$firstRestart.utc -le [DateTimeOffset]$barrierFinished[0].utc -and [DateTimeOffset]$barrierFinished[0].utc -le [DateTimeOffset]$bridgeHandoff.utc) 'The second handoff overlapped the first agent''s readiness confirmation.'
         Assert-Condition ($owner.Id -ne $bridgePid) 'The final process is still the bridge.'
         $events = Get-Content -LiteralPath (Join-Path $private 'events.json') -Raw | ConvertFrom-Json
         Assert-Condition (@($events | Where-Object { $_.code -match 'reject|error' }).Count -eq 0) 'The automatic fixture rejected a request or had a handler error.'
