@@ -14,6 +14,9 @@ on:
 permissions:
   contents: write
   actions: read
+concurrency:
+  group: net-lights-stable-publication
+  cancel-in-progress: false
 jobs:
   promote:
     runs-on: windows-2022

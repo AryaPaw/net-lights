@@ -26,7 +26,7 @@ function Assert-Run([object]$Run,[string]$Repo) {
 function Assert-Jobs([object]$Inventory) {
     Require ($Inventory.total_count -le 100) 'Source CI job inventory exceeds its bound.'
     foreach ($name in @('windows','bridge','motion','upgrade (Direct, v1.6.0)','upgrade (Direct, v1.4.2)','upgrade (Direct, v1.7.0)',
-        'upgrade (Bridge, v1.6.0)','upgrade (Bridge, v1.4.2)','upgrade (Automatic, v1.6.0)')) {
+        'upgrade (Bridge, v1.6.0)','upgrade (Bridge, v1.4.2)','upgrade (Automatic, v1.6.0)','upgrade (AutomaticDirect, v1.6.0)')) {
         $matches = @($Inventory.jobs | Where-Object name -CEQ $name)
         Require ($matches.Count -eq 1 -and $matches[0].conclusion -ceq 'success') 'A mandatory source CI job is missing, skipped or failed.'
     }
@@ -83,6 +83,29 @@ function Assert-File([string]$Path,[string]$Sha,[long]$Limit = 160MB) {
 function Negative([scriptblock]$Check) {
     $rejected=$false;try{& $Check}catch{$rejected=$true};Require $rejected 'A promotion negative control accepted an unsafe candidate.'
 }
+function Get-LatestStableTag([object[]]$Inventory) {
+    Require ($Inventory.Count -lt 100) 'Release inventory exceeds its bound.'
+    $versions = @{}
+    foreach ($release in $Inventory) {
+        if ($release.draft -or $release.prerelease) { continue }
+        Require ($release.tag_name -cmatch '^v(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})$') 'A public stable release has an invalid version tag.'
+        $version = [Version]$release.tag_name.Substring(1)
+        Require ($version.Major -le 65535 -and $version.Minor -le 65535 -and $version.Build -le 65535) 'A stable release version exceeds its bound.'
+        Require (-not $versions.ContainsKey($version)) 'Duplicate public stable release version.'
+        $versions[$version] = [string]$release.tag_name
+    }
+    Require ($versions.Count -gt 0) 'No public stable release can be selected as Latest.'
+    $greatest = @($versions.Keys | Sort-Object -Descending)[0]
+    return $versions[$greatest]
+}
+function Test-PublishedReleaseVisible([object[]]$Inventory, [object]$Published) {
+    Require ($Inventory.Count -lt 100) 'Release inventory exceeds its bound.'
+    $matches = @($Inventory | Where-Object tag_name -CEQ $Published.tag_name)
+    Require ($matches.Count -le 1) 'Duplicate published release identity.'
+    if ($matches.Count -eq 0) { return $false }
+    Require ($matches[0].id -eq $Published.id) 'The release list disagrees with the verified published identity.'
+    return (-not $matches[0].draft -and -not $matches[0].prerelease)
+}
 if ($SelfTest) {
     Require (-not $SourceRun -and -not $DryRun) 'SelfTest can''t publish or validate a live release.'
     Assert-SourceChanges @('README.md','scripts/promote-verified-release.ps1')
@@ -92,16 +115,32 @@ if ($SelfTest) {
     $source=@{status='completed';conclusion='success';path='.github/workflows/ci.yml';head_repository=@{full_name='AryaPaw/net-lights'};event='workflow_dispatch'}
     Assert-Run $source 'AryaPaw/net-lights'
     $source.event='pull_request';Negative { Assert-Run $source 'AryaPaw/net-lights' }
-    $names=@('windows','bridge','motion','upgrade (Direct, v1.6.0)','upgrade (Direct, v1.4.2)','upgrade (Direct, v1.7.0)','upgrade (Bridge, v1.6.0)','upgrade (Bridge, v1.4.2)','upgrade (Automatic, v1.6.0)')
-    $jobs=@{total_count=9;jobs=@($names | ForEach-Object {@{name=$_;conclusion='success'}})}
+    $names=@('windows','bridge','motion','upgrade (Direct, v1.6.0)','upgrade (Direct, v1.4.2)','upgrade (Direct, v1.7.0)','upgrade (Bridge, v1.6.0)','upgrade (Bridge, v1.4.2)','upgrade (Automatic, v1.6.0)','upgrade (AutomaticDirect, v1.6.0)')
+    $jobs=@{total_count=10;jobs=@($names | ForEach-Object {@{name=$_;conclusion='success'}})}
     Assert-Jobs $jobs
     $jobs.jobs[2].conclusion='skipped';Negative { Assert-Jobs $jobs }
     $jobs.jobs[2].conclusion='success'
     $nativeDirect=@($jobs.jobs | Where-Object name -CEQ 'upgrade (Direct, v1.7.0)')[0]
     $nativeDirect.conclusion='skipped';Negative { Assert-Jobs $jobs }
     $nativeDirect.conclusion='success'
-    $jobs.jobs=@($jobs.jobs | Where-Object name -CNE 'upgrade (Direct, v1.7.0)');$jobs.total_count=8
+    $automaticDirect=@($jobs.jobs | Where-Object name -CEQ 'upgrade (AutomaticDirect, v1.6.0)')[0]
+    $automaticDirect.conclusion='skipped';Negative { Assert-Jobs $jobs }
+    $automaticDirect.conclusion='success'
+    $jobs.jobs=@($jobs.jobs | Where-Object name -CNE 'upgrade (Direct, v1.7.0)');$jobs.total_count=9
     Negative { Assert-Jobs $jobs }
+    $stable=@(@{tag_name='v1.6.1';draft=$false;prerelease=$false},@{tag_name='v1.7.1';draft=$false;prerelease=$false},@{tag_name='v1.10.0';draft=$false;prerelease=$false},@{tag_name='v1.9.0';draft=$false;prerelease=$false},@{tag_name='v99.0.0';draft=$true;prerelease=$false},@{tag_name='v100.0.0';draft=$false;prerelease=$true})
+    Require ((Get-LatestStableTag $stable) -ceq 'v1.10.0') 'Latest must be the greatest numeric stable version, independent of publication order.'
+    Require ((Get-LatestStableTag @($stable[1],$stable[0])) -ceq 'v1.7.1') 'Republishing the bridge mustn''t demote Latest.'
+    Negative { Get-LatestStableTag @() }
+    Negative { Get-LatestStableTag @($stable[0],$stable[0]) }
+    Negative { Get-LatestStableTag @(@{tag_name='v1.07.1';draft=$false;prerelease=$false}) }
+    Negative { Get-LatestStableTag @(@{tag_name='v65536.0.0';draft=$false;prerelease=$false}) }
+    $visible=@{id=123;tag_name='v1.7.1';draft=$false;prerelease=$false}
+    Require (Test-PublishedReleaseVisible @($visible) $visible) 'The exact published release should be visible.'
+    Require (-not (Test-PublishedReleaseVisible @() $visible)) 'A stale list mustn''t confirm the new release.'
+    Require (-not (Test-PublishedReleaseVisible @(@{id=123;tag_name='v1.7.1';draft=$true;prerelease=$false}) $visible)) 'A stale draft mustn''t confirm publication.'
+    Negative { Test-PublishedReleaseVisible @(@{id=124;tag_name='v1.7.1';draft=$false;prerelease=$false}) $visible }
+    Negative { Test-PublishedReleaseVisible @($visible,$visible) $visible }
     $receipt=@{status='PASS';cleanup='PASS';scenario='Automatic';releaseTag='v1.6.0';baseline=@{sha256='73d993416a298690f26891936d3b794179edc62ad86e67a7144d695840c2dd97'};checks=@(@{name='published-baseline-automatic-bridge-native';status='PASS';detail=@{discovery='PASS';httpsDownloadAndRedirects='PASS';automaticHandoffs='PASS';native=@{externalNativeMonitorSignal='PASS';settingsAndBothHistories='PASS';exactAppAndAgentDigests='PASS'}}})}
     Assert-AutomaticReceipt $receipt
     $receipt.checks[0].detail.native.settingsAndBothHistories='FAIL';Negative { Assert-AutomaticReceipt $receipt }
@@ -207,7 +246,14 @@ if(-not $existing.Count) {
     & gh release create $tag --repo AryaPaw/net-lights --verify-tag --target $releaseCommit --draft --latest=false --title $tag --notes-file (Join-Path $repository ('docs/releases/'+$version+'.md'))
     Require ($LASTEXITCODE -eq 0) 'Draft release creation failed.'
 }
-$releaseId=Resolve-ReleaseId @(Api 'releases?per_page=100') $tag
+$visibilityDeadline=[Diagnostics.Stopwatch]::StartNew()
+do {
+    $inventory=@(Api 'releases?per_page=100')
+    if (@($inventory | Where-Object tag_name -CEQ $tag).Count -gt 0) { break }
+    Require ($visibilityDeadline.Elapsed.TotalSeconds -lt 60) 'GitHub hasn''t exposed the created draft in the release inventory.'
+    Start-Sleep -Seconds 2
+} while ($true)
+$releaseId=Resolve-ReleaseId $inventory $tag
 $current=Api ('releases/'+$releaseId)
 $assets=@($current.assets | Where-Object name -CEQ $name)
 Require ($assets.Count -le 1 -and @($current.assets | Where-Object name -CNE $name).Count -eq 0) 'Unexpected release assets; refusing to overwrite or delete them.'
@@ -226,16 +272,25 @@ do {
     Start-Sleep -Seconds 2
 } while($true)
 Assert-PreparedAsset $current $assets[0] $name $record.sha256 $bytes $tag
-$latest=if($Channel -ceq 'bridge'){'--latest=true'}else{'--latest=false'}
-& gh release edit $tag --repo AryaPaw/net-lights --draft=false --prerelease=false $latest --title $tag --notes-file (Join-Path $repository ('docs/releases/'+$version+'.md'))
+& gh release edit $tag --repo AryaPaw/net-lights --draft=false --prerelease=false --latest=false --title $tag --notes-file (Join-Path $repository ('docs/releases/'+$version+'.md'))
 Require ($LASTEXITCODE -eq 0) 'Release publication failed.'
 $published=Api ('releases/tags/'+$tag)
 Require (-not $published.draft -and -not $published.prerelease) 'Release isn''t publicly stable.'
 Assert-Asset @($published.assets | Where-Object name -CEQ $name)[0] $name $record.sha256 $bytes $tag
+$visibilityDeadline.Restart()
+do {
+    $inventory=@(Api 'releases?per_page=100')
+    if (Test-PublishedReleaseVisible $inventory $published) { break }
+    Require ($visibilityDeadline.Elapsed.TotalSeconds -lt 60) 'GitHub hasn''t exposed the verified public release in the inventory; Latest wasn''t changed.'
+    Start-Sleep -Seconds 2
+} while ($true)
+$expectedLatest = Get-LatestStableTag $inventory
+& gh release edit $expectedLatest --repo AryaPaw/net-lights --latest=true
+Require ($LASTEXITCODE -eq 0) 'Cannot mark the greatest public stable version as Latest.'
 $deadline.Restart()
 do {
     $publicLatest=Api 'releases/latest'
-    if($publicLatest.tag_name -cin $(if($Channel -ceq 'bridge'){@('v1.6.1')}else{@('v1.6.0','v1.6.1')})){break}
+    if($publicLatest.tag_name -ceq $expectedLatest){break}
     Require ($deadline.Elapsed.TotalSeconds -lt 60) 'Unexpected public latest routing after publication.'
     Start-Sleep -Seconds 2
 } while($true)

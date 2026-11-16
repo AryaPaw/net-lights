@@ -54,13 +54,13 @@ def native_version(value):
     return value
 
 
-def route(host, method, path, version):
+def route(host, method, path, version, direct=False):
     version = native_version(version)
     if host == "github.com" and method == "HEAD" and path == "/":
         return "probe", None
     if host == "api.github.com" and method == "GET":
         if path == LATEST:
-            return "latest", "1.6.1"
+            return "latest", version if direct else "1.6.1"
         if path == LIST:
             return "stable", version
     for version in ("1.6.1", version):
@@ -79,6 +79,9 @@ class Fixture:
         self.lock = threading.Lock()
         self.started = time.monotonic()
         self.native_version = native_version(config.get("nativeVersion"))
+        self.direct = config.get("direct", False)
+        if not isinstance(self.direct, bool):
+            raise ValueError("Fixture direct mode must be a boolean")
         self.payloads = config["payloads"]
         if not isinstance(self.payloads, dict) or set(self.payloads) != {"1.6.1", self.native_version}:
             raise ValueError("Fixture requires exactly the bridge and native payloads")
@@ -155,7 +158,7 @@ class InnerHandler(Handler):
             fixture.record("rejected-host")
             self.send_error(403)
             return
-        code, version = route(self.expected_host, self.command, self.path, fixture.native_version)
+        code, version = route(self.expected_host, self.command, self.path, fixture.native_version, fixture.direct)
         fixture.record(code + "-request", version)
         if code == "reject":
             self.send_error(403)
@@ -217,6 +220,8 @@ class Controls(unittest.TestCase):
         for version in ("1.7.0", "1.7.1", "1.8.0"):
             with self.subTest(version=version):
                 self.assertEqual(route("api.github.com", "GET", LATEST, version), ("latest", "1.6.1"))
+                self.assertEqual(route("api.github.com", "GET", LATEST, version, True), ("latest", version))
+                self.assertEqual(route("api.github.com", "GET", LIST, version, True), ("stable", version))
                 self.assertEqual(route("api.github.com", "GET", LIST, version), ("stable", version))
                 for payload in ("1.6.1", version):
                     path = f"/AryaPaw/net-lights/releases/download/v{payload}/NetLights-Setup-win-x64-{payload}.exe"

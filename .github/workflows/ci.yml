@@ -20,6 +20,11 @@ on:
         type: boolean
         required: false
         default: false
+      upgrade_route:
+        description: 'Automatic route for diagnostic reuse of verified payloads'
+        type: choice
+        options: [Automatic, AutomaticDirect]
+        default: Automatic
 permissions:
   contents: read
 concurrency:
@@ -180,6 +185,8 @@ jobs:
             release: v1.6.0
           - scenario: Automatic
             release: v1.6.0
+          - scenario: AutomaticDirect
+            release: v1.6.0
           - scenario: Direct
             release: v1.4.2
           - scenario: Direct
@@ -189,12 +196,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
-        if: matrix.scenario == 'Automatic'
+        if: matrix.scenario == 'Automatic' || matrix.scenario == 'AutomaticDirect'
         with:
           version: '0.11.7'
           enable-cache: false
       - name: Prepare automatic HTTPS fixture runtime
-        if: matrix.scenario == 'Automatic'
+        if: matrix.scenario == 'Automatic' || matrix.scenario == 'AutomaticDirect'
         shell: pwsh
         run: |
           uv python install 3.11
@@ -246,6 +253,7 @@ jobs:
       CI: true
       SOURCE_RUN: ${{ inputs.upgrade_payload_run }}
       REBUILD_BRIDGE: ${{ inputs.upgrade_rebuild_bridge }}
+      UPGRADE_ROUTE: ${{ inputs.upgrade_route || 'Automatic' }}
     defaults:
       run:
         shell: pwsh
@@ -269,7 +277,7 @@ jobs:
           }
           $changed = @(git diff --name-only $source.head_sha $env:GITHUB_SHA)
           if ($LASTEXITCODE -ne 0) { throw 'Source comparison failed.' }
-          $allowed = @('scripts/test-ci-upgrade.ps1','scripts/automatic-update-fixture.ps1','scripts/fixtures/automatic-update-feed.py','scripts/verify.ps1','.github/workflows/ci.yml','.cursor/skills/net-lights-ship/SKILL.md')
+          $allowed = @('scripts/test-ci-upgrade.ps1','scripts/automatic-update-fixture.ps1','scripts/fixtures/automatic-update-feed.py','scripts/verify.ps1','scripts/promote-verified-release.ps1','.github/workflows/ci.yml','.github/workflows/promote-release.yml','.cursor/skills/net-lights-ship/SKILL.md','AGENTS.md','docs/DEVELOPMENT.md')
           if ($env:REBUILD_BRIDGE -ceq 'true') { $allowed += @('compat/bridge-1.6.1.patch','scripts/prepare-bridge.ps1') }
           if (@($changed | Where-Object { $_ -cnotin $allowed }).Count) { throw 'Product or packaging inputs changed; run full CI instead.' }
           New-Item -ItemType Directory -Path artifacts/ci-upgrade-source | Out-Null
@@ -290,13 +298,14 @@ jobs:
         with:
           version: '0.11.7'
           enable-cache: false
-      - name: Run real automatic old-to-bridge-to-native chain
+      - name: Run the selected real automatic upgrade route
         run: |
           uv python install 3.11
           if ($LASTEXITCODE -ne 0) { throw 'Fixture Python bootstrap failed.' }
           $nativeInstallers = @(Get-ChildItem artifacts/native-ci/setup -File -Filter 'NetLights-Setup-win-x64-*.exe')
           if ($nativeInstallers.Count -ne 1) { throw 'Expected exactly one verified native installer.' }
-          scripts/test-ci-upgrade.ps1 -Scenario Automatic -BaselineInstaller artifacts/bridge-1.6.1-ci/NetLights-Setup-win-x64-1.6.0.exe -BridgeInstaller artifacts/bridge-1.6.1-ci/setup/NetLights-Setup-win-x64-1.6.1.exe -BridgePublishDirectory artifacts/bridge-1.6.1-ci/publish -NativeInstaller $nativeInstallers[0].FullName -NativePublishDirectory artifacts/native-ci/publish -ResultsDirectory artifacts/ci-upgrade-Automatic
+          if ($env:UPGRADE_ROUTE -cnotin @('Automatic','AutomaticDirect')) { throw 'Invalid automatic upgrade diagnostic route.' }
+          scripts/test-ci-upgrade.ps1 -Scenario $env:UPGRADE_ROUTE -BaselineInstaller artifacts/bridge-1.6.1-ci/NetLights-Setup-win-x64-1.6.0.exe -BridgeInstaller artifacts/bridge-1.6.1-ci/setup/NetLights-Setup-win-x64-1.6.1.exe -BridgePublishDirectory artifacts/bridge-1.6.1-ci/publish -NativeInstaller $nativeInstallers[0].FullName -NativePublishDirectory artifacts/native-ci/publish -ResultsDirectory ('artifacts/ci-upgrade-' + $env:UPGRADE_ROUTE)
       - name: Upload automatic chain evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

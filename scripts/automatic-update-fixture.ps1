@@ -53,6 +53,7 @@ function Test-AutomaticFeedCertificate {
 }
 
 function Invoke-AutomaticUpgrade {
+    param([switch]$Direct)
     Assert-HostedRunner
     Assert-Condition ($ownsFixture -and $ReleaseTag -ceq 'v1.6.0') 'Automatic chain requires the owned pinned 1.6.0 baseline.'
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -74,7 +75,7 @@ function Invoke-AutomaticUpgrade {
         foreach ($payload in @($bridge,$native)) {
             $payloads[$payload.version] = @{ path = $payload.installer; sha256 = $payload.sha256; bytes = (Get-Item -LiteralPath $payload.installer).Length }
         }
-        [IO.File]::WriteAllText((Join-Path $private 'config.json'),(@{nativeVersion=$native.version;payloads=$payloads} | ConvertTo-Json -Depth 5),$utf8)
+        [IO.File]::WriteAllText((Join-Path $private 'config.json'),(@{nativeVersion=$native.version;payloads=$payloads;direct=[bool]$Direct} | ConvertTo-Json -Depth 5),$utf8)
         # CurrentUser Root invokes a native confirmation dialog. Only inside
         # this administrative disposable VM, machine Root is noninteractive.
         # https://github.com/dotnet/runtime/issues/24160
@@ -117,8 +118,9 @@ function Invoke-AutomaticUpgrade {
         Write-Host 'RUN: install unchanged published 1.6.0 with automatic updates enabled'
         $baselineAgentSha = Install-Baseline
         $baselinePid = (Get-App).Id
-        [IO.File]::WriteAllText((Join-Path $private 'armed-1.6.1'),'go',$utf8)
-        Write-Host ('RUN: wait for automatic 1.6.0 -> 1.6.1 -> ' + $native.version + ' without delaying the second hop')
+        $firstVersion = if ($Direct) { $native.version } else { '1.6.1' }
+        [IO.File]::WriteAllText((Join-Path $private ('armed-' + $firstVersion)),'go',$utf8)
+        Write-Host ('RUN: wait for automatic 1.6.0 -> ' + $(if ($Direct) { '' } else { '1.6.1 -> ' }) + $native.version)
         # The bridge feed is immediately available. Holding it until the bridge
         # has lived for several seconds would hide overlapping update handoffs.
         $wait.Restart()
@@ -143,14 +145,16 @@ function Invoke-AutomaticUpgrade {
                 if ([IO.File]::Exists($path)) { Assert-Unlinked $path; @{version=Read-Version $path; sha256=(Get-FileHash -LiteralPath $path).Hash} }
             }
         })
-        foreach ($expected in @(@{version='1.6.0';sha256=$baselineAgentSha},@{version='1.6.1';sha256=$bridge.agentSha256})) {
+        $expectedAgents = @(@{version='1.6.0';sha256=$baselineAgentSha})
+        if (-not $Direct) { $expectedAgents += @{version='1.6.1';sha256=$bridge.agentSha256} }
+        foreach ($expected in $expectedAgents) {
             Assert-Condition (@($stagedAgents | Where-Object { $_.version -ceq $expected.version -and $_.sha256 -ieq $expected.sha256 }).Count -eq 1) 'The automatic handoff didn''t stage the exact installed agent for both hops.'
         }
         $phasesPath = Join-Path $updates 'phases.jsonl'
         Assert-Condition ((Get-Item -LiteralPath $phasesPath).Length -le 2MB) 'The agent journal exceeds its bound.'
         $phases = @(Get-Content -LiteralPath $phasesPath | ForEach-Object { $_ | ConvertFrom-Json })
         $agents = @($phases | Where-Object { $_.phase -ceq 'agent-start' } | Select-Object -ExpandProperty pid -Unique)
-        Assert-Condition ($agents.Count -eq 2) 'The automatic chain didn''t produce exactly two real agent handoffs.'
+        Assert-Condition ($agents.Count -eq $expectedAgents.Count) 'The automatic chain produced an unexpected number of real agent handoffs.'
         foreach ($agentPid in $agents) {
             foreach ($phase in @('installed-files-backed-up','installer-started','version-confirmed','process-restarted')) {
                 Assert-Condition (@($phases | Where-Object { $_.pid -eq $agentPid -and $_.phase -ceq $phase }).Count -eq 1) 'An automatic update agent didn''t confirm all successful stages.'
@@ -163,6 +167,10 @@ function Invoke-AutomaticUpgrade {
             Get-Content -LiteralPath $file.FullName | ForEach-Object { $_ | ConvertFrom-Json }
         })
         $bridgeRuns = @($lifecycle | Where-Object { $_.version -ceq '1.6.1' -and $_.code -ceq 'message-loop-starting' })
+        $bridgePid = $null
+        if ($Direct) {
+            Assert-Condition ($bridgeRuns.Count -eq 0) 'Direct automatic discovery unexpectedly ran the bridge.'
+        } else {
         Assert-Condition ($bridgeRuns.Count -eq 1) 'The automatic chain didn''t run exactly one real bridge application.'
         $bridgePid = $bridgeRuns[0].pid
         foreach ($code in @('monitor-ready','update-agent-ready-exit-requested')) {
@@ -175,19 +183,25 @@ function Invoke-AutomaticUpgrade {
         $bridgeHandoff = @($lifecycle | Where-Object { $_.pid -eq $bridgePid -and $_.code -ceq 'update-agent-ready-exit-requested' })[0]
         Assert-Condition ([DateTimeOffset]$bridgeReady.utc -le [DateTimeOffset]$firstRestart.utc -and [DateTimeOffset]$firstRestart.utc -le [DateTimeOffset]$barrierFinished[0].utc -and [DateTimeOffset]$barrierFinished[0].utc -le [DateTimeOffset]$bridgeHandoff.utc) 'The second handoff overlapped the first agent''s readiness confirmation.'
         Assert-Condition ($owner.Id -ne $bridgePid) 'The final process is still the bridge.'
+        }
         $events = Get-Content -LiteralPath (Join-Path $private 'events.json') -Raw | ConvertFrom-Json
         Assert-Condition (@($events | Where-Object { $_.code -match 'reject|error' }).Count -eq 0) 'The automatic fixture rejected a request or had a handler error.'
-        foreach ($version in @('1.6.1',$native.version)) {
+        $downloadVersions = if ($Direct) { @($native.version) } else { @('1.6.1',$native.version) }
+        foreach ($version in $downloadVersions) {
             foreach ($code in @('redirect-request','payload-request','payload-complete')) {
                 Assert-Condition (@($events | Where-Object { $_.code -ceq $code -and $_.version -ceq $version }).Count -eq 1) 'The application didn''t download exactly one validated payload for each hop.'
             }
         }
-        foreach ($code in @('latest-request','stable-request')) {
+        if ($Direct) {
+            Assert-Condition (@($events | Where-Object { $_.code -in @('redirect-request','payload-request','payload-complete') -and $_.version -ceq '1.6.1' }).Count -eq 0) 'Direct automatic discovery downloaded the bridge.'
+        }
+        $discoveryRequests = if ($Direct) { @('latest-request') } else { @('latest-request','stable-request') }
+        foreach ($code in $discoveryRequests) {
             Assert-Condition (@($events | Where-Object { $_.code -ceq $code }).Count -ge 1) 'The installed application didn''t query both release channels.'
         }
         return @{ discovery='PASS'; httpsDownloadAndRedirects='PASS'; automaticHandoffs='PASS';
             fixture='isolated loopback HTTPS release service, real unmodified apps/agents/installers'; publicPublishedChannel='NOT RUN';
-            baselinePid=$baselinePid; bridgePid=$bridgePid; nativePid=$owner.Id; agents=$stagedAgents; native=$nativeEvidence }
+            route=$(if ($Direct) {'direct'} else {'bridge'}); baselinePid=$baselinePid; bridgePid=$bridgePid; nativePid=$owner.Id; agents=$stagedAgents; native=$nativeEvidence }
     } finally {
         # Stop only this test's app while the private trust/proxy still exist.
         try { Stop-App -CleanupOnly } finally {
@@ -219,7 +233,7 @@ function Invoke-AutomaticUpgrade {
         Assert-Unlinked $private
         $entries = @(Get-ChildItem -LiteralPath $private -Force)
         foreach ($entry in $entries) {
-            Assert-Condition (-not $entry.PSIsContainer -and $entry.Name -cin @('key.pem','leaf.pem','config.json','ready.json','events.json','events.tmp','armed-1.6.1')) 'Unexpected automatic fixture contents prevent cleanup.'
+            Assert-Condition (-not $entry.PSIsContainer -and $entry.Name -cin @('key.pem','leaf.pem','config.json','ready.json','events.json','events.tmp','armed-1.6.1',('armed-' + $native.version))) 'Unexpected automatic fixture contents prevent cleanup.'
             Assert-Unlinked $entry.FullName
         }
         Remove-Item -LiteralPath $private -Recurse -Force

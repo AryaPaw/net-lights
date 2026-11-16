@@ -6,7 +6,7 @@ param(
     [string]$NativeInstaller,
     [string]$NativePublishDirectory,
     [string]$ResultsDirectory = ('artifacts/ci-upgrade-' + [Guid]::NewGuid().ToString('N')),
-    [ValidateSet('All','Direct','Bridge','Automatic','LegacyFailures')][string]$Scenario = 'All',
+    [ValidateSet('All','Direct','Bridge','Automatic','AutomaticDirect','LegacyFailures')][string]$Scenario = 'All',
     [ValidateSet('v1.6.0','v1.4.2','v1.7.0')][string]$ReleaseTag = 'v1.6.0',
     [string]$BaselineSha256,
     [long]$BaselineBytes,
@@ -274,7 +274,7 @@ $native = Get-Payload $NativeInstaller $NativePublishDirectory $nativeVersion
 Assert-Condition ([version]$native.version -gt [version]$baselineVersion) 'The native candidate must be newer than the installed baseline.'
 $nativeName = 'NetLights-Setup-win-x64-' + $native.version + '.exe'
 $bridge = $null
-if ($Scenario -in @('All','Bridge','Automatic')) {
+if ($Scenario -in @('All','Bridge','Automatic','AutomaticDirect')) {
     Assert-Condition ($BridgeInstaller -and $BridgePublishDirectory) 'This scenario requires verified bridge inputs.'
     $bridge = Get-Payload $BridgeInstaller $BridgePublishDirectory '1.6.1'
     Assert-BridgeReceipt $bridge $BridgePublishDirectory
@@ -843,6 +843,12 @@ try {
         Invoke-Case 'automatic' {
             $evidence = Invoke-AutomaticUpgrade
             Add-Check 'published-baseline-automatic-bridge-native' 'PASS' $evidence
+        }
+    }
+    if ($Scenario -in @('All','AutomaticDirect')) {
+        Invoke-Case 'automatic-direct' {
+            $evidence = Invoke-AutomaticUpgrade -Direct
+            Add-Check 'published-baseline-automatic-direct-native' 'PASS' $evidence
         }
     }
     if ($Scenario -in @('All','Bridge')) {
