@@ -3,6 +3,9 @@ use super::*;
 use crate::dashboard::{self, EventKind, HistoryEvent, Stats, TimeRange};
 use crate::fluent::ControlCursor;
 use gpui_kit::component::button::ButtonVariants;
+#[path = "timeline_markers.rs"]
+mod markers;
+use markers::{MarkerCache, MarkerPlot};
 
 pub enum TimelineEvent {
     Select(Option<HistoryEvent>),
@@ -31,11 +34,6 @@ pub struct AvailabilityTimeline {
     marker_bounds: Rc<Cell<Bounds<Pixels>>>,
     marker_cache: Rc<RefCell<MarkerCache>>,
     marker_hover: Option<usize>,
-}
-#[derive(Default)]
-struct MarkerCache {
-    width: usize,
-    ticks: Vec<(usize, usize, usize)>,
 }
 fn inspected_at(model: &ChartModel, g: &Geometry, x: f32) -> DateTime<Utc> {
     let at = model.start
@@ -125,10 +123,7 @@ impl AvailabilityTimeline {
         let context_changed = self.models[0].language != models[0].language
             || self.models[0].end - self.models[0].start != models[0].end - models[0].start;
         let widths = self.geometry.each_ref().map(|g| g.borrow().width);
-        let marker_at = self
-            .marker_hover
-            .and_then(|i| self.changes.get(i))
-            .map(|e| e.start);
+        let marker_was_hovered = self.marker_hover.is_some();
         self.models = models.map(Arc::new);
         self.positive = self.models.each_ref().map(|m| {
             m.segments
@@ -147,15 +142,10 @@ impl AvailabilityTimeline {
         self.marker_cache.borrow_mut().width = 0;
         self.tooltip_key = None;
         self.marker_hover = None;
-        if context_changed {
+        // A marker tooltip describes a pixel group at the previous geometry.
+        // Re-enter it after layout instead of reading stale indices/counts.
+        if context_changed || marker_was_hovered {
             self.clear_pointer(cx);
-        } else if let Some(at) = marker_at {
-            let i = self.changes.partition_point(|e| e.start < at);
-            if self.changes.get(i).is_some_and(|e| e.start == at) {
-                self.country_readout(i);
-            } else {
-                self.clear_pointer(cx);
-            }
         } else if let Some(x) = self.pointer_fraction {
             for (row, width) in widths.into_iter().enumerate() {
                 if width > 0 {
@@ -291,6 +281,32 @@ impl AvailabilityTimeline {
                     )
                 ),
             ));
+            if let Some(tick) = self
+                .marker_cache
+                .borrow()
+                .ticks
+                .iter()
+                .find(|tick| tick.last == i && tick.count > 1)
+                && let Some((title, detail)) = self.tooltip.take()
+            {
+                self.tooltip = Some((
+                    format!(
+                        "{}: {}",
+                        lang.choose("Смен в отметке", "Changes in marker"),
+                        tick.count
+                    ),
+                    format!(
+                        "{}\n{} – {}\n\n{}: {title}\n{detail}",
+                        lang.choose(
+                            "Несколько изменений попали в один пиксель этого масштаба.",
+                            "Several changes share one pixel at this scale."
+                        ),
+                        local_time(self.changes[tick.first].start),
+                        local_time(e.start),
+                        lang.choose("Последнее изменение", "Latest change")
+                    ),
+                ));
+            }
             self.tooltip_key = None;
         }
     }
@@ -698,10 +714,8 @@ impl Render for AvailabilityTimeline {
         if !self.changes.is_empty() {
             let range = self.range();
             let changes = self.changes.clone();
-            let paint_changes = changes.clone();
             let measured = self.marker_bounds.clone();
             let prepared = self.marker_cache.clone();
-            let painting = prepared.clone();
             let primary = cx.theme().primary;
             let ink = cx.theme().muted_foreground;
             body = body.child(
@@ -709,41 +723,22 @@ impl Render for AvailabilityTimeline {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(ink)
-                            .child(lang.choose("Смена страны", "Country changes")),
-                    )
+                    .child(div().text_size(px(11.)).text_color(ink).child(text!(
+                        id = "country-change-heading",
+                        lang.choose("Смена страны", "Country changes")
+                    )))
                     .child(
                         div()
                             .id("country-change-markers")
                             .w_full()
-                            .h(px(30.))
                             .cursor_pointer()
                             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                                 let b = this.marker_bounds.get();
-                                let width = f32::from(b.size.width);
-                                if width <= 0. {
-                                    return;
-                                }
-                                let x: f32 =
-                                    ((event.position.x - b.origin.x) / b.size.width).clamp(0., 1.);
-                                let at = this.time(x);
-                                let index = this.changes.partition_point(|e| e.start < at);
-                                let chosen = [index.checked_sub(1), Some(index)]
-                                    .into_iter()
-                                    .flatten()
-                                    .filter(|i| *i < this.changes.len())
-                                    .min_by_key(|i| {
-                                        (this.changes[*i].start - at).num_milliseconds().abs()
-                                    });
-                                this.marker_hover = chosen.filter(|i| {
-                                    ((this.changes[*i].start - at).num_milliseconds() as f64).abs()
-                                        / this.range().millis().max(1) as f64
-                                        * width as f64
-                                        <= 6.
-                                });
+                                let relative = event.position - b.origin;
+                                this.marker_hover = this
+                                    .marker_cache
+                                    .borrow()
+                                    .hit(f32::from(relative.x), f32::from(relative.y));
                                 if let Some(i) = this.marker_hover {
                                     this.country_readout(i);
                                 } else {
@@ -766,96 +761,16 @@ impl Render for AvailabilityTimeline {
                                     this.toggle_selection(Some(event), cx);
                                 }
                             }))
-                            .child(
-                                canvas(
-                                    move |b, _, _| {
-                                        measured.set(b);
-                                        let width =
-                                            f32::from(b.size.width).round().clamp(1., 16384.)
-                                                as usize;
-                                        if prepared.borrow().width != width {
-                                            let mut pixels: Vec<Option<(usize, usize)>> =
-                                                vec![None; width];
-                                            for (i, e) in changes.iter().enumerate() {
-                                                let x =
-                                                    (((e.start - range.start).num_milliseconds()
-                                                        as f64
-                                                        / range.millis().max(1) as f64
-                                                        * width as f64)
-                                                        .round()
-                                                        as usize)
-                                                        .min(width - 1);
-                                                pixels[x] =
-                                                    Some((i, pixels[x].map_or(1, |(_, n)| n + 1)));
-                                            }
-                                            let ticks = pixels
-                                                .into_iter()
-                                                .enumerate()
-                                                .filter_map(|(x, v)| v.map(|(i, n)| (x, i, n)))
-                                                .collect();
-                                            *prepared.borrow_mut() = MarkerCache { width, ticks };
-                                        }
-                                    },
-                                    move |b, _, window, cx| {
-                                        let cache = painting.borrow();
-                                        let width = f32::from(b.size.width);
-                                        for (j, &(x, i, count)) in cache.ticks.iter().enumerate() {
-                                            let x = x as f32 * width / cache.width.max(1) as f32;
-                                            window.paint_quad(fill(
-                                                Bounds::new(
-                                                    point(b.origin.x + px(x), b.origin.y),
-                                                    size(px(2.), px(8.)),
-                                                ),
-                                                primary.opacity(0.85),
-                                            ));
-                                            let next = cache
-                                                .ticks
-                                                .get(j + 1)
-                                                .map_or(width, |t| t.0 as f32);
-                                            let previous = j
-                                                .checked_sub(1)
-                                                .map_or(-100., |k| cache.ticks[k].0 as f32);
-                                            if count == 1
-                                                && x - previous >= 54.
-                                                && next - x >= 54.
-                                                && let EventKind::Country {
-                                                    previous, current, ..
-                                                } = &paint_changes[i].kind
-                                            {
-                                                let label = format!("{previous} → {current}");
-                                                let line = window.text_system().shape_line(
-                                                    label.clone().into(),
-                                                    px(10.),
-                                                    &[TextRun {
-                                                        len: label.len(),
-                                                        font: font("Segoe UI"),
-                                                        color: ink,
-                                                        ..Default::default()
-                                                    }],
-                                                    None,
-                                                );
-                                                let left = (x - f32::from(line.width) / 2.).clamp(
-                                                    0.,
-                                                    (width - f32::from(line.width)).max(0.),
-                                                );
-                                                let _ = line.paint(
-                                                    point(
-                                                        b.origin.x + px(left),
-                                                        b.origin.y + px(10.),
-                                                    ),
-                                                    px(14.),
-                                                    TextAlign::Left,
-                                                    None,
-                                                    window,
-                                                    cx,
-                                                );
-                                            }
-                                        }
-                                    },
-                                )
-                                .w_full()
-                                .h_full(),
-                            ),
+                            .child(MarkerPlot {
+                                cache: prepared,
+                                bounds: measured,
+                                changes,
+                                range,
+                                language: lang,
+                                ink,
+                                primary,
+                                background: crate::fluent::surface(cx),
+                            }),
                     ),
             );
         }

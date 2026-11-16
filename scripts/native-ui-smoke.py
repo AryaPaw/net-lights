@@ -2390,6 +2390,76 @@ class Runner:
                     zoom_preserves_period=True, exact_zoom_ranges=zoom_ranges,drag_geometry=drag_geometry,
                     current_addresses=7, endpoint_runtime_ids=sorted(seen), narrow_outer=narrow)
 
+    def country_marker_labels(self):
+        """The fixture's two changes 15s apart must have separately usable labels."""
+        original = self.setting("locationChartWindowHours")
+        self.page("Состояние")
+        self.period(1, "1 ч")
+        scale = self.api.user.GetDpiForWindow(self.uia.hwnd)/96.
+        assert self.input_policy, "Marker interaction requires the isolated real-input policy"
+        self.visible_control("Смена страны", extra_below=round(100*scale))
+        last_rect,settled_since=None,time.monotonic()
+        def settled_caption():
+            nonlocal last_rect,settled_since
+            rect=self.uia.call("rect","Смена страны")
+            if rect!=last_rect:
+                last_rect,settled_since=rect,time.monotonic()
+            return rect if time.monotonic()-settled_since>=.35 else None
+        caption=wait_for(settled_caption,5,"scrolling settles before marker coordinate measurement")
+        wait_for(lambda:int(time.time())%10<=2,8,"marker hover starts after the live axis refresh")
+        outer = self.api.outer(self.uia.hwnd)
+        safe = (outer[0]+100, outer[1]+100)
+        self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,safe)
+        self.api.hover(self.uia.hwnd,safe)
+        self.capture("country-markers-all-labels")
+        axes=sorted((r for r in self.uia.call("inventory") if r["kind"]=="Text" and r["visible"]
+                     and re.fullmatch(r"\d{2}\.\d{2} \d{2}:\d{2}:\d{2}",r["name"])),key=lambda r:r["rect"][0])
+        assert len(axes)==2, "Both exact bounds of the shared painted axis must be visible"
+        now=dt.datetime.now().astimezone()
+        def parse_bound(value):
+            parsed=dt.datetime.strptime("2024 "+value,"%Y %d.%m %H:%M:%S")
+            options=[]
+            for offset in (-1,0,1):
+                try:
+                    options.append(parsed.replace(year=now.year+offset,tzinfo=now.tzinfo))
+                except ValueError:
+                    pass
+            return min(options,key=lambda v:abs((v-now).total_seconds()))
+        domain_start,domain_end=[parse_bound(r["name"]) for r in axes]
+        assert (domain_end-domain_start).total_seconds()==3600
+        # These actual flex-axis edges share the marker plot's full width.
+        # Their geometry is independent of green/red/gap durations in the lanes.
+        left,right=axes[0]["rect"][0],axes[1]["rect"][2]
+        assert left<right and abs(left-caption[0])<=2*scale
+        history=profile_json_snapshot(self.profile,"location-history.json")
+        parse=lambda value:dt.datetime.fromisoformat(value.replace("Z","+00:00"))
+        changes=[(a,b) for a,b in zip(history["stays"],history["stays"][1:]) if a["iso"]!=b["iso"]]
+        close=next((pair for pair in zip(changes,changes[1:])
+                    if dt.timedelta(0)<parse(pair[1][1]["startedUtc"])-parse(pair[0][1]["startedUtc"])<dt.timedelta(minutes=1)
+                    and domain_start<parse(pair[0][1]["startedUtc"])<domain_end),None)
+        assert close, "The saved fixture must contain two recent, distinct close changes"
+        names={"DE":"Германия","RU":"Россия","PL":"Польша"}
+        observed=[]
+        try:
+            for row,(before,after) in enumerate(close):
+                fraction=(parse(after["startedUtc"])-domain_start).total_seconds()/3600
+                x=left+(right-left)*fraction
+                # Caption gap + label top + measured row height + label centre.
+                target=(round(x),round(caption[3]+(4+12+18*row+7)*scale))
+                a,b,c,d=self.content_bounds()
+                assert a<=target[0]<c and b<=target[1]<d, "A label escaped the visible page"
+                self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,target)
+                self.api.hover(self.uia.hwnd,target)
+                expected=names[before["iso"]]+" → "+names[after["iso"]]
+                wait_for(lambda:self.uia.call("exists",expected),description="shifted label opens its own country transition: "+expected)
+                self.capture(f"country-marker-label-{row}")
+                observed.append(dict(title=expected,point=target))
+        finally:
+            self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,safe)
+            self.api.hover(self.uia.hwnd,safe)
+            self.period(original,next(label for hours,label in PERIODS if hours==original))
+        return dict(separate_rows=True,real_saved_changes=observed)
+
     def state_heading_counts(self, english=False):
         names = ("Provider", "World") if english else ("Провайдер", "Мир")
         controls = self.uia.call("inventory")
@@ -2850,6 +2920,7 @@ class Runner:
             if not self.meta["fixture"]["maximum_history"]:
                 self.check("inline-event-toggle-escape-and-clear",self.inline_event_details)
                 self.check("overview-linked-selection-zoom-and-addresses",self.overview_interactions)
+                self.check("country-marker-close-labels-and-hover",self.country_marker_labels)
             self.check("default-debug-off", self.default_debug_off)
             for page in PAGES[:2]:
                 self.page(page)
