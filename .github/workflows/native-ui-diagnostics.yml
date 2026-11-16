@@ -12,6 +12,11 @@ on:
         type: string
         required: false
         default: ''
+      maximum_history:
+        description: 'Use the existing maximum retained-history fixture for diagnostic load'
+        type: boolean
+        required: false
+        default: false
 permissions:
   contents: read
   actions: read
@@ -93,6 +98,7 @@ jobs:
         env:
           NETLIGHTS_NAVIGATION_MEASUREMENT: ${{ inputs.navigation_measurement }}
           SOURCE_RUN: ${{ inputs.payload_run }}
+          MAXIMUM_HISTORY: ${{ inputs.maximum_history }}
         run: |
           if ($env:SOURCE_RUN) {
             $exe = (Resolve-Path artifacts/native-reused/publish/NetLights.exe).Path
@@ -102,6 +108,8 @@ jobs:
           if ($env:NETLIGHTS_NAVIGATION_MEASUREMENT -cnotin @('true','false')) { throw 'Expected a boolean navigation measurement option.' }
           $extra = @{}
           if ($env:NETLIGHTS_NAVIGATION_MEASUREMENT -ceq 'true') { $extra.NavigationMeasurement = $true }
+          if ($env:MAXIMUM_HISTORY -cnotin @('true','false')) { throw 'Expected a boolean maximum-history option.' }
+          if ($env:MAXIMUM_HISTORY -ceq 'true') { $extra.MaximumHistory = $true }
           scripts/test-native-ui.ps1 -FunctionalUI @extra -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory TestResults/diagnostic
       - name: Upload diagnostic evidence
         if: always()
