@@ -42,6 +42,20 @@ DEBUG = "Debug: источники определения"
 WM_CLOSE, WM_MOUSEMOVE, WM_MOUSEWHEEL = 0x0010, 0x0200, 0x020A
 NO_CONSOLE = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+def matching_controls(controls, selector):
+    if isinstance(selector, str):
+        return [c for c in controls if c.element_info.name == selector]
+    if (not isinstance(selector, dict) or set(selector) != {"event"}
+            or not isinstance(selector["event"], str)
+            or not re.fullmatch(r"\d{2}\.\d{2} \d{2}:\d{2}:\d{2}   \S.*", selector["event"])):
+        raise ValueError("Invalid logical event selector")
+    matches = [c for c in controls if c.element_info.control_type == "Button"
+               and c.element_info.name.startswith(selector["event"] + "   ")]
+    if len(matches) > 1:
+        raise RuntimeError("Ambiguous logical event identity")
+    return matches
+
+
 def invocation_candidates(controls):
     """A heading/text and an action can have the same label. Never click text
     coordinates when an invocation was meant for a real control."""
@@ -1238,7 +1252,7 @@ class Automation:
                         value=None
                     else:
                         name = arguments[0]
-                        controls = [c for c in window.descendants() if c.element_info.name == name]
+                        controls = matching_controls(window.descendants(), name)
                         if command == "exists":
                             value = any(c.is_visible() for c in controls)
                         else:
@@ -1248,6 +1262,7 @@ class Automation:
                                 raise RuntimeError(f"Контрол не найден: {name}")
                             control = next((c for c in controls if c.is_visible()), controls[0])
                             if command == "invoke":
+                                resolved_name = control.element_info.name
                                 if control.element_info.control_type == "TabItem":
                                     control.iface_selection_item.Select()
                                     value = "UIA.SelectionItem.Select"
@@ -1265,7 +1280,7 @@ class Automation:
                                             assert api.owner(window.handle) == pid
                                             api.click(window.handle, ((r.left+r.right)//2, (r.top+r.bottom)//2))
                                             value = "PostMessageClick"
-                                self.interactions.append(dict(name=name, method=value, pid=pid))
+                                self.interactions.append(dict(name=resolved_name, method=value, pid=pid))
                             elif command == "rect":
                                 r = control.rectangle()
                                 value = [r.left, r.top, r.right, r.bottom]
@@ -2171,7 +2186,9 @@ class Runner:
         candidates=[r for r in self.uia.call("inventory") if r["kind"]=="Button" and
                     re.match(r"^\d{2}\.\d{2} \d{2}:\d{2}:\d{2}\s",r["name"])]
         assert candidates, "Fixture must expose recent event buttons"
-        label=candidates[0]["name"]
+        # A live event's duration changes while UIA/capture work is in flight.
+        # Its start and kind identify the same record across those updates.
+        label={"event":candidates[0]["name"].rsplit("   ",1)[0]}
         self.visible_control(label)
         self.uia.call("invoke",label)
         wait_for(lambda:self.uia.call("exists","Подробности события"),description="event expanded inline")
@@ -2914,6 +2931,30 @@ def uia_retry_selftest():
         else:
             raise AssertionError(f"Hosted resource guard accepted invalid {field}")
     from types import SimpleNamespace
+    identity="16.11 09:36:09   Провайдер: Нет ответа"
+    live=SimpleNamespace(element_info=SimpleNamespace(control_type="Button",name=identity+"   11 с"))
+    text_node=SimpleNamespace(element_info=SimpleNamespace(control_type="Text",name=identity+"   11 с"))
+    another=SimpleNamespace(element_info=SimpleNamespace(control_type="Button",name="16.11 09:36:09   Мир: Нет ответа   11 с"))
+    selector={"event":identity}
+    assert matching_controls([text_node,live,another],selector)==[live]
+    live.element_info.name=identity+"   21 с"
+    assert matching_controls([text_node,live,another],selector)==[live]
+    assert matching_controls([live],identity+"   11 с")==[]
+    assert matching_controls([text_node,another],selector)==[]
+    duplicate=SimpleNamespace(element_info=SimpleNamespace(control_type="Button",name=identity+"   22 с"))
+    for invalid in ({}, {"event":"Провайдер"}, {"event":identity,"extra":True}, {"event":1}):
+        try:
+            matching_controls([live],invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("An invalid logical event selector was accepted")
+    try:
+        matching_controls([live,duplicate],selector)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("Ambiguous event identities selected an arbitrary row")
     title=SimpleNamespace(element_info=SimpleNamespace(control_type="Text"))
     button=SimpleNamespace(element_info=SimpleNamespace(control_type="Button"))
     tab=SimpleNamespace(element_info=SimpleNamespace(control_type="TabItem"))
@@ -2958,6 +2999,7 @@ def uia_retry_selftest():
     notification_wait_selftest()
     settings_events_selftest()
     pointer_capture_selftest()
+    inline_event_identity_selftest()
     adaptive_viewport_selftest()
     profile_snapshot_selftest()
     navigation_motion_selftest()
@@ -2982,6 +3024,74 @@ def uia_retry_selftest():
         else:
             raise AssertionError("CI pointer policy skipped actual identity verification")
     print("RUN - PASS: bounded read-only UIA retry and four failure controls; no COM or input")
+
+
+def inline_event_identity_selftest():
+    from types import SimpleNamespace
+    identity="16.11 09:36:09   Провайдер: Нет ответа"
+    initial=identity+"   11 с"
+
+    class Events:
+        hwnd=1
+        def __init__(self, stale=False):
+            self.stale=stale
+            self.expanded=False
+            self.live_seconds=11
+            self.row=SimpleNamespace(element_info=SimpleNamespace(control_type="Button",name=initial))
+
+        def close(self):
+            self.expanded=False
+            self.row.element_info.name=identity+f"   {self.live_seconds} с"
+
+        def call(self, command, selector=None):
+            if command=="inventory":
+                return [dict(kind="Button",name=self.row.element_info.name)]
+            if command=="exists":
+                assert selector in ("Подробности события","Снять выделение")
+                return self.expanded
+            if command=="invoke" and selector=="Снять выделение":
+                self.close()
+                return
+            if command=="rect" and selector=="Подробности события":
+                return [0,156,200,200]
+            query=initial if self.stale and isinstance(selector,dict) else selector
+            if not matching_controls([self.row],query):
+                raise RuntimeError("The event's old full label no longer exists")
+            if command=="invoke":
+                if self.expanded:
+                    self.close()
+                else:
+                    self.expanded=True
+            elif command=="rect":
+                return [0,100,200,154]
+            else:
+                raise AssertionError(command)
+
+    def run(stale):
+        events=Events(stale)
+        runner=Runner.__new__(Runner)
+        runner.uia=events
+        runner.process=SimpleNamespace(pid=123)
+        runner.meta={"dpi":96}
+        runner.page=lambda _:None
+        runner.visible_control=lambda *_:None
+        # The selected row is a frozen snapshot. Its live duration changes
+        # while expanded and is displayed only after the row collapses.
+        runner.capture=lambda _:setattr(events,"live_seconds",21)
+        def post(_hwnd,message,key,_flags):
+            if message==0x0100 and key==0x1b:
+                events.close()
+        runner.api=SimpleNamespace(owner=lambda _:123,post=post)
+        return runner.inline_event_details()
+
+    result=run(False)
+    assert result["same_event_toggle"] and result["escape"] and result["clear_action"]
+    try:
+        run(True)
+    except RuntimeError as error:
+        assert "old full label" in str(error)
+    else:
+        raise AssertionError("The inline event scenario accepted a stale whole-label selector")
 
 
 def settings_events_selftest():
