@@ -42,6 +42,8 @@ use windows::Win32::UI::{
 use windows::core::{IInspectable, Interface, factory};
 #[path = "capture_dxgi.rs"]
 mod dxgi;
+#[path = "capture_stream.rs"]
+mod stream;
 type Result<T> = std::result::Result<T, Failure>;
 fn checked<T>(value: windows::core::Result<T>, code: &'static str) -> Result<T> {
     value.map_err(|error| Failure(code, error.code().0))

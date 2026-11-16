@@ -1,3 +1,4 @@
+use super::stream::{self, Event};
 use super::*;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_MODE_ROTATION_IDENTITY;
@@ -137,6 +138,19 @@ fn read_pixels(
 }
 
 pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write) -> Result<()> {
+    let capture_signals = signals.clone();
+    stream::run(
+        signals,
+        move |emit| capture_frames(spec, capture_signals, emit),
+        |event| stream::write_event(output, event),
+    )
+}
+
+fn capture_frames(
+    spec: Spec,
+    signals: Arc<Signals>,
+    emit: &mut dyn FnMut(Event) -> Result<()>,
+) -> Result<()> {
     let _dpi = Dpi::enter()?;
     let initial = geometry(spec)?;
     unobscured(spec, initial)?;
@@ -260,11 +274,7 @@ pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write
     if frequency <= 0 {
         return Err(Failure("qpc_frequency", 0));
     }
-    writeln!(
-        output,
-        "{{\"kind\":\"ready\",\"frequency\":{frequency},\"source\":\"DXGI Desktop Duplication\"}}"
-    )
-    .map_err(|_| Failure("parent_output", 0))?;
+    emit(Event::Ready(frequency))?;
     let region = D3D11_BOX {
         left: local[0],
         top: local[1],
@@ -320,7 +330,7 @@ pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write
                     "{{\"present_qpc\":{},\"accumulated_frames\":{},\"metadata_bytes\":{},",
                     "\"mouse_qpc\":{},\"received_qpc\":{},\"previous_qpc\":{},\"frequency\":{},",
                     "\"last_acquired_qpc\":{},\"last_readback_qpc\":{},",
-                    "\"last_released_qpc\":{},\"last_written_qpc\":{},\"captured_frames\":{}}}"
+                    "\"last_released_qpc\":{},\"last_enqueued_qpc\":{},\"captured_frames\":{}}}"
                 ),
                 info.LastPresentTime,
                 info.AccumulatedFrames,
@@ -339,12 +349,7 @@ pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write
         if present.is_none() {
             unobscured(spec, initial)?;
             acquired.close()?;
-            writeln!(
-                output,
-                "{{\"kind\":\"pointer\",\"qpc\":{}}}",
-                info.LastMouseUpdateTime
-            )
-            .map_err(|_| Failure("parent_output", 0))?;
+            emit(Event::Pointer(info.LastMouseUpdateTime))?;
             continue;
         }
         let source: ID3D11Texture2D = checked(
@@ -383,19 +388,18 @@ pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write
         if bytes > 32 * 1024 * 1024 {
             return Err(Failure("pixel_bound", 0));
         }
-        let mut hex = String::with_capacity(pixels.len() * 2);
-        const DIGITS: &[u8; 16] = b"0123456789abcdef";
-        for value in pixels {
-            hex.push(DIGITS[(value >> 4) as usize] as char);
-            hex.push(DIGITS[(value & 15) as usize] as char);
-        }
-        writeln!(output, "{{\"kind\":\"frame\",\"qpc\":{qpc},\"width\":{width},\"height\":{height},\"pixels\":\"{hex}\"}}").map_err(|_| Failure("parent_output", 0))?;
-        let mut written_qpc = 0;
+        emit(Event::Frame {
+            qpc,
+            width,
+            height,
+            pixels,
+        })?;
+        let mut enqueued_qpc = 0;
         checked(
-            unsafe { QueryPerformanceCounter(&mut written_qpc) },
-            "write_qpc",
+            unsafe { QueryPerformanceCounter(&mut enqueued_qpc) },
+            "enqueue_qpc",
         )?;
-        previous_stages = [acquired_qpc, readback_qpc, released_qpc, written_qpc];
+        previous_stages = [acquired_qpc, readback_qpc, released_qpc, enqueued_qpc];
         captured_frames += 1;
     }
     if let Some(failure) = *signals
@@ -407,8 +411,7 @@ pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write
     }
     let mut end = 0;
     checked(unsafe { QueryPerformanceCounter(&mut end) }, "end_qpc")?;
-    writeln!(output, "{{\"kind\":\"end\",\"qpc\":{end}}}")
-        .map_err(|_| Failure("parent_output", 0))?;
+    emit(Event::End(end))?;
     Ok(())
 }
 

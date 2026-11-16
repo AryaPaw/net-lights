@@ -855,7 +855,7 @@ def native_clock_diagnostic(raw):
         clock_fields={"duration","frequency","acquired_qpc","received_qpc","previous_qpc"}
         desktop_fields={"present_qpc","accumulated_frames","metadata_bytes","mouse_qpc","received_qpc",
                         "previous_qpc","frequency","last_acquired_qpc","last_readback_qpc",
-                        "last_released_qpc","last_written_qpc","captured_frames"}
+                        "last_released_qpc","last_enqueued_qpc","captured_frames"}
         if not isinstance(pairs,list):
             raise ValueError()
         fields={key for key,_ in pairs}
@@ -3552,7 +3552,7 @@ def navigation_motion_selftest():
     scenario(complete,False,code=7,diagnostic=encode(diagnostic))
     desktop=dict(present_qpc=122,accumulated_frames=2,metadata_bytes=8,mouse_qpc=0,
                  received_qpc=123,previous_qpc=120,frequency=1000,last_acquired_qpc=120,
-                 last_readback_qpc=121,last_released_qpc=121,last_written_qpc=122,captured_frames=1)
+                 last_readback_qpc=121,last_released_qpc=121,last_enqueued_qpc=122,captured_frames=1)
     assert native_clock_diagnostic(encode(desktop))==desktop
     for invalid in (dict(desktop,accumulated_frames=True),dict(desktop,accumulated_frames=2**32),
                     dict(desktop,metadata_bytes=-1),dict(desktop,captured_frames=513),
