@@ -721,12 +721,13 @@ class Win32:
         self.hover(hwnd, point)
         self.post(hwnd, WM_MOUSEWHEEL, (delta & 0xffff) << 16, (point[0] & 0xffff) | ((point[1] & 0xffff) << 16))
 
-    def click(self, hwnd, point):
+    def click(self, hwnd, point, *, send_hover=True):
         local = wt.POINT(*point)
         if not self.user.ScreenToClient(hwnd, ct.byref(local)):
             raise ct.WinError(ct.get_last_error())
         position = (local.x & 0xffff) | ((local.y & 0xffff) << 16)
-        self.hover(hwnd, point)
+        if send_hover:
+            self.hover(hwnd, point)
         self.post(hwnd, 0x0201, 1, position)
         self.post(hwnd, 0x0202, 0, position)
 
@@ -2391,93 +2392,98 @@ class Runner:
                     current_addresses=7, endpoint_runtime_ids=sorted(seen), narrow_outer=narrow)
 
     def country_marker_labels(self):
-        """The fixture's two changes 15s apart must have separately usable labels."""
-        original = self.setting("locationChartWindowHours")
+        """One caption row, honest groups, disclosure and no cross-lane pointer."""
+        from PIL import Image
+        original=self.setting("locationChartWindowHours")
         self.page("Состояние")
-        self.period(1, "1 ч")
-        scale = self.api.user.GetDpiForWindow(self.uia.hwnd)/96.
-        assert self.input_policy, "Marker interaction requires the isolated real-input policy"
-        self.visible_control("Смена страны", extra_below=round(100*scale))
-        last_rect,settled_since=None,time.monotonic()
-        def settled_caption():
-            nonlocal last_rect,settled_since
-            rect=self.uia.call("rect","Смена страны")
-            if rect!=last_rect:
-                last_rect,settled_since=rect,time.monotonic()
-            return rect if time.monotonic()-settled_since>=.35 else None
-        caption=wait_for(settled_caption,5,"scrolling settles before marker coordinate measurement")
-        outer = self.api.outer(self.uia.hwnd)
-        safe = (outer[0]+100, outer[1]+100)
-        self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,safe)
-        self.api.hover(self.uia.hwnd,safe)
-        self.capture("country-markers-all-labels")
-        axes=sorted((r for r in self.uia.call("inventory") if r["kind"]=="Text" and r["visible"]
-                     and re.fullmatch(r"\d{2}\.\d{2} \d{2}:\d{2}:\d{2}",r["name"])),key=lambda r:r["rect"][0])
-        assert len(axes)==2, "Both exact bounds of the shared painted axis must be visible"
+        scale=self.api.user.GetDpiForWindow(self.uia.hwnd)/96.
+        assert self.input_policy, "Marker interaction requires isolated real input"
+        outer=self.api.outer(self.uia.hwnd)
+        safe=(outer[0]+100,outer[1]+100)
         now=dt.datetime.now().astimezone()
         def parse_bound(value):
             parsed=dt.datetime.strptime("2024 "+value,"%Y %d.%m %H:%M:%S")
             options=[]
             for offset in (-1,0,1):
-                try:
-                    options.append(parsed.replace(year=now.year+offset,tzinfo=now.tzinfo))
-                except ValueError:
-                    pass
+                try: options.append(parsed.replace(year=now.year+offset,tzinfo=now.tzinfo))
+                except ValueError: pass
             return min(options,key=lambda v:abs((v-now).total_seconds()))
-        domain_start,domain_end=[parse_bound(r["name"]) for r in axes]
-        assert (domain_end-domain_start).total_seconds()==3600
-        # These actual flex-axis edges share the marker plot's full width.
-        # Their geometry is independent of green/red/gap durations in the lanes.
-        left,right=axes[0]["rect"][0],axes[1]["rect"][2]
-        assert left<right and abs(left-caption[0])<=2*scale
-        history=profile_json_snapshot(self.profile,"location-history.json")
-        parse=lambda value:dt.datetime.fromisoformat(value.replace("Z","+00:00"))
-        changes=[(a,b) for a,b in zip(history["stays"],history["stays"][1:]) if a["iso"]!=b["iso"]]
-        close=next((pair for pair in zip(changes,changes[1:])
-                    if dt.timedelta(0)<parse(pair[1][1]["startedUtc"])-parse(pair[0][1]["startedUtc"])<dt.timedelta(minutes=1)
-                    and domain_start<parse(pair[0][1]["startedUtc"])<domain_end),None)
-        assert close, "The saved fixture must contain two recent, distinct close changes"
-        names={"DE":"Германия","RU":"Россия","PL":"Польша"}
-        observed=[]
+        def frame(hours):
+            self.visible_control("Смена страны",extra_below=round(100*scale))
+            self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,safe)
+            self.api.hover(self.uia.hwnd,safe)
+            last,settled=None,time.monotonic()
+            def fresh():
+                nonlocal last,settled
+                controls=self.uia.call("inventory")
+                axes=sorted((r for r in controls if r["kind"]=="Text" and r["visible"]
+                    and re.fullmatch(r"\d{2}\.\d{2} \d{2}:\d{2}:\d{2}",r["name"])),key=lambda r:r["rect"][0])
+                heading=next((r for r in controls if r["kind"]=="Text" and r["visible"] and r["name"]=="Смена страны"),None)
+                if heading is None or len(axes)!=2: return None
+                rect=heading["rect"]
+                if rect!=last: last,settled=rect,time.monotonic()
+                start,end=[parse_bound(r["name"]) for r in axes]
+                age=time.time()-end.timestamp()
+                if (end-start).total_seconds()!=hours*3600: return None
+                return (axes,rect,start,end) if time.monotonic()-settled>=.35 and 0<=age<=3 and end.timestamp()%10<=3 else None
+            return wait_for(fresh,8,"one stable fresh marker row and exact shared axis")
+        result=[]
         try:
-            for row,(before,after) in enumerate(close):
-                self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,safe)
-                self.api.hover(self.uia.hwnd,safe)
-                def fresh_frame():
-                    controls=self.uia.call("inventory")
-                    bounds=sorted((r for r in controls if r["kind"]=="Text" and r["visible"]
-                        and re.fullmatch(r"\d{2}\.\d{2} \d{2}:\d{2}:\d{2}",r["name"])),key=lambda r:r["rect"][0])
-                    heading=next((r for r in controls if r["kind"]=="Text" and r["name"]=="Смена страны" and r["visible"]),None)
-                    if len(bounds)!=2 or heading is None:
-                        return None
-                    end=parse_bound(bounds[1]["name"])
-                    age=time.time()-end.timestamp()
-                    # Wait for the rendered model, not just the wall-clock phase.
-                    # Each hover gets its own window before the next invalidation.
-                    return (bounds,heading,end) if 0<=age<=3 and end.timestamp()%10<=3 else None
-                bounds,heading,domain_end=wait_for(fresh_frame,8,"a fresh painted axis before each marker hover")
-                domain_start=parse_bound(bounds[0]["name"])
-                assert (domain_end-domain_start).total_seconds()==3600
-                left,right=bounds[0]["rect"][0],bounds[1]["rect"][2]
-                caption=heading["rect"]
-                fraction=(parse(after["startedUtc"])-domain_start).total_seconds()/3600
-                x=left+(right-left)*fraction
-                # Caption gap + label top + measured row height + label centre.
-                target=(round(x),round(caption[3]+(4+12+18*row+7)*scale))
-                print(json.dumps(dict(marker_row=row,target=target,axis_start=stamp(domain_start),axis_end=stamp(domain_end),measured_utc=stamp(dt.datetime.now(dt.timezone.utc)))),flush=True)
-                a,b,c,d=self.content_bounds()
-                assert a<=target[0]<c and b<=target[1]<d, "A label escaped the visible page"
-                self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,target)
-                self.api.hover(self.uia.hwnd,target)
-                expected=names[before["iso"]]+" → "+names[after["iso"]]
-                wait_for(lambda:self.uia.call("exists",expected),description="shifted label opens its own country transition: "+expected)
-                self.capture(f"country-marker-label-{row}")
-                observed.append(dict(title=expected,point=target))
+            self.period(1,"1 ч")
+            axes,caption,start,end=frame(1)
+            left,right=axes[0]["rect"][0],axes[1]["rect"][2]
+            history=profile_json_snapshot(self.profile,"location-history.json")
+            parse=lambda v:dt.datetime.fromisoformat(v.replace("Z","+00:00"))
+            changes=[(a,b) for a,b in zip(history["stays"],history["stays"][1:]) if a["iso"]!=b["iso"] and start<parse(b["startedUtc"])<=end]
+            pair=next((p for p in zip(changes,changes[1:]) if dt.timedelta(0)<parse(p[1][1]["startedUtc"])-parse(p[0][1]["startedUtc"])<dt.timedelta(minutes=1)),None)
+            assert pair and [(a["iso"],b["iso"]) for a,b in pair]==[("DE","RU"),("RU","PL")]
+            midpoint=parse(pair[0][1]["startedUtc"])+(parse(pair[1][1]["startedUtc"])-parse(pair[0][1]["startedUtc"]))/2
+            x=round(left+(right-left)*(midpoint-start).total_seconds()/3600)
+            target=(x,round(caption[3]+23*scale))
+            before=self.capture("country-group-before-hover")
+            self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,target)
+            self.api.hover(self.uia.hwnd,target)
+            wait_for(lambda:self.uia.call("exists","2 смены"),description="close transitions form one explicit group")
+            hovered=self.capture("country-group-hover")
+            def blue_column(path):
+                with Image.open(path).convert("RGB") as image:
+                    count=0
+                    for y in range(max(0,round(caption[1]-outer[1]-240*scale)),round(caption[1]-outer[1]-12*scale)):
+                        for xx in range(x-outer[0]-2,x-outer[0]+3):
+                            r,g,b=image.getpixel((xx,y))
+                            count+=b>g+20 and g>r+25
+                    return count
+            assert blue_column(hovered)<=blue_column(before)+2,"Country hover drew a vertical pointer across availability lanes"
+            self.api.click(self.uia.hwnd,target)
+            wait_for(lambda:self.uia.call("exists","Скрыть") and self.uia.call("exists","Германия → Россия") and self.uia.call("exists","Россия → Польша"),description="all saved group transitions disclosed inline")
+            self.capture("country-group-open")
+            # A second click at the same point must work without MouseMove.
+            self.api.click(self.uia.hwnd,target,send_hover=False)
+            wait_for(lambda:not self.uia.call("exists","Скрыть"),description="same-position click closes the group")
+            self.api.click(self.uia.hwnd,target,send_hover=False)
+            wait_for(lambda:self.uia.call("exists","Скрыть"),description="same-position click reopens group")
+            self.api.post(self.uia.hwnd,0x0100,0x1b,1)
+            self.api.post(self.uia.hwnd,0x0101,0x1b,0xc0000001)
+            wait_for(lambda:not self.uia.call("exists","Скрыть"),description="Escape closes group with timeline focus")
+            self.api.click(self.uia.hwnd,target,send_hover=False)
+            wait_for(lambda:self.uia.call("exists","Скрыть"),description="group is reopened for Hide")
+            self.uia.call("invoke","Скрыть")
+            wait_for(lambda:not self.uia.call("exists","Скрыть"),description="native Hide closes disclosure")
+            for hours,label in [(1,"1 ч"),(24,"24 ч"),(168,"7 д")]:
+                self.period(hours,label)
+                axes,caption,start,end=frame(hours)
+                height=(axes[0]["rect"][1]-caption[3])/scale
+                assert 45<=height<=55,f"Marker strip grew beyond one caption row at {hours}h: {height}"
+                self.capture(f"country-groups-one-row-{hours}h")
+                result.append(dict(hours=hours,height_to_axis=height))
+        except BaseException:
+            self.capture("country-groups-original-failure")
+            raise
         finally:
             self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,safe)
             self.api.hover(self.uia.hwnd,safe)
             self.period(original,next(label for hours,label in PERIODS if hours==original))
-        return dict(separate_rows=True,real_saved_changes=observed)
+        return dict(periods=result,all_group_events=True,same_position_toggle=True,escape=True,hide=True,no_vertical_pointer=True)
 
     def state_heading_counts(self, english=False):
         names = ("Provider", "World") if english else ("Провайдер", "Мир")
@@ -3013,6 +3019,15 @@ class Runner:
 
 
 def uia_retry_selftest():
+    from types import SimpleNamespace
+    sent=[]
+    api=SimpleNamespace(user=SimpleNamespace(ScreenToClient=lambda *_:True),
+        hover=lambda *_:sent.append("move"),post=lambda hwnd,message,*_:sent.append(message))
+    Win32.click(api,1,(20,30),send_hover=False)
+    assert sent==[0x0201,0x0202],"Stationary clicks injected MouseMove"
+    sent.clear()
+    Win32.click(api,1,(20,30))
+    assert sent==["move",0x0201,0x0202],"Existing positioned-click behavior changed"
     for mode in [(False,False,True),(True,False,False),(True,False,True),(True,True,False),(False,True,False)]:
         validate_navigation_mode(*mode)
     for mode in [(False,False,False),(True,True,True),(True,False,1),(True,True,"false")]:

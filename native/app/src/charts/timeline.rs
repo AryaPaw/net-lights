@@ -3,6 +3,7 @@ use super::*;
 use crate::dashboard::{self, EventKind, HistoryEvent, Stats, TimeRange};
 use crate::fluent::ControlCursor;
 use gpui_kit::component::button::ButtonVariants;
+use gpui_kit::component::scroll::ScrollableElement;
 #[path = "timeline_markers.rs"]
 mod markers;
 use markers::{MarkerCache, MarkerPlot};
@@ -34,6 +35,8 @@ pub struct AvailabilityTimeline {
     marker_bounds: Rc<Cell<Bounds<Pixels>>>,
     marker_cache: Rc<RefCell<MarkerCache>>,
     marker_hover: Option<usize>,
+    marker_events: Option<Arc<Vec<HistoryEvent>>>,
+    marker_list: ListState,
 }
 fn inspected_at(model: &ChartModel, g: &Geometry, x: f32) -> DateTime<Utc> {
     let at = model.start
@@ -109,6 +112,9 @@ impl AvailabilityTimeline {
             marker_bounds: Rc::new(Cell::new(Bounds::default())),
             marker_cache: Rc::new(RefCell::new(MarkerCache::default())),
             marker_hover: None,
+            marker_events: None,
+            marker_list: ListState::new(0, ListAlignment::Top, px(200.))
+                .with_uniform_item_height(px(48.)),
         }
     }
     pub fn set(
@@ -146,6 +152,9 @@ impl AvailabilityTimeline {
         // Re-enter it after layout instead of reading stale indices/counts.
         if context_changed || marker_was_hovered {
             self.clear_pointer(cx);
+            if context_changed {
+                self.marker_events = None;
+            }
         } else if let Some(x) = self.pointer_fraction {
             for (row, width) in widths.into_iter().enumerate() {
                 if width > 0 {
@@ -197,6 +206,7 @@ impl AvailabilityTimeline {
         self.selected = None;
         self.locations = Arc::default();
         self.changes = Arc::default();
+        self.marker_events = None;
         for g in &self.geometry {
             *g.borrow_mut() = Geometry::default();
         }
@@ -262,8 +272,8 @@ impl AvailabilityTimeline {
             previous_end,
         } = &e.kind
         {
-            self.pointer = Some(e.start);
-            self.pointer_fraction = Some(fraction(&self.models[0], e.start));
+            self.pointer = None;
+            self.pointer_fraction = None;
             self.marker_hover = Some(i);
             self.tooltip = Some((
                 format!(
@@ -290,16 +300,12 @@ impl AvailabilityTimeline {
                 && let Some((title, detail)) = self.tooltip.take()
             {
                 self.tooltip = Some((
-                    format!(
-                        "{}: {}",
-                        lang.choose("Смен в отметке", "Changes in marker"),
-                        tick.count
-                    ),
+                    markers::group_title(lang, tick.count),
                     format!(
                         "{}\n{} – {}\n\n{}: {title}\n{detail}",
                         lang.choose(
-                            "Несколько изменений попали в один пиксель этого масштаба.",
-                            "Several changes share one pixel at this scale."
+                            "Близкие отметки объединены. Нажмите, чтобы открыть все смены.",
+                            "Nearby markers are grouped. Click to see every change."
                         ),
                         local_time(self.changes[tick.first].start),
                         local_time(e.start),
@@ -490,6 +496,7 @@ impl Render for AvailabilityTimeline {
             .gap_4()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
+                    this.marker_events = None;
                     this.selected = None;
                     this.clear_pointer(cx);
                     cx.emit(TimelineEvent::Select(None));
@@ -754,9 +761,34 @@ impl Render for AvailabilityTimeline {
                                     this.clear_pointer(cx);
                                 }
                             }))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(event) =
-                                    this.marker_hover.and_then(|i| this.changes.get(i)).cloned()
+                            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                                window.focus(&this.focus, cx);
+                                let relative = event.position() - this.marker_bounds.get().origin;
+                                let hit = this
+                                    .marker_cache
+                                    .borrow()
+                                    .hit(f32::from(relative.x), f32::from(relative.y));
+                                let group =
+                                    hit.and_then(|i| this.marker_cache.borrow().hovered_group(i));
+                                if let Some((first, last)) = group.filter(|(a, b)| b > a) {
+                                    let range = first..last + 1;
+                                    if this.marker_events.as_ref().is_some_and(|events| {
+                                        events.len() == range.len()
+                                            && events[0].same_record(&this.changes[first])
+                                            && events[events.len() - 1]
+                                                .same_record(&this.changes[last])
+                                    }) {
+                                        this.marker_events = None;
+                                    } else {
+                                        this.marker_list
+                                            .reset_with_uniform_height(range.len(), px(48.));
+                                        this.marker_events =
+                                            Some(Arc::new(this.changes[range].to_vec()));
+                                    }
+                                    this.clear_pointer(cx);
+                                    return;
+                                }
+                                if let Some(event) = hit.and_then(|i| this.changes.get(i)).cloned()
                                 {
                                     this.toggle_selection(Some(event), cx);
                                 }
@@ -769,7 +801,6 @@ impl Render for AvailabilityTimeline {
                                 language: lang,
                                 ink,
                                 primary,
-                                background: crate::fluent::surface(cx),
                             }),
                     ),
             );
@@ -796,6 +827,98 @@ impl Render for AvailabilityTimeline {
             ));
         }
         body = body.child(axis);
+        if let Some(events) = &self.marker_events {
+            let count = events.len();
+            let title = markers::group_title(lang, count);
+            let events = events.clone();
+            let rows = list(
+                self.marker_list.clone(),
+                cx.processor(move |_, index: usize, _, cx| {
+                    let event: &HistoryEvent = &events[index];
+                    let EventKind::Country {
+                        previous,
+                        current,
+                        previous_end,
+                    } = &event.kind
+                    else {
+                        return div().into_any_element();
+                    };
+                    div()
+                        .w_full()
+                        .h(px(48.))
+                        .px_3()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .child(text!(
+                            id = ("group-country-change", index),
+                            format!(
+                                "{} → {}",
+                                lang.country_name(previous),
+                                lang.country_name(current)
+                            )
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(text!(
+                                    id = ("group-country-time", index),
+                                    format!(
+                                        "{} – {}",
+                                        local_time(*previous_end),
+                                        local_time(event.start)
+                                    )
+                                )),
+                        )
+                        .into_any_element()
+                }),
+            )
+            .size_full();
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_md()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(text!(id = "country-group-title", title))
+                            .child(
+                                crate::fluent::compact_button("close-country-group")
+                                    .ghost()
+                                    .label(lang.choose("Скрыть", "Hide"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.marker_events = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px((count.min(5) * 48) as f32))
+                            .relative()
+                            .child(rows)
+                            .vertical_scrollbar(&self.marker_list),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(lang.choose(
+                                "Интервалы между проверками: точный момент смены неизвестен.",
+                                "Intervals between checks: the exact transition time is unknown.",
+                            )),
+                    ),
+            );
+        }
         if let Some((title, detail)) = &self.tooltip {
             let target = if self.marker_hover.is_some() {
                 self.marker_bounds.get()

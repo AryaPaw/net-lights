@@ -1,8 +1,7 @@
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const LABEL_TOP: f32 = 12.;
-const ROW_HEIGHT: f32 = 18.;
 const LINE_HEIGHT: f32 = 14.;
 const GAP: f32 = 6.;
 
@@ -12,64 +11,74 @@ pub(super) struct Tick {
     pub first: usize,
     pub last: usize,
     pub count: usize,
+    first_x: f32,
+    last_x: f32,
 }
 #[derive(Clone, Copy, Debug)]
 struct Placement {
     left: f32,
     width: f32,
-    row: usize,
 }
 
-fn pack(width: f32, items: &[(f32, f32)]) -> Vec<Placement> {
-    let desired: Vec<_> = items
-        .iter()
-        .map(|&(x, w)| {
-            let w = w.min(width);
-            ((x - w / 2.).clamp(0., (width - w).max(0.)), w)
-        })
-        .collect();
-    let arrange = |max_shift: f32, sort: bool| {
-        let mut order: Vec<_> = (0..items.len()).collect();
-        if sort {
-            order.sort_by(|a, b| desired[*a].0.total_cmp(&desired[*b].0));
-        }
-        let mut ends = Vec::<f32>::new();
-        let mut placements = vec![
-            Placement {
-                left: 0.,
-                width: 0.,
-                row: 0
-            };
-            items.len()
-        ];
-        for i in order {
-            let (start, w) = desired[i];
-            let existing = ends.iter().enumerate().find_map(|(row, &end)| {
-                let left = start.max(end + GAP);
-                (left + w <= width && left - start <= max_shift).then_some((row, left))
-            });
-            let (row, left) = existing.unwrap_or_else(|| {
-                ends.push(-GAP);
-                (ends.len() - 1, start)
-            });
-            ends[row] = left + w;
-            placements[i] = Placement {
-                left,
+fn cluster(
+    width: f32,
+    ticks: &[Tick],
+    mut measure: impl FnMut(&Tick) -> f32,
+) -> Vec<(Tick, Placement)> {
+    let mut result: Vec<(Tick, Placement)> = Vec::new();
+    for &tick in ticks {
+        let mut tick = tick;
+        loop {
+            let w = measure(&tick).min(width);
+            let p = Placement {
+                left: (tick.x - w / 2.).clamp(0., (width - w).max(0.)),
                 width: w,
-                row,
             };
+            let Some((previous, bounds)) = result.last() else {
+                result.push((tick, p));
+                break;
+            };
+            if bounds.left + bounds.width + GAP <= p.left {
+                result.push((tick, p));
+                break;
+            }
+            tick = Tick {
+                first: previous.first,
+                last: tick.last,
+                count: previous.count + tick.count,
+                first_x: previous.first_x,
+                last_x: tick.last_x,
+                x: (previous.first_x + tick.last_x) / 2.,
+            };
+            result.pop();
         }
-        placements
-    };
-    let shifted = arrange(24., false);
-    let centred = arrange(0., true);
-    let rows = |labels: &[Placement]| labels.iter().map(|label| label.row + 1).max().unwrap_or(0);
-    // Offsets help small groups, but mustn't make dense groups taller than
-    // optimal interval partitioning of centred labels, particularly at edges.
-    if rows(&centred) < rows(&shifted) {
-        centred
+    }
+    result
+}
+pub(super) fn group_title(language: Language, count: usize) -> String {
+    if language == Language::En {
+        return format!("{count} {}", if count == 1 { "change" } else { "changes" });
+    }
+    let noun = if (11..=14).contains(&(count % 100)) {
+        "смен"
     } else {
-        shifted
+        match count % 10 {
+            1 => "смена",
+            2..=4 => "смены",
+            _ => "смен",
+        }
+    };
+    format!("{count} {noun}")
+}
+fn label_text(tick: &Tick, changes: &[HistoryEvent], language: Language) -> String {
+    if tick.count > 1 {
+        return format!("{} ▾", group_title(language, tick.count));
+    }
+    match &changes[tick.last].kind {
+        EventKind::Country {
+            previous, current, ..
+        } => format!("{previous} → {current}"),
+        _ => language.choose("Изменение", "Change").to_string(),
     }
 }
 fn group(changes: &[HistoryEvent], range: TimeRange, width: f32) -> Vec<Tick> {
@@ -92,6 +101,8 @@ fn group(changes: &[HistoryEvent], range: TimeRange, width: f32) -> Vec<Tick> {
                 first: i,
                 last: i,
                 count: 1,
+                first_x: x as f32 * width / samples as f32,
+                last_x: x as f32 * width / samples as f32,
             },
         });
     }
@@ -109,8 +120,7 @@ pub(super) struct MarkerCache {
     plot_width: f32,
     pub ticks: Vec<Tick>,
     labels: Vec<Label>,
-    rows: Vec<Vec<usize>>,
-    height: f32,
+    raw_ticks: Vec<Tick>,
     language: Option<Language>,
     ink: Option<Hsla>,
     shaped: HashMap<String, ShapedLine>,
@@ -133,125 +143,94 @@ impl MarkerCache {
         {
             return;
         }
-        self.ticks = group(changes, range, width);
+        self.raw_ticks = group(changes, range, width);
         let previous = if self.ink == Some(ink) {
             std::mem::take(&mut self.shaped)
         } else {
             HashMap::new()
         };
-        let mut shaped = HashMap::new();
-        let mut lines = Vec::with_capacity(self.ticks.len());
-        for tick in &self.ticks {
-            let label = if tick.count > 1 {
-                language
-                    .choose(
-                        &format!("Смен: {}", tick.count),
-                        &format!("{} changes", tick.count),
-                    )
-                    .to_string()
-            } else if let EventKind::Country {
-                previous, current, ..
-            } = &changes[tick.last].kind
-            {
-                format!("{previous} → {current}")
-            } else {
-                language.choose("Изменение", "Change").to_string()
-            };
-            let shape = |font_size| {
-                window.text_system().shape_line(
-                    label.clone().into(),
-                    px(font_size),
-                    &[TextRun {
-                        len: label.len(),
-                        font: Font {
-                            weight: FontWeight::MEDIUM,
-                            ..font("Segoe UI")
-                        },
-                        color: ink,
-                        ..Default::default()
-                    }],
-                    None,
-                )
-            };
+        let mut shaped: HashMap<String, ShapedLine> = HashMap::new();
+        let mut line_for = |tick: &Tick| {
+            let text = label_text(tick, changes, language);
             let line = shaped
-                .get(&label)
-                .or_else(|| previous.get(&label))
+                .get(&text)
+                .or_else(|| previous.get(&text))
                 .cloned()
-                .unwrap_or_else(|| shape(11.));
-            shaped.insert(label.clone(), line.clone());
-            let available = (width - 8.).max(1.);
-            let line = if f32::from(line.width) > available {
-                shape(11. * available / f32::from(line.width))
-            } else {
-                line
-            };
-            lines.push(line);
-        }
-        let sizes: Vec<_> = self
-            .ticks
+                .unwrap_or_else(|| {
+                    window.text_system().shape_line(
+                        text.clone().into(),
+                        px(11.),
+                        &[TextRun {
+                            len: text.len(),
+                            font: Font {
+                                weight: FontWeight::MEDIUM,
+                                ..font("Segoe UI")
+                            },
+                            color: ink,
+                            ..Default::default()
+                        }],
+                        None,
+                    )
+                });
+            shaped.insert(text, line.clone());
+            line
+        };
+        let groups = cluster(width, &self.raw_ticks, |tick| {
+            f32::from(line_for(tick).width) + 8.
+        });
+        self.ticks = groups.iter().map(|(tick, _)| *tick).collect();
+        self.labels = groups
             .iter()
-            .zip(&lines)
-            .map(|(tick, line)| (tick.x, f32::from(line.width) + 8.))
-            .collect();
-        self.labels = pack(width, &sizes)
-            .into_iter()
-            .zip(lines)
             .enumerate()
-            .map(|(tick, (placement, line))| Label {
-                tick,
-                placement,
-                line,
+            .map(|(i, (tick, p))| Label {
+                tick: i,
+                placement: *p,
+                line: line_for(tick),
             })
             .collect();
-        self.rows.clear();
-        for (i, label) in self.labels.iter().enumerate() {
-            self.rows
-                .resize_with(self.rows.len().max(label.placement.row + 1), Vec::new);
-            self.rows[label.placement.row].push(i);
-        }
-        for row in &mut self.rows {
-            row.sort_by(|a, b| {
-                self.labels[*a]
-                    .placement
-                    .left
-                    .total_cmp(&self.labels[*b].placement.left)
-            });
-        }
-        self.height = if self.rows.is_empty() {
-            0.
-        } else {
-            LABEL_TOP + (self.rows.len() - 1) as f32 * ROW_HEIGHT + LINE_HEIGHT + 4.
-        };
         self.width = samples;
         self.plot_width = width;
         self.language = Some(language);
         self.ink = Some(ink);
+        let retained: HashSet<_> = self
+            .ticks
+            .iter()
+            .map(|tick| label_text(tick, changes, language))
+            .collect();
+        shaped.retain(|text, _| retained.contains(text));
         self.shaped = shaped;
     }
     pub fn hit(&self, x: f32, y: f32) -> Option<usize> {
-        if self.width == 0 || x < 0. || x > self.plot_width || y < 0. || y > self.height {
+        if self.width == 0 || x < 0. || x > self.plot_width || !(0. ..=30.).contains(&y) {
             return None;
         }
         if y >= LABEL_TOP {
-            let row = ((y - LABEL_TOP) / ROW_HEIGHT) as usize;
-            let labels = self.rows.get(row)?;
-            let i = labels
-                .partition_point(|i| self.labels[*i].placement.left <= x)
+            let i = self
+                .labels
+                .partition_point(|label| label.placement.left <= x)
                 .checked_sub(1)?;
-            let label = &self.labels[labels[i]];
-            let p = label.placement;
-            return (x <= p.left + p.width
-                && y <= LABEL_TOP + row as f32 * ROW_HEIGHT + LINE_HEIGHT)
+            let label = &self.labels[i];
+            return (x <= label.placement.left + label.placement.width)
                 .then_some(self.ticks[label.tick].last);
         }
-        let i = self.ticks.partition_point(|tick| tick.x < x);
-        [i.checked_sub(1), Some(i)]
+        // A real tick can be outside its group's centred caption.
+        let i = self.raw_ticks.partition_point(|tick| tick.x < x);
+        let nearest = [i.checked_sub(1), Some(i)]
             .into_iter()
             .flatten()
-            .filter_map(|i| self.ticks.get(i))
+            .filter_map(|i| self.raw_ticks.get(i))
             .filter(|tick| (tick.x - x).abs() <= 6.)
-            .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))
+            .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))?;
+        self.ticks
+            .iter()
+            .find(|tick| tick.first <= nearest.first && tick.last >= nearest.last)
             .map(|tick| tick.last)
+    }
+    pub fn hovered_group(&self, last: usize) -> Option<(usize, usize)> {
+        (self.width != 0)
+            .then(|| self.ticks.iter().find(|tick| tick.last == last))
+            .flatten()
+            .map(|tick| (tick.first, tick.last))
     }
 }
 
@@ -263,7 +242,6 @@ pub(super) struct MarkerPlot {
     pub language: Language,
     pub ink: Hsla,
     pub primary: Hsla,
-    pub background: Hsla,
 }
 impl IntoElement for MarkerPlot {
     type Element = Self;
@@ -287,15 +265,12 @@ impl Element for MarkerPlot {
         window: &mut Window,
         _: &mut App,
     ) -> (LayoutId, ()) {
-        let cache = self.cache.clone();
-        let changes = self.changes.clone();
-        let (range, language, ink) = (self.range, self.language, self.ink);
         let style = Style {
             size: size(relative(1.).into(), Length::Auto),
             flex_shrink: 0.,
             ..Default::default()
         };
-        let id = window.request_measured_layout(style, move |known, available, window, _| {
+        let id = window.request_measured_layout(style, move |known, available, _, _| {
             let width = known
                 .width
                 .or(match available.width {
@@ -303,16 +278,7 @@ impl Element for MarkerPlot {
                     _ => None,
                 })
                 .unwrap_or(px(300.));
-            let mut cache = cache.borrow_mut();
-            cache.prepare(
-                f32::from(width).max(1.),
-                &changes,
-                range,
-                language,
-                ink,
-                window,
-            );
-            size(width, px(cache.height))
+            size(width, px(30.))
         });
         (id, ())
     }
@@ -346,7 +312,7 @@ impl Element for MarkerPlot {
         cx: &mut App,
     ) {
         let cache = self.cache.borrow();
-        for tick in &cache.ticks {
+        for tick in &cache.raw_ticks {
             window.paint_quad(fill(
                 Bounds::new(
                     point(bounds.origin.x + px(tick.x), bounds.origin.y),
@@ -356,28 +322,9 @@ impl Element for MarkerPlot {
             ));
         }
         for label in &cache.labels {
-            let tick = cache.ticks[label.tick];
             let p = label.placement;
-            let top = LABEL_TOP + p.row as f32 * ROW_HEIGHT;
-            let mut path = PathBuilder::stroke(px(0.75));
-            path.move_to(bounds.origin + point(px(tick.x + 0.5), px(8.)));
-            path.line_to(bounds.origin + point(px(p.left + p.width / 2.), px(top - 2.)));
-            if let Ok(path) = path.build() {
-                window.paint_path(path, self.primary.opacity(0.4));
-            }
-        }
-        for label in &cache.labels {
-            let p = label.placement;
-            let top = LABEL_TOP + p.row as f32 * ROW_HEIGHT;
-            window.paint_quad(fill(
-                Bounds::new(
-                    bounds.origin + point(px(p.left), px(top - 1.)),
-                    size(px(p.width), px(LINE_HEIGHT + 2.)),
-                ),
-                self.background,
-            ));
             let _ = label.line.paint(
-                bounds.origin + point(px(p.left + 4.), px(top)),
+                bounds.origin + point(px(p.left + 4.), px(LABEL_TOP)),
                 px(LINE_HEIGHT),
                 TextAlign::Left,
                 None,
@@ -390,116 +337,97 @@ impl Element for MarkerPlot {
 
 #[cfg(test)]
 mod tests {
-    use super::{GAP, Label, MarkerCache, Placement, ShapedLine, Tick, group, pack};
-    use crate::dashboard::{EventKind, HistoryEvent, TimeRange};
-    use chrono::{DateTime, Duration, Utc};
-    fn validate(width: f32, items: &[(f32, f32)]) -> Vec<Placement> {
-        let labels = pack(width, items);
-        assert_eq!(labels.len(), items.len());
-        for (i, a) in labels.iter().enumerate() {
-            assert!(a.left >= 0. && a.left + a.width <= width);
-            for b in &labels[..i] {
-                assert!(
-                    a.row != b.row
-                        || a.left >= b.left + b.width + GAP
-                        || b.left >= a.left + a.width + GAP
-                );
+    use super::{GAP, Label, MarkerCache, ShapedLine, Tick, cluster, group_title};
+    use netlights_core::locale::Language;
+    fn tick(x: f32, i: usize) -> Tick {
+        Tick {
+            x,
+            first: i,
+            last: i,
+            count: 1,
+            first_x: x,
+            last_x: x,
+        }
+    }
+    #[test]
+    fn close_labels_become_one_group_without_losing_events() {
+        let groups = cluster(
+            300.,
+            &[tick(100., 0), tick(115., 1), tick(130., 2), tick(250., 3)],
+            |t| if t.count > 1 { 64. } else { 46. },
+        );
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            (groups[0].0.first, groups[0].0.last, groups[0].0.count),
+            (0, 2, 3)
+        );
+        assert_eq!(groups[1].0.count, 1);
+    }
+    #[test]
+    fn all_periods_and_dense_edges_fit_one_row_and_preserve_every_event() {
+        for hours in [1, 3, 6, 12, 24, 72, 120, 168] {
+            for width in [160., 300.5, 900., 1400.] {
+                let n = hours * 120;
+                let ticks: Vec<_> = (0..n)
+                    .map(|i| tick(i as f32 * width / n as f32, i))
+                    .collect();
+                let groups = cluster(width, &ticks, |t| if t.count > 1 { 70. } else { 46. });
+                assert_eq!(groups.iter().map(|g| g.0.count).sum::<usize>(), n);
+                let mut expected = 0;
+                for (i, (t, p)) in groups.iter().enumerate() {
+                    assert_eq!(t.first, expected);
+                    assert_eq!(t.count, t.last - t.first + 1);
+                    expected = t.last + 1;
+                    assert!(p.left >= 0. && p.left + p.width <= width);
+                    if i > 0 {
+                        assert!(groups[i - 1].1.left + groups[i - 1].1.width + GAP <= p.left);
+                    }
+                }
+                assert_eq!(expected, n);
+                assert!(groups.len() <= (width / (46. + GAP)).ceil() as usize);
             }
         }
-        labels
     }
     #[test]
-    fn close_changes_keep_every_label_with_offsets_and_extra_rows() {
-        let labels = validate(300., &[(100., 46.), (115., 46.), (130., 46.)]);
-        assert!(labels.iter().any(|label| label.row > 0));
-        assert!(labels.iter().any(|label| label.left > 100.));
-    }
-    #[test]
-    fn edges_and_dense_data_never_overlap_or_leave_the_plot() {
-        for width in [160., 300., 900., 1400.] {
-            let items: Vec<_> = (0..width as usize).map(|x| (x as f32, 54.)).collect();
-            let labels = validate(width, &items);
-            let overlap = (0..=width as usize)
-                .map(|x| {
-                    items
-                        .iter()
-                        .filter(|&&(anchor, w)| {
-                            let left = (anchor - w / 2.).clamp(0., width - w);
-                            left <= x as f32 && (x as f32) < left + w + GAP
-                        })
-                        .count()
-                })
-                .max()
-                .unwrap();
-            assert!(labels.iter().map(|label| label.row + 1).max().unwrap() <= overlap);
-        }
-        validate(160., &[(0., 46.), (1., 46.), (158., 46.), (159., 46.)]);
-    }
-    #[test]
-    fn shifted_labels_and_ticks_hit_the_same_actual_event() {
+    fn caption_and_real_ticks_hit_the_same_complete_group_and_dirty_cache_is_inert() {
+        let ticks = vec![tick(100., 0), tick(115., 1), tick(130., 2)];
+        let groups = cluster(300., &ticks, |_| 64.);
         let mut cache = MarkerCache {
             width: 300,
             plot_width: 300.,
-            height: 48.,
-            ticks: vec![Tick {
-                x: 100.,
-                first: 2,
-                last: 2,
-                count: 1,
-            }],
+            raw_ticks: ticks,
+            ticks: groups.iter().map(|g| g.0).collect(),
             ..Default::default()
         };
-        cache.labels.push(Label {
-            tick: 0,
-            placement: Placement {
-                left: 116.,
-                width: 46.,
-                row: 1,
-            },
-            line: ShapedLine::default(),
-        });
-        cache.rows = vec![vec![], vec![0]];
-        assert_eq!(cache.hit(100., 4.), Some(2));
-        assert_eq!(cache.hit(130., 32.), Some(2));
-        assert_eq!(cache.hit(130., 48.), None);
-        assert_eq!(cache.hit(99., 32.), None);
-        cache.width = 0;
-        assert_eq!(cache.hit(100., 4.), None);
-        assert_eq!(cache.hit(130., 32.), None);
-    }
-
-    #[test]
-    fn pixel_groups_preserve_every_change_and_use_the_complete_plot_width() {
-        let start: DateTime<Utc> = "2026-11-16T00:00:00Z".parse().unwrap();
-        let range = TimeRange {
-            start,
-            end: start + Duration::hours(1),
-        };
-        let events: Vec<_> = (0..20000)
-            .map(|i| HistoryEvent {
-                start: start + Duration::milliseconds(i * 180),
-                end: start + Duration::milliseconds(i * 180),
-                ongoing: false,
-                kind: EventKind::Country {
-                    previous: "DE".into(),
-                    current: "PL".into(),
-                    previous_end: start,
-                },
+        cache.labels = groups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| Label {
+                tick: i,
+                placement: g.1,
+                line: ShapedLine::default(),
             })
             .collect();
-        for width in [160., 300.5, 900., 32768.] {
-            let ticks = group(&events, range, width);
-            assert_eq!(
-                ticks.iter().map(|tick| tick.count).sum::<usize>(),
-                events.len()
-            );
-            assert!(ticks.len() <= width.ceil().min(16384.) as usize);
-            assert!(ticks.last().unwrap().x >= width * 0.99);
-            assert!(
-                ticks
-                    .iter()
-                    .all(|tick| tick.x >= 0. && tick.x < width && tick.first <= tick.last)
-            );
+        assert_eq!(cache.hit(115., 20.), Some(2));
+        assert_eq!(cache.hit(100., 4.), Some(2));
+        assert_eq!(cache.hovered_group(2), Some((0, 2)));
+        assert_eq!(cache.hit(115., 40.), None);
+        cache.width = 0;
+        assert_eq!(cache.hit(115., 20.), None);
+        assert_eq!(cache.hovered_group(2), None);
+    }
+    #[test]
+    fn russian_group_counts_use_correct_plural() {
+        for (count, text) in [
+            (2, "2 смены"),
+            (5, "5 смен"),
+            (11, "11 смен"),
+            (21, "21 смена"),
+            (24, "24 смены"),
+            (111, "111 смен"),
+        ] {
+            assert_eq!(group_title(Language::Ru, count), text);
         }
+        assert_eq!(group_title(Language::En, 5), "5 changes");
     }
 }
