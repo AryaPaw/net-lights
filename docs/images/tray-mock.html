@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Net Lights: превью трея</title>
+  <style>
+    html, body { margin: 0; width: 243px; height: 62px; overflow: hidden; }
+    #shot {
+      width: 243px;
+      height: 62px;
+      position: relative;
+      background: linear-gradient(180deg, #76a2be 0%, #284866 100%);
+    }
+    .bar {
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      background: #202020;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
+      color: #fff;
+    }
+    .hit {
+      width: 32px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 32px;
+    }
+    .mi {
+      font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+      font-size: 16px;
+      line-height: 1;
+      color: #ececec;
+    }
+    .clock {
+      margin-left: auto;
+      padding: 0 8px 0 6px;
+      text-align: right;
+      line-height: 1.15;
+      font-size: 12px;
+      font-weight: 400;
+    }
+    .peek {
+      width: 5px;
+      align-self: stretch;
+      border-left: 1px solid rgba(255, 255, 255, 0.14);
+    }
+    .app { width: 16px; height: 16px; display: block; }
+    .country {
+      font-family: Consolas, monospace;
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1;
+    }
+  </style>
+</head>
+<body>
+  <div id="shot">
+    <div class="bar">
+      <div class="hit"><span class="mi">&#xE70E;</span></div>
+      <div class="hit">
+        <svg class="app" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" role="img" aria-label="Провайдер и мир доступны">
+          <defs>
+            <clipPath id="left"><rect width="7" height="16" /></clipPath>
+            <clipPath id="right"><rect x="9" width="7" height="16" /></clipPath>
+          </defs>
+          <circle cx="8" cy="8" r="7" fill="#00DC5C" clip-path="url(#left)" />
+          <circle cx="8" cy="8" r="7" fill="#00DC5C" clip-path="url(#right)" />
+        </svg>
+      </div>
+      <div class="hit"><span class="country" aria-label="Финляндия">FI</span></div>
+      <div class="hit"><span class="mi">&#xE839;</span></div>
+      <div class="hit"><span class="mi">&#xE767;</span></div>
+      <div class="clock">15:00<br />23.09.2026</div>
+      <div class="peek"></div>
+    </div>
+  </div>
+</body>
+</html>
