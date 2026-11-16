@@ -130,7 +130,7 @@ function Get-Scope([string]$Relative) {
         '^native/core/src/update\.rs$' { return 'Updates' }
         '^native/core/src/(platform|persistence)\.rs$' { return 'App' }
         '^native/app/src/(main|view|geometry|location_rows|charts|dashboard|fluent|shell|backend|tray|window_os|text)\.rs$' { return 'App' }
-        '^native/app/src/(view/(state|settings|settings_navigation|locations|diagnostics|about|navigation)|charts/timeline|backend/(journal|export|network_log))\.rs$' { return 'App' }
+        '^native/app/src/(view/(state|settings|settings_navigation|locations|diagnostics|about|navigation)|charts/(timeline|timeline_markers)|backend/(journal|export|network_log))\.rs$' { return 'App' }
         '^native/update-agent/src/(main|win|snapshot|metadata|marker)\.rs$' { return 'Agent' }
         '^native/update-agent/src/process_tests\.rs$' { return 'Fixture' }
         default { throw "Unclassified runtime source: $name" }
@@ -205,6 +205,7 @@ function Invoke-SelfTest {
         @('native/app/src/text.rs','App'),
         @('native/app/src/dashboard.rs','App'),
         @('native/app/src/charts/timeline.rs','App'),
+        @('native/app/src/charts/timeline_markers.rs','App'),
         @('native/app/src/fluent.rs','App'),
         @('native/app/src/shell.rs','App'),
         @('native/app/src/view/settings_navigation.rs','App'),
