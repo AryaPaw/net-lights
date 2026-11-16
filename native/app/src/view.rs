@@ -100,6 +100,7 @@ pub struct NetLights {
     exiting: bool,
     _subscriptions: Vec<Subscription>,
     polling: Selector,
+    probe_timeout: Selector,
     country_polling: Selector,
     theme_selector: Selector,
     traffic_limit: Selector,
@@ -142,6 +143,18 @@ impl NetLights {
                 .iter()
                 .position(|s| *s == settings.availability_polling_seconds as u64)
                 .unwrap_or(3),
+            window,
+            cx,
+        );
+        let probe_timeout = selector(
+            AVAILABILITY_TIMEOUTS
+                .iter()
+                .map(|s| interval(*s, language(cx)))
+                .collect(),
+            AVAILABILITY_TIMEOUTS
+                .iter()
+                .position(|s| *s == settings.availability_timeout_seconds as u64)
+                .unwrap_or(1),
             window,
             cx,
         );
@@ -237,6 +250,20 @@ impl NetLights {
                 }
             }),
         );
+        subscriptions.push(cx.subscribe_in(
+            &probe_timeout,
+            window,
+            |this, select, event, window, cx| {
+                if let SelectEvent::Confirm(Some(_)) = event
+                    && let Some(i) = select.read(cx).selected_index(cx).map(|index| index.row)
+                    && i < AVAILABILITY_TIMEOUTS.len()
+                {
+                    let previous = this.settings.clone();
+                    this.settings.availability_timeout_seconds = AVAILABILITY_TIMEOUTS[i] as i64;
+                    this.commit_controls(previous, window, cx);
+                }
+            },
+        ));
         subscriptions.push(cx.subscribe_in(
             &country_polling,
             window,
@@ -410,6 +437,7 @@ impl NetLights {
             exiting: false,
             _subscriptions: subscriptions,
             polling,
+            probe_timeout,
             country_polling,
             theme_selector,
             traffic_limit,
@@ -482,6 +510,17 @@ impl NetLights {
                     .iter()
                     .position(|s| *s == self.settings.availability_polling_seconds as u64)
                     .unwrap_or(3),
+            ),
+            (
+                &self.probe_timeout,
+                AVAILABILITY_TIMEOUTS
+                    .iter()
+                    .map(|s| interval(*s, lang))
+                    .collect(),
+                AVAILABILITY_TIMEOUTS
+                    .iter()
+                    .position(|s| *s == self.settings.availability_timeout_seconds as u64)
+                    .unwrap_or(1),
             ),
             (
                 &self.country_polling,

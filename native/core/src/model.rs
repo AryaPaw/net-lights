@@ -5,6 +5,7 @@ use url::Url;
 
 pub const PERIODS: [u32; 8] = [1, 3, 6, 12, 24, 72, 120, 168];
 pub const AVAILABILITY_INTERVALS: [u64; 10] = [2, 3, 4, 5, 10, 15, 30, 60, 120, 300];
+pub const AVAILABILITY_TIMEOUTS: [u64; 7] = [1, 2, 3, 4, 5, 8, 10];
 pub const COUNTRY_INTERVALS: [u64; 4] = [10, 15, 30, 60];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -225,6 +226,7 @@ pub struct Settings {
     pub auto_start: bool,
     pub auto_update_enabled: bool,
     pub availability_polling_seconds: i64,
+    pub availability_timeout_seconds: i64,
     pub country_polling_seconds: i64,
     pub emphasize_short_statuses: bool,
     pub show_location_debug_sources: bool,
@@ -249,6 +251,7 @@ impl Default for Settings {
             auto_start: true,
             auto_update_enabled: true,
             availability_polling_seconds: 5,
+            availability_timeout_seconds: 2,
             country_polling_seconds: 10,
             emphasize_short_statuses: false,
             show_location_debug_sources: false,
@@ -295,6 +298,11 @@ impl Settings {
             || !AVAILABILITY_INTERVALS.contains(&(self.availability_polling_seconds as u64))
         {
             self.availability_polling_seconds = 5;
+        }
+        if self.availability_timeout_seconds < 0
+            || !AVAILABILITY_TIMEOUTS.contains(&(self.availability_timeout_seconds as u64))
+        {
+            self.availability_timeout_seconds = 2;
         }
         if self.country_polling_seconds < 0
             || !COUNTRY_INTERVALS.contains(&(self.country_polling_seconds as u64))
@@ -402,6 +410,32 @@ mod tests {
     #[test]
     fn builtin_pool_is_valid() {
         validate_endpoints(&builtins()).unwrap();
+    }
+    #[test]
+    fn response_timeout_defaults_roundtrips_and_is_independent_of_polling() {
+        let legacy: Settings =
+            serde_json::from_str(r#"{"availabilityPollingSeconds":30}"#).unwrap();
+        assert_eq!(legacy.availability_timeout_seconds, 2);
+        for seconds in AVAILABILITY_TIMEOUTS {
+            let mut settings = Settings {
+                availability_polling_seconds: 30,
+                availability_timeout_seconds: seconds as i64,
+                ..Default::default()
+            };
+            settings.normalize();
+            let decoded: Settings =
+                serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+            assert_eq!(decoded.availability_timeout_seconds, seconds as i64);
+            assert_eq!(decoded.availability_polling_seconds, 30);
+        }
+        for invalid in [i64::MIN, -1, 0, 7, 60, i64::MAX] {
+            let mut settings = Settings {
+                availability_timeout_seconds: invalid,
+                ..Default::default()
+            };
+            settings.normalize();
+            assert_eq!(settings.availability_timeout_seconds, 2);
+        }
     }
     #[test]
     fn secrets_and_same_infrastructure_do_not_become_independent() {

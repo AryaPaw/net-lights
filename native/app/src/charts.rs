@@ -496,30 +496,35 @@ impl Geometry {
                     }
                 }
             };
-            if !availability {
+            if !availability || !model.emphasize {
                 // Sample real time at each pixel centre. Tiny events remain visible
-                // above the band without expanding their duration or hiding coverage.
+                // in the optional enlarged mode, not by dilating the actual-time band.
                 let left = (natural_a - 0.5).ceil().max(0.) as usize;
                 let right = (natural_b - 0.5).ceil().max(0.) as usize;
-                for pixel in &mut painted[left.min(width)..right.min(width)] {
+                let raster = if availability {
+                    &mut hits
+                } else {
+                    &mut painted
+                };
+                for pixel in &mut raster[left.min(width)..right.min(width)] {
                     *pixel = Some(index);
                 }
-                if marker {
-                    update(&mut marked, a, b);
-                    let left = (center - 3.).floor().max(0.) as usize;
-                    let right = (center + 3.).ceil().min(width as f32) as usize;
-                    for (pixel, hit) in marker_hits.iter_mut().enumerate().take(right).skip(left) {
-                        let distance = (pixel as f32 + 0.5 - (a + b) / 2.).abs();
-                        if hit.is_none_or(|old| {
-                            let (old_a, old_b) = rects[old];
-                            distance <= (pixel as f32 + 0.5 - (old_a + old_b) / 2.).abs()
-                        }) {
-                            *hit = Some(index);
-                        }
+            }
+            if !availability && marker {
+                update(&mut marked, a, b);
+                let left = (center - 3.).floor().max(0.) as usize;
+                let right = (center + 3.).ceil().min(width as f32) as usize;
+                for (pixel, hit) in marker_hits.iter_mut().enumerate().take(right).skip(left) {
+                    let distance = (pixel as f32 + 0.5 - (a + b) / 2.).abs();
+                    if hit.is_none_or(|old| {
+                        let (old_a, old_b) = rects[old];
+                        distance <= (pixel as f32 + 0.5 - (old_a + old_b) / 2.).abs()
+                    }) {
+                        *hit = Some(index);
                     }
                 }
             }
-            if availability {
+            if availability && model.emphasize {
                 update(&mut hits, a, b);
             }
         }
@@ -1323,6 +1328,10 @@ mod tests {
         let natural = Geometry::build(&model, 1000);
         let width = natural.rects[0].1 - natural.rects[0].0;
         assert!((width - 1000. / 3600.).abs() < 0.001);
+        assert!(
+            natural.runs.is_empty(),
+            "A subpixel event between pixel centres mustn't be dilated"
+        );
         let mut enlarged = model;
         enlarged.emphasize = true;
         let enlarged = Geometry::build(&enlarged, 1000);
@@ -1352,6 +1361,49 @@ mod tests {
         let geometry = Geometry::build(&model, 1000);
         assert_eq!(geometry.hits[500], Some(0));
         assert_eq!(geometry.rects[0], (497., 503.));
+    }
+    #[test]
+    fn actual_time_raster_does_not_exaggerate_repeated_outages_on_any_period() {
+        let start = Utc::now();
+        for hours in netlights_core::model::PERIODS {
+            let duration = chrono::Duration::hours(i64::from(hours));
+            let end = start + duration;
+            let mut history = AvailabilityHistory::default();
+            for i in 0..63 {
+                let a =
+                    start + chrono::Duration::milliseconds(duration.num_milliseconds() * i / 63);
+                let b = start
+                    + chrono::Duration::milliseconds(duration.num_milliseconds() * (i + 1) / 63);
+                let split = a + (b - a) * 17 / 100;
+                for (state, left, right) in [
+                    (Availability::Offline, a, split),
+                    (Availability::Online, split, b),
+                ] {
+                    history.spans.push(AvailabilitySpan {
+                        group: Group::World,
+                        state,
+                        paused: false,
+                        started_utc: left,
+                        ended_utc: Some(right),
+                    });
+                }
+            }
+            let model = availability(&history, Group::World, start, end, false);
+            for width in [640, 900, 977, 1400] {
+                let geometry = Geometry::build(&model, width);
+                let red = geometry
+                    .runs
+                    .iter()
+                    .filter(|(_, _, i)| model.segments[*i].priority == 3)
+                    .map(|(a, b, _)| b - a)
+                    .sum::<usize>();
+                assert!(
+                    (red as f64 - width as f64 * 0.17).abs() <= 2.,
+                    "hours={hours}, width={width}, red={red}"
+                );
+                assert!(geometry.hits.iter().all(Option::is_some));
+            }
+        }
     }
     #[test]
     fn maximum_history_has_constant_time_hover_and_bounded_draw_operations() {

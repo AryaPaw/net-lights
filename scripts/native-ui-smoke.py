@@ -1862,7 +1862,7 @@ class Runner:
     def dropdown_wheel(self):
         self.page("Параметры")
         tested = []
-        mapping = [("Интервал доступности", "availabilityPollingSeconds"), ("Интервал страны", "countryPollingSeconds"),
+        mapping = [("Интервал доступности", "availabilityPollingSeconds"), ("Время ожидания ответа", "availabilityTimeoutSeconds"), ("Интервал страны", "countryPollingSeconds"),
                    ("Порог трафика", "trafficWarningBytesPerHour"), ("Размер букв", "geoCountryLetterSize"), ("Оформление", "theme")]
         if self.meta["locale_required"]:
             mapping.append(("Язык интерфейса", "language"))
@@ -2149,7 +2149,7 @@ class Runner:
             time.sleep(.5)
             self.page("Параметры")
             assert not any(r["kind"]=="Button" and ", текущий раздел" in r["name"] for r in self.uia.call("inventory")), "Narrow settings rail should be hidden"
-            for label in ("Интервал доступности","Интервал страны","Порог трафика","Размер букв","Оформление","Язык интерфейса"):
+            for label in ("Интервал доступности","Время ожидания ответа","Интервал страны","Порог трафика","Размер букв","Оформление","Язык интерфейса"):
                 self.visible_control(label)
                 a,b,c,d=self.content_bounds()
                 r=self.uia.call("rect",label)
@@ -2488,7 +2488,12 @@ class Runner:
         return point
 
     def locale_persistence(self):
-        watched = ("availabilityPollingSeconds", "countryPollingSeconds", "theme", "trafficWarningBytesPerHour",
+        original_timeout = self.setting("availabilityTimeoutSeconds")
+        original_interval = self.setting("availabilityPollingSeconds")
+        self.page("Параметры")
+        self.select_index("Время ожидания ответа", 4, "availabilityTimeoutSeconds", 5)
+        assert self.setting("availabilityPollingSeconds") == original_interval, "Timeout changed polling interval"
+        watched = ("availabilityPollingSeconds", "availabilityTimeoutSeconds", "countryPollingSeconds", "theme", "trafficWarningBytesPerHour",
                    "geoCountryLetterSize", "geoCountryDetectionEnabled", "geoCountryIconEnabled",
                    "emphasizeShortStatuses", "showLocationDebugSources", "autoStart", "autoUpdateEnabled")
         before = {key: self.setting(key) for key in watched}
@@ -2539,6 +2544,7 @@ class Runner:
         self.page("Settings")
         values = {
             "Availability interval": f"{before['availabilityPollingSeconds']} s" if before['availabilityPollingSeconds'] < 60 else f"{before['availabilityPollingSeconds']//60} min",
+            "Response timeout": f"{before['availabilityTimeoutSeconds']} s",
             "Country interval": f"{before['countryPollingSeconds']} s" if before['countryPollingSeconds'] < 60 else f"{before['countryPollingSeconds']//60} min",
             "Appearance": {"dark":"Dark", "light":"Light", "system":"System default"}[before['theme']],
             "Letter size": ("Small", "Medium", "Large")[before['geoCountryLetterSize']],
@@ -2553,6 +2559,8 @@ class Runner:
         self.history_counts()
         self.start()
         assert self.setting("language") == "en"
+        assert self.setting("availabilityTimeoutSeconds") == 5, "Timeout didn't survive restart"
+        assert self.setting("availabilityPollingSeconds") == original_interval, "Restart changed polling interval"
         wait_for(lambda: self.uia.call("exists", "Status"), description="English пережил restart")
         self.page("Status")
         self.state_heading_counts(True)
@@ -2568,6 +2576,10 @@ class Runner:
         self.state_heading_counts()
         assert {key:self.setting(key) for key in watched} == before
         self.capture("ru-state-after-language-cycle")
+        self.page("Параметры")
+        self.select_index("Время ожидания ответа", [1,2,3,4,5,8,10].index(original_timeout), "availabilityTimeoutSeconds", original_timeout)
+        self.page("Состояние")
+        self.meta["response_timeout_verified"] = dict(saved=True, restart=True, polling_unchanged=True)
         self.meta["locale_verified"] = True
         return dict(live_switch_same_pid=True, english_restart=True, system_ui_language_observed=True,
                     unrelated_settings_unchanged=True, selectors=values, history_counts=self.history_counts(),

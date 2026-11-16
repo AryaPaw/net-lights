@@ -85,6 +85,7 @@ impl Backend {
             0,
         )?;
         let mut monitor = monitor;
+        monitor.set_probe_deadline(profile.settings.availability_timeout_seconds as u64 * 1000)?;
         let initial = Arc::new(State {
             monitor: monitor.snapshot(0, Utc::now()),
             settings: profile.settings.clone(),
@@ -489,6 +490,7 @@ async fn run(
                         profile.settings = next;
                         if isolated { profile.settings.auto_start = false; profile.settings.auto_update_enabled = false; }
                         if interval_changed { monitor.set_interval(profile.settings.availability_polling_seconds as u64, now); }
+                        monitor.set_probe_deadline(profile.settings.availability_timeout_seconds as u64 * 1000)?;
                         if previous_geo!=profile.settings.geo_country_detection_enabled||previous_country_seconds!=profile.settings.country_polling_seconds {
                             geo_sender.send_modify(|g| {
                                 if previous_geo != profile.settings.geo_country_detection_enabled {

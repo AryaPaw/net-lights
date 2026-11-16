@@ -99,6 +99,11 @@ const TEXT: &[(&str, &str)] = &[
         "Every 5 seconds by default. Less frequent checks reduce traffic.",
     ),
     ("Интервал доступности", "Availability interval"),
+    ("Время ожидания ответа", "Response timeout"),
+    (
+        "Общий срок одного HTTPS-запроса. По умолчанию 2 секунды. Частота опроса не меняется.",
+        "Total time allowed for one HTTPS probe. Default: 2 seconds. The polling interval is unchanged.",
+    ),
     ("Определение страны", "Country detection"),
     (
         "По умолчанию каждые 10 секунд.",

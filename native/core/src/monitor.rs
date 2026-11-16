@@ -770,4 +770,22 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn timeout_changes_only_future_probes_without_changing_the_polling_interval() {
+        let mut monitor = Monitor::new(builtins(), 30, 0).unwrap();
+        let started = monitor.tick(0);
+        assert!(!started.is_empty());
+        assert!(started.iter().all(|work| work.deadline_ms == 2000));
+        monitor.set_probe_deadline(5000).unwrap();
+        assert_eq!(monitor.interval_ms, 30_000);
+        assert!(started.iter().all(|work| work.deadline_ms == 2000));
+        for work in started {
+            monitor.complete(&work, result(Outcome::Reachable), 1, Utc::now());
+        }
+        let next = monitor.tick(30_000);
+        assert!(!next.is_empty());
+        assert!(next.iter().all(|work| work.deadline_ms == 5000));
+        assert!(monitor.set_probe_deadline(0).is_err());
+        assert!(monitor.set_probe_deadline(60_001).is_err());
+    }
 }

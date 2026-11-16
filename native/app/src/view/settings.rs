@@ -69,6 +69,14 @@ impl NetLights {
                 cx,
             ))
             .child(setting_row(
+                "Время ожидания ответа",
+                "Общий срок одного HTTPS-запроса. По умолчанию 2 секунды. Частота опроса не меняется.",
+                crate::fluent::input(Select::new(&self.probe_timeout).large())
+                    .w(px(190.))
+                    .accessibility_label(tr(cx, "Время ожидания ответа")),
+                cx,
+            ))
+            .child(setting_row(
                 "Определение страны",
                 "По умолчанию каждые 10 секунд.",
                 crate::fluent::input(Select::new(&self.country_polling).large())
