@@ -274,6 +274,8 @@ pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write
         back: 1,
     };
     let (mut previous, mut events, mut bytes) = (0, 0u32, 0usize);
+    let mut previous_stages = [0i64; 4];
+    let mut captured_frames = 0u32;
     while !signals.stop.load(Ordering::Acquire) {
         unobscured(spec, initial)?;
         let current = checked(unsafe { desktop.GetDesc() }, "output_desc")?;
@@ -303,6 +305,7 @@ pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write
             unsafe { QueryPerformanceCounter(&mut received) },
             "frame_qpc",
         )?;
+        let acquired_qpc = received;
         let present = desktop_frame_time(
             info.LastPresentTime,
             info.AccumulatedFrames,
@@ -310,7 +313,29 @@ pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write
             info.LastMouseUpdateTime,
             received,
             previous,
-        )?;
+        )
+        .inspect_err(|_| {
+            eprintln!(
+                concat!(
+                    "{{\"present_qpc\":{},\"accumulated_frames\":{},\"metadata_bytes\":{},",
+                    "\"mouse_qpc\":{},\"received_qpc\":{},\"previous_qpc\":{},\"frequency\":{},",
+                    "\"last_acquired_qpc\":{},\"last_readback_qpc\":{},",
+                    "\"last_released_qpc\":{},\"last_written_qpc\":{},\"captured_frames\":{}}}"
+                ),
+                info.LastPresentTime,
+                info.AccumulatedFrames,
+                info.TotalMetadataBufferSize,
+                info.LastMouseUpdateTime,
+                received,
+                previous,
+                frequency,
+                previous_stages[0],
+                previous_stages[1],
+                previous_stages[2],
+                previous_stages[3],
+                captured_frames
+            );
+        })?;
         if present.is_none() {
             unobscured(spec, initial)?;
             acquired.close()?;
@@ -339,6 +364,7 @@ pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write
             unsafe { QueryPerformanceCounter(&mut received) },
             "frame_qpc",
         )?;
+        let readback_qpc = received;
         let qpc = checked_qpc(
             present.ok_or(Failure("missing_present_time", 0))?,
             received,
@@ -347,6 +373,11 @@ pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write
         unobscured(spec, initial)?;
         drop(source);
         acquired.close()?;
+        let mut released_qpc = 0;
+        checked(
+            unsafe { QueryPerformanceCounter(&mut released_qpc) },
+            "release_qpc",
+        )?;
         previous = qpc;
         bytes += pixels.len();
         if bytes > 32 * 1024 * 1024 {
@@ -359,6 +390,13 @@ pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write
             hex.push(DIGITS[(value & 15) as usize] as char);
         }
         writeln!(output, "{{\"kind\":\"frame\",\"qpc\":{qpc},\"width\":{width},\"height\":{height},\"pixels\":\"{hex}\"}}").map_err(|_| Failure("parent_output", 0))?;
+        let mut written_qpc = 0;
+        checked(
+            unsafe { QueryPerformanceCounter(&mut written_qpc) },
+            "write_qpc",
+        )?;
+        previous_stages = [acquired_qpc, readback_qpc, released_qpc, written_qpc];
+        captured_frames += 1;
     }
     if let Some(failure) = *signals
         .failure

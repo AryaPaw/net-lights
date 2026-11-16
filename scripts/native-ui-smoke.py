@@ -852,12 +852,23 @@ def native_clock_diagnostic(raw):
         if not raw.strip().startswith(b"{") or not raw.strip().endswith(b"}"):
             raise ValueError()
         pairs=json.loads(raw.decode("ascii"),object_pairs_hook=lambda pairs:pairs)
-        expected={"duration","frequency","acquired_qpc","received_qpc","previous_qpc"}
-        if not isinstance(pairs,list) or len(pairs)!=5 or {key for key,_ in pairs}!=expected:
+        clock_fields={"duration","frequency","acquired_qpc","received_qpc","previous_qpc"}
+        desktop_fields={"present_qpc","accumulated_frames","metadata_bytes","mouse_qpc","received_qpc",
+                        "previous_qpc","frequency","last_acquired_qpc","last_readback_qpc",
+                        "last_released_qpc","last_written_qpc","captured_frames"}
+        if not isinstance(pairs,list):
+            raise ValueError()
+        fields={key for key,_ in pairs}
+        if fields not in (clock_fields,desktop_fields) or len(pairs)!=len(fields):
             raise ValueError()
         if any(type(value) is not int or not -(2**63)<=value<2**63 for _,value in pairs):
             raise ValueError()
-        return dict(pairs)
+        value=dict(pairs)
+        if fields==desktop_fields and (not 0<=value["accumulated_frames"]<2**32 or
+                                      not 0<=value["metadata_bytes"]<2**32 or
+                                      not 0<=value["captured_frames"]<=512):
+            raise ValueError()
+        return value
     except (UnicodeError,ValueError,TypeError):
         raise RuntimeError("Malformed native clock diagnostic") from None
 
@@ -884,7 +895,8 @@ class NavigationFrames:
         try:
             diagnostic=native_clock_diagnostic(self.process.stderr.read(8193))
             if diagnostic is not None:
-                self.report["clock_diagnostic"]=diagnostic
+                field="desktop_diagnostic" if "accumulated_frames" in diagnostic else "clock_diagnostic"
+                self.report[field]=diagnostic
         finally:
             self.diagnostics_read=True
             self.process.stderr.close()
@@ -3518,7 +3530,9 @@ def navigation_motion_selftest():
         assert not capture.reader.is_alive() and process.stdin.closed and process.stdout.closed and process.stderr.closed
         assert process.returncode is not None
         if diagnostic and len(diagnostic)<=8192:
-            assert reports[0]["clock_diagnostic"]==json.loads(diagnostic)
+            decoded=json.loads(diagnostic)
+            field="desktop_diagnostic" if "accumulated_frames" in decoded else "clock_diagnostic"
+            assert reports[0][field]==decoded
     complete=[ready,frame,dict(frame,qpc=300),end]
     scenario(complete,True)
     scenario([ready,frame],False)
@@ -3536,6 +3550,17 @@ def navigation_motion_selftest():
         rejected(lambda:native_clock_diagnostic(invalid))
     scenario(complete,True,diagnostic=encode(diagnostic))
     scenario(complete,False,code=7,diagnostic=encode(diagnostic))
+    desktop=dict(present_qpc=122,accumulated_frames=2,metadata_bytes=8,mouse_qpc=0,
+                 received_qpc=123,previous_qpc=120,frequency=1000,last_acquired_qpc=120,
+                 last_readback_qpc=121,last_released_qpc=121,last_written_qpc=122,captured_frames=1)
+    assert native_clock_diagnostic(encode(desktop))==desktop
+    for invalid in (dict(desktop,accumulated_frames=True),dict(desktop,accumulated_frames=2**32),
+                    dict(desktop,metadata_bytes=-1),dict(desktop,captured_frames=513),
+                    dict(desktop,extra=0)):
+        rejected(lambda:native_clock_diagnostic(encode(invalid)))
+    rejected(lambda:native_clock_diagnostic(encode(desktop).replace(b'"accumulated_frames":2',b'"accumulated_frames":2,"accumulated_frames":2')))
+    scenario(complete,False,code=7,diagnostic=encode(desktop))
+    scenario([ready,frame,dict(kind="error",code="accumulated_frames",hresult=0)],False,code=1,diagnostic=encode(desktop))
     scenario(complete,False,diagnostic=b"x"*8193)
     capture=NavigationFrames.__new__(NavigationFrames)
     capture.process=Process(b"")
