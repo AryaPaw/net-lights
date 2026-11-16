@@ -3906,7 +3906,7 @@ dependencies = [
 
 [[package]]
 name = "netlights-app"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3922,7 +3922,7 @@ dependencies = [
 
 [[package]]
 name = "netlights-core"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3946,7 +3946,7 @@ dependencies = [
 
 [[package]]
 name = "netlights-update-agent"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "anyhow",
  "chrono",

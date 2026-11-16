@@ -25,7 +25,7 @@ function Assert-Run([object]$Run,[string]$Repo) {
 }
 function Assert-Jobs([object]$Inventory) {
     Require ($Inventory.total_count -le 100) 'Source CI job inventory exceeds its bound.'
-    foreach ($name in @('windows','bridge','motion','upgrade (Direct, v1.6.0)','upgrade (Direct, v1.4.2)',
+    foreach ($name in @('windows','bridge','motion','upgrade (Direct, v1.6.0)','upgrade (Direct, v1.4.2)','upgrade (Direct, v1.7.0)',
         'upgrade (Bridge, v1.6.0)','upgrade (Bridge, v1.4.2)','upgrade (Automatic, v1.6.0)')) {
         $matches = @($Inventory.jobs | Where-Object name -CEQ $name)
         Require ($matches.Count -eq 1 -and $matches[0].conclusion -ceq 'success') 'A mandatory source CI job is missing, skipped or failed.'
@@ -92,10 +92,16 @@ if ($SelfTest) {
     $source=@{status='completed';conclusion='success';path='.github/workflows/ci.yml';head_repository=@{full_name='AryaPaw/net-lights'};event='workflow_dispatch'}
     Assert-Run $source 'AryaPaw/net-lights'
     $source.event='pull_request';Negative { Assert-Run $source 'AryaPaw/net-lights' }
-    $names=@('windows','bridge','motion','upgrade (Direct, v1.6.0)','upgrade (Direct, v1.4.2)','upgrade (Bridge, v1.6.0)','upgrade (Bridge, v1.4.2)','upgrade (Automatic, v1.6.0)')
-    $jobs=@{total_count=8;jobs=@($names | ForEach-Object {@{name=$_;conclusion='success'}})}
+    $names=@('windows','bridge','motion','upgrade (Direct, v1.6.0)','upgrade (Direct, v1.4.2)','upgrade (Direct, v1.7.0)','upgrade (Bridge, v1.6.0)','upgrade (Bridge, v1.4.2)','upgrade (Automatic, v1.6.0)')
+    $jobs=@{total_count=9;jobs=@($names | ForEach-Object {@{name=$_;conclusion='success'}})}
     Assert-Jobs $jobs
     $jobs.jobs[2].conclusion='skipped';Negative { Assert-Jobs $jobs }
+    $jobs.jobs[2].conclusion='success'
+    $nativeDirect=@($jobs.jobs | Where-Object name -CEQ 'upgrade (Direct, v1.7.0)')[0]
+    $nativeDirect.conclusion='skipped';Negative { Assert-Jobs $jobs }
+    $nativeDirect.conclusion='success'
+    $jobs.jobs=@($jobs.jobs | Where-Object name -CNE 'upgrade (Direct, v1.7.0)');$jobs.total_count=8
+    Negative { Assert-Jobs $jobs }
     $receipt=@{status='PASS';cleanup='PASS';scenario='Automatic';releaseTag='v1.6.0';baseline=@{sha256='73d993416a298690f26891936d3b794179edc62ad86e67a7144d695840c2dd97'};checks=@(@{name='published-baseline-automatic-bridge-native';status='PASS';detail=@{discovery='PASS';httpsDownloadAndRedirects='PASS';automaticHandoffs='PASS';native=@{externalNativeMonitorSignal='PASS';settingsAndBothHistories='PASS';exactAppAndAgentDigests='PASS'}}})}
     Assert-AutomaticReceipt $receipt
     $receipt.checks[0].detail.native.settingsAndBothHistories='FAIL';Negative { Assert-AutomaticReceipt $receipt }

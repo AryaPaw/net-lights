@@ -7,7 +7,7 @@ param(
     [string]$NativePublishDirectory,
     [string]$ResultsDirectory = ('artifacts/ci-upgrade-' + [Guid]::NewGuid().ToString('N')),
     [ValidateSet('All','Direct','Bridge','Automatic','LegacyFailures')][string]$Scenario = 'All',
-    [ValidateSet('v1.6.0','v1.4.2')][string]$ReleaseTag = 'v1.6.0',
+    [ValidateSet('v1.6.0','v1.4.2','v1.7.0')][string]$ReleaseTag = 'v1.6.0',
     [string]$BaselineSha256,
     [long]$BaselineBytes,
     [switch]$SelfTest
@@ -72,6 +72,22 @@ function Get-NewResultsPath([string]$Path, [string]$ArtifactRoot) {
 
 function Read-Version([string]$Path) {
     return ([Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersion -split '\+')[0]
+}
+
+function Get-NativeVersion([string]$Manifest) {
+    $versions = [regex]::Matches($Manifest, '(?m)^version\s*=\s*"((?:0|[1-9][0-9]{0,4})\.(?:0|[1-9][0-9]{0,4})\.(?:0|[1-9][0-9]{0,4}))"\s*$')
+    Assert-Condition ($versions.Count -eq 1) 'The canonical manifest must declare one exact native version.'
+    $value = $versions[0].Groups[1].Value
+    $parsed = [version]$value
+    Assert-Condition ($parsed -ge [version]'1.7.0' -and $parsed.Major -le 65535 -and $parsed.Minor -le 65535 -and $parsed.Build -le 65535) 'The native version is outside the supported channel or Windows version range.'
+    return $value
+}
+
+function Get-AgentProtocol([string]$Version, [string]$InstallerName) {
+    Assert-Condition ($Version -cin @('1.4.2','1.6.0','1.6.1','1.7.0')) 'Unknown installed agent protocol.'
+    $name = [regex]::Match($InstallerName, '^NetLights-Setup-win-x64-([0-9]+\.[0-9]+\.[0-9]+)\.exe$')
+    Assert-Condition $name.Success 'Invalid candidate installer name.'
+    return @{ ready = $Version -cne '1.4.2'; resultVersion = $(if ($Version -ceq '1.7.0') { $name.Groups[1].Value } else { $InstallerName }) }
 }
 
 function Get-Payload([string]$Setup, [string]$Directory, [string]$Version) {
@@ -175,6 +191,22 @@ function Test-Negative([scriptblock]$Body, [string]$Message) {
 
 if ($SelfTest) {
     Test-AutomaticFeedCertificate
+    foreach ($version in @('1.7.0','1.7.1','1.8.0')) {
+        Assert-Condition ((Get-NativeVersion ('version = "' + $version + '"')) -ceq $version) 'Canonical native version control failed.'
+    }
+    foreach ($invalid in @('1.6.1','1.7','1.7.01','1.7.1-beta','65536.0.0','1.7.1/../')) {
+        Test-Negative { Get-NativeVersion ('version = "' + $invalid + '"') } 'Invalid native version was accepted.'
+    }
+    Test-Negative { Get-NativeVersion "version = `"1.7.1`"`nversion = `"1.8.0`"" } 'Ambiguous native versions were accepted.'
+    $installer = 'NetLights-Setup-win-x64-1.7.1.exe'
+    foreach ($agentVersion in @('1.4.2','1.6.0','1.6.1','1.7.0')) {
+        $protocol = Get-AgentProtocol $agentVersion $installer
+        Assert-Condition ($protocol.ready -eq ($agentVersion -cne '1.4.2')) 'Installed agent readiness protocol changed.'
+        $expected = if ($agentVersion -ceq '1.7.0') { '1.7.1' } else { $installer }
+        Assert-Condition ($protocol.resultVersion -ceq $expected) 'Installed agent result identity changed.'
+    }
+    Test-Negative { Get-AgentProtocol '9.9.9' $installer } 'Unknown agent protocol was accepted.'
+    Test-Negative { Get-AgentProtocol '1.7.0' '../setup.exe' } 'Invalid installer identity was accepted.'
     $frames = @(Get-SafeErrorLines "at Assert-Condition, C:\private\token-secret.ps1: line 32`nat Run, C:\private\token-secret.ps1: line 130")
     if ($frames.Count -ne 2 -or $frames[0] -ne 32 -or $frames[1] -ne 130) { throw 'Safe assertion frames lost source positions.' }
     if (@(Get-SafeErrorLines 'https://private.invalid/?token=secret').Count) { throw 'A non-stack secret became diagnostic output.' }
@@ -226,14 +258,21 @@ if ($ReleaseTag -ceq 'v1.6.0') {
 } else {
     Assert-Sha $BaselineSha256
     Assert-Condition ($BaselineBytes -gt 0 -and $BaselineBytes -le 80MB) 'Historical input needs the exact published asset digest and size.'
-    Assert-Condition ($Scenario -in @('Direct','Bridge')) 'Historical no-ready agents support success-route checks only; their failure safety isn''t claimed.'
+    if ($ReleaseTag -ceq 'v1.7.0') {
+        Assert-Condition ($Scenario -ceq 'Direct' -and $BaselineBytes -eq 9685535 -and $BaselineSha256 -ieq '4b36b1f7957cff32234fd6456ead1f29f9f68d635981c2f89af4b46972527931') 'Native baseline requires the exact published 1.7.0 installer and a forward direct upgrade.'
+    } else {
+        Assert-Condition ($Scenario -in @('Direct','Bridge')) 'Historical no-ready agents support success-route checks only; their failure safety isn''t claimed.'
+    }
 }
 $baselineVersion = $ReleaseTag.Substring(1)
 Assert-Unlinked $BaselineInstaller
 Assert-ExactFile $BaselineInstaller $BaselineSha256
 Assert-Condition ((Get-Item -LiteralPath $BaselineInstaller).Length -eq $BaselineBytes) 'Published baseline size mismatch.'
 Assert-Condition ([IO.Path]::GetFileName($BaselineInstaller) -ceq ('NetLights-Setup-win-x64-' + $baselineVersion + '.exe')) 'Baseline filename doesn''t match ReleaseTag.'
-$native = Get-Payload $NativeInstaller $NativePublishDirectory '1.7.0'
+$nativeVersion = Get-NativeVersion (Get-Content -LiteralPath (Join-Path $repository 'Cargo.toml') -Raw)
+$native = Get-Payload $NativeInstaller $NativePublishDirectory $nativeVersion
+Assert-Condition ([version]$native.version -gt [version]$baselineVersion) 'The native candidate must be newer than the installed baseline.'
+$nativeName = 'NetLights-Setup-win-x64-' + $native.version + '.exe'
 $bridge = $null
 if ($Scenario -in @('All','Bridge','Automatic')) {
     Assert-Condition ($BridgeInstaller -and $BridgePublishDirectory) 'This scenario requires verified bridge inputs.'
@@ -410,7 +449,7 @@ function New-Seed {
     )
     $observations = @()
     $settingFields = @('windowWidth','windowHeight','availabilityPollingSeconds','countryPollingSeconds','emphasizeShortStatuses','autoUpdateEnabled')
-    if ($ReleaseTag -ceq 'v1.6.0') {
+    if ($ReleaseTag -cne 'v1.4.2') {
         $stays += @{ iso = 'RU'; startedUtc = $start.AddMinutes(20).ToString('o'); endedUtc = $start.AddMinutes(20).ToString('o') }
         foreach ($index in 0..1) {
             $iso = if ($index -eq 0) { 'DE' } else { 'PL' }
@@ -442,8 +481,8 @@ function Write-Seed {
     Assert-HostedRunner
     $script:seed = New-Seed
     $null = New-Item -ItemType Directory -Path $updates -Force
-    $locations = @{ version = $(if ($ReleaseTag -ceq 'v1.6.0') { 3 } else { 1 }); lastObservedUtc = $seed.lastObservedUtc; stays = $seed.stays }
-    if ($ReleaseTag -ceq 'v1.6.0') { $locations.observations = $seed.observations }
+    $locations = @{ version = $(if ($ReleaseTag -cne 'v1.4.2') { 3 } else { 1 }); lastObservedUtc = $seed.lastObservedUtc; stays = $seed.stays }
+    if ($ReleaseTag -cne 'v1.4.2') { $locations.observations = $seed.observations }
     $endpoints = @(foreach ($group in @('Ru','World')) { foreach ($index in 0..6) {
         @{ id = ($group + '-' + $index); group = $group; uri = ('https://127.0.0.1:1/' + $group + '/' + $index); infrastructureId = ('local-' + $group + '-' + $index) }
     } })
@@ -488,7 +527,8 @@ function Invoke-InstalledAgent([string]$Setup, [string]$ExpectedAgentHash, [stri
     Copy-Item -LiteralPath $Setup -Destination $pending
     $digest = $ExpectedSetupHash
     Assert-ExactFile $pending $digest
-    $requiresReady = $ExpectedAgentVersion -in @('1.6.0','1.6.1')
+    $protocol = Get-AgentProtocol $ExpectedAgentVersion ([IO.Path]::GetFileName($pending))
+    $requiresReady = $protocol.ready
     $ready = $null
     $arguments = @('--parent',[string]$parent.Id,'--pending',$pending,'--sha256',$digest.ToLowerInvariant(),'--restart',$app)
     if ($requiresReady) {
@@ -526,7 +566,7 @@ function Invoke-InstalledAgent([string]$Setup, [string]$ExpectedAgentHash, [stri
         Assert-Live $restarted
         Assert-Condition ([IO.File]::Exists($statusPath) -and (Get-Item -LiteralPath $statusPath).Length -le 64KB) 'This attempt didn''t write a bounded new result file.'
         $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
-        Assert-AttemptResult $status ([IO.Path]::GetFileName($pending)) $started ([DateTimeOffset]::UtcNow)
+        Assert-AttemptResult $status $protocol.resultVersion $started ([DateTimeOffset]::UtcNow)
         return [ordered]@{
             exitCode = $code; success = [bool]$status.success; setupSha256 = $digest; agentSha256 = $ExpectedAgentHash
             agentVersion = $ExpectedAgentVersion; ready = $(if ($requiresReady) { 'PASS' } else { 'NOT SUPPORTED by this release' })
@@ -562,10 +602,10 @@ function Assert-Native([object]$Attempt) {
     Assert-Condition ($Attempt.exitCode -eq 0 -and $Attempt.success) 'The installed agent didn''t report native upgrade success.'
     Assert-ExactFile $app $native.appSha256 160MB
     Assert-ExactFile (Join-Path $install 'NetLights.UpdateAgent.exe') $native.agentSha256 160MB
-    Assert-Condition ((Read-Version $app) -ceq '1.7.0') 'The installed native version isn''t 1.7.0.'
+    Assert-Condition ((Read-Version $app) -ceq $native.version) 'The installed native version differs from the verified payload.'
     $registration = @(Get-RegistrySnapshot)
     $displayVersion = @($registration | Where-Object { $_.name -ceq 'DisplayVersion' })
-    Assert-Condition ($displayVersion.Count -eq 1 -and $displayVersion[0].value -ceq '1.7.0') 'The successful upgrade didn''t register native 1.7.0.'
+    Assert-Condition ($displayVersion.Count -eq 1 -and $displayVersion[0].value -ceq $native.version) 'The successful upgrade didn''t register the verified native version.'
     Stop-App
     Assert-Seed
     # For pre-ready agents this is explicitly an external verification restart,
@@ -579,16 +619,16 @@ function Assert-Native([object]$Attempt) {
 function New-FaultInstaller {
     $fixtureDirectory = Join-Path $results 'fixtures'
     if (-not [IO.Directory]::Exists($fixtureDirectory)) { $null = New-Item -ItemType Directory -Path $fixtureDirectory }
-    $output = Join-Path $fixtureDirectory 'NetLights-Setup-win-x64-1.7.0.exe'
+    $output = Join-Path $fixtureDirectory $nativeName
     if ([IO.File]::Exists($output)) {
         Assert-ExactFile $output $script:faultSha
         return $output
     }
     $source = @'
 using System; using System.IO; using System.Reflection; using System.Threading;
-[assembly: AssemblyVersion("1.7.0.0")]
-[assembly: AssemblyFileVersion("1.7.0.0")]
-[assembly: AssemblyInformationalVersion("1.7.0")]
+[assembly: AssemblyVersion("__NATIVE_VERSION__.0")]
+[assembly: AssemblyFileVersion("__NATIVE_VERSION__.0")]
+[assembly: AssemblyInformationalVersion("__NATIVE_VERSION__")]
 public static class Fault {
  public static int Main(string[] args) {
   if(!String.Equals(Environment.UserName,"runneradmin",StringComparison.OrdinalIgnoreCase)
@@ -607,12 +647,13 @@ public static class Fault {
  }
 }
 '@
+    $source = $source.Replace('__NATIVE_VERSION__', $native.version)
     $sourcePath = Join-Path $fixtureDirectory 'fault.cs'
     $compilePath = Join-Path $fixtureDirectory 'compile.ps1'
     [IO.File]::WriteAllText($sourcePath,$source,$utf8)
     [IO.File]::WriteAllText($compilePath,'param([string]$Source,[string]$Output); $ErrorActionPreference="Stop"; Add-Type -TypeDefinition ([IO.File]::ReadAllText($Source)) -OutputAssembly $Output -OutputType ConsoleApplication',$utf8)
     $compiler = Start-Owned (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$compilePath,'-Source',$sourcePath,'-Output',$output)
-    Assert-Condition ((Wait-Owned $compiler 60) -eq 0 -and (Read-Version $output) -ceq '1.7.0') 'The explicit .NET Framework failure fixture didn''t compile.'
+    Assert-Condition ((Wait-Owned $compiler 60) -eq 0 -and (Read-Version $output) -ceq $native.version) 'The explicit .NET Framework failure fixture didn''t compile.'
     $script:faultSha = (Get-FileHash -LiteralPath $output).Hash
     return $output
 }
@@ -791,7 +832,7 @@ try {
                     $setupSha = if ($mode -ceq 'wrong-version') { $native.sha256 } else { $script:faultSha }
                     $attempt = Invoke-InstalledAgent $setup $oldSha $baselineVersion $setupSha
                 } finally { [Environment]::SetEnvironmentVariable('NL_CI_UPGRADE_FAULT',$oldFault,'Process') }
-                $version = if ($mode -ceq 'wrong-version') { '999.0.0' } else { '1.7.0' }
+                $version = if ($mode -ceq 'wrong-version') { '999.0.0' } else { $native.version }
                 $evidence = Assert-FailureSafety $attempt $before 8 $version
                 $evidence['legacySafety'] = if ($evidence.allPassed) { 'PASS' } else { 'KNOWN LIMITATION - safety assertions failed; this remains a failing case' }
                 Add-Check ('published-baseline-' + $mode + '-failure-safety') $(if ($evidence.allPassed) { 'PASS' } else { 'FAIL' }) $evidence
@@ -832,7 +873,7 @@ try {
                     $attempt = Invoke-InstalledAgent $setup $bridge.agentSha256 '1.6.1' $setupSha
                 } finally { [Environment]::SetEnvironmentVariable('NL_CI_UPGRADE_FAULT',$oldFault,'Process') }
                 $expectedCode = if ($mode -ceq 'partial') { 17 } else { 8 }
-                $version = if ($mode -ceq 'wrong-version') { '999.0.0' } else { '1.7.0' }
+                $version = if ($mode -ceq 'wrong-version') { '999.0.0' } else { $native.version }
                 $evidence = Assert-FailureSafety $attempt $before $expectedCode $version
                 Add-Check ('bridge-' + $mode + '-failure-safety') $(if ($evidence.allPassed) { 'PASS' } else { 'FAIL' }) $evidence
                 Assert-Condition $evidence.allPassed 'Bridge failure safety didn''t pass; later stages won''t consume an unproven recovery.'

@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AryaPaw/net-lights/releases/download/v1.7.0/NetLights-Setup-win-x64-1.7.0.exe"><strong>Скачать для Windows</strong></a>
+  <a href="https://github.com/AryaPaw/net-lights/releases/download/v1.7.1/NetLights-Setup-win-x64-1.7.1.exe"><strong>Скачать для Windows</strong></a>
   &nbsp;|&nbsp; <a href="#возможности">Возможности</a>
   &nbsp;|&nbsp; <a href="#установка">Установка</a>
   &nbsp;|&nbsp; <a href="docs/DEVELOPMENT.md">Разработчикам</a>
@@ -74,7 +74,7 @@
 
 Нужна **Windows 11 x64**. Права администратора и отдельный .NET Runtime не требуются.
 
-1. [Скачайте установщик 1.7.0](https://github.com/AryaPaw/net-lights/releases/download/v1.7.0/NetLights-Setup-win-x64-1.7.0.exe) и запустите его.
+1. [Скачайте установщик 1.7.1](https://github.com/AryaPaw/net-lights/releases/download/v1.7.1/NetLights-Setup-win-x64-1.7.1.exe) и запустите его.
 2. Нажмите на значок Net Lights в трее, чтобы открыть окно.
 3. При необходимости настройте адреса и частоту проверок. Определение страны включается отдельно в параметрах.
 

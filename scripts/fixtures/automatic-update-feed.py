@@ -11,6 +11,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import socketserver
 import ssl
@@ -44,15 +45,25 @@ def release(version, payload):
     }
 
 
-def route(host, method, path):
+def native_version(value):
+    if not isinstance(value, str) or not re.fullmatch(r"(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})", value):
+        raise ValueError("Fixture requires an exact native version")
+    parts = tuple(map(int, value.split(".")))
+    if parts < (1, 7, 0) or any(part > 65535 for part in parts):
+        raise ValueError("Fixture native version is outside the supported channel")
+    return value
+
+
+def route(host, method, path, version):
+    version = native_version(version)
     if host == "github.com" and method == "HEAD" and path == "/":
         return "probe", None
     if host == "api.github.com" and method == "GET":
         if path == LATEST:
             return "latest", "1.6.1"
         if path == LIST:
-            return "stable", "1.7.0"
-    for version in ("1.6.1", "1.7.0"):
+            return "stable", version
+    for version in ("1.6.1", version):
         name = f"NetLights-Setup-win-x64-{version}.exe"
         if method == "GET" and host == "github.com" and path == f"/AryaPaw/net-lights/releases/download/v{version}/{name}":
             return "redirect", version
@@ -67,8 +78,11 @@ class Fixture:
         self.events = []
         self.lock = threading.Lock()
         self.started = time.monotonic()
+        self.native_version = native_version(config.get("nativeVersion"))
         self.payloads = config["payloads"]
-        for version in ("1.6.1", "1.7.0"):
+        if not isinstance(self.payloads, dict) or set(self.payloads) != {"1.6.1", self.native_version}:
+            raise ValueError("Fixture requires exactly the bridge and native payloads")
+        for version in ("1.6.1", self.native_version):
             payload = self.payloads[version]
             path = Path(payload["path"])
             if path.stat().st_size != payload["bytes"] or not 0 < payload["bytes"] <= 80 * 1024 * 1024:
@@ -141,7 +155,7 @@ class InnerHandler(Handler):
             fixture.record("rejected-host")
             self.send_error(403)
             return
-        code, version = route(self.expected_host, self.command, self.path)
+        code, version = route(self.expected_host, self.command, self.path, fixture.native_version)
         fixture.record(code + "-request", version)
         if code == "reject":
             self.send_error(403)
@@ -200,15 +214,32 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 class Controls(unittest.TestCase):
     def test_exact_routes(self):
-        self.assertEqual(route("api.github.com", "GET", LATEST), ("latest", "1.6.1"))
-        self.assertEqual(route("api.github.com", "GET", LIST), ("stable", "1.7.0"))
-        for host, method, path in [
-            ("evil.invalid", "GET", LATEST), ("api.github.com", "POST", LIST),
-            ("api.github.com", "GET", LIST + "&page=2"),
-            ("github.com", "GET", "/other/releases/download/v1.7.0/setup.exe"),
-            ("github.com", "GET", "/AryaPaw/net-lights/releases/download/v1.7.0/../setup.exe"),
-        ]:
-            self.assertEqual(route(host, method, path), ("reject", None))
+        for version in ("1.7.0", "1.7.1", "1.8.0"):
+            with self.subTest(version=version):
+                self.assertEqual(route("api.github.com", "GET", LATEST, version), ("latest", "1.6.1"))
+                self.assertEqual(route("api.github.com", "GET", LIST, version), ("stable", version))
+                for payload in ("1.6.1", version):
+                    path = f"/AryaPaw/net-lights/releases/download/v{payload}/NetLights-Setup-win-x64-{payload}.exe"
+                    self.assertEqual(route("github.com", "GET", path, version), ("redirect", payload))
+                    self.assertEqual(route("release-assets.githubusercontent.com", "GET", f"/netlights-ci/{payload}", version), ("payload", payload))
+                for host, method, path in [
+                    ("evil.invalid", "GET", LATEST), ("api.github.com", "POST", LIST),
+                    ("api.github.com", "GET", LIST + "&page=2"),
+                    ("github.com", "GET", "/other/releases/download/v1.7.0/setup.exe"),
+                    ("github.com", "GET", f"/AryaPaw/net-lights/releases/download/v{version}/../setup.exe"),
+                    ("release-assets.githubusercontent.com", "GET", "/netlights-ci/9.9.9"),
+                ]:
+                    self.assertEqual(route(host, method, path, version), ("reject", None))
+                if version != "1.7.0":
+                    self.assertEqual(route("github.com", "GET", "/AryaPaw/net-lights/releases/download/v1.7.0/NetLights-Setup-win-x64-1.7.0.exe", version), ("reject", None))
+
+    def test_invalid_versions_and_payload_sets(self):
+        for value in (None, 171, "1.6.1", "1.7", "1.7.01", "1.7.1-beta", "65536.0.0", "1.7.1/../"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                native_version(value)
+        for payloads in ({}, {"1.6.1": {}}, {"1.6.1": {}, "1.7.0": {}}, {"1.6.1": {}, "1.7.1": {}, "9.9.9": {}}):
+            with self.subTest(payloads=payloads), self.assertRaises(ValueError):
+                Fixture({"nativeVersion": "1.7.1", "payloads": payloads}, Path("unused"))
 
     def test_release_binding(self):
         result = release("1.6.1", {"bytes": 12, "sha256": "A" * 64})

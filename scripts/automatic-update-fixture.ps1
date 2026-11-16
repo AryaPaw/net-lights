@@ -74,7 +74,7 @@ function Invoke-AutomaticUpgrade {
         foreach ($payload in @($bridge,$native)) {
             $payloads[$payload.version] = @{ path = $payload.installer; sha256 = $payload.sha256; bytes = (Get-Item -LiteralPath $payload.installer).Length }
         }
-        [IO.File]::WriteAllText((Join-Path $private 'config.json'),(@{payloads=$payloads} | ConvertTo-Json -Depth 5),$utf8)
+        [IO.File]::WriteAllText((Join-Path $private 'config.json'),(@{nativeVersion=$native.version;payloads=$payloads} | ConvertTo-Json -Depth 5),$utf8)
         # CurrentUser Root invokes a native confirmation dialog. Only inside
         # this administrative disposable VM, machine Root is noninteractive.
         # https://github.com/dotnet/runtime/issues/24160
@@ -112,27 +112,27 @@ function Invoke-AutomaticUpgrade {
         [Environment]::SetEnvironmentVariable('NO_PROXY','127.0.0.1,localhost','Process')
         # Install-Baseline enables automatic updates for this scenario only.
         # No agent command, staged installer or --exit-local handoff is issued
-        # by this test between the baseline and the final 1.7.0 process.
+        # by this test between the baseline and the final native process.
         $script:automaticChainRunning = $true
         Write-Host 'RUN: install unchanged published 1.6.0 with automatic updates enabled'
         $baselineAgentSha = Install-Baseline
         $baselinePid = (Get-App).Id
         [IO.File]::WriteAllText((Join-Path $private 'armed-1.6.1'),'go',$utf8)
-        Write-Host 'RUN: wait for automatic 1.6.0 -> 1.6.1 -> 1.7.0 without delaying the second hop'
+        Write-Host ('RUN: wait for automatic 1.6.0 -> 1.6.1 -> ' + $native.version + ' without delaying the second hop')
         # The bridge feed is immediately available. Holding it until the bridge
         # has lived for several seconds would hide overlapping update handoffs.
         $wait.Restart()
         $final = $null
         while (-not $final) {
-            Assert-Condition ($wait.Elapsed.TotalSeconds -lt 240) 'The automatic two-hop chain didn''t install and start native 1.7.0.'
+            Assert-Condition ($wait.Elapsed.TotalSeconds -lt 240) 'The automatic two-hop chain didn''t install and start the verified native version.'
             $statusPath = Join-Path $updates 'result.json'
             if ([IO.File]::Exists($statusPath)) {
                 $candidate = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
-                if ($candidate.version -ceq 'NetLights-Setup-win-x64-1.7.0.exe' -and $candidate.success -eq $true) { $final = $candidate }
+                if ($candidate.version -ceq $nativeName -and $candidate.success -eq $true) { $final = $candidate }
             }
             if (-not $final) { Start-Sleep -Milliseconds 100 }
         }
-        Assert-AttemptResult $final 'NetLights-Setup-win-x64-1.7.0.exe' $chainStarted ([DateTimeOffset]::UtcNow)
+        Assert-AttemptResult $final $nativeName $chainStarted ([DateTimeOffset]::UtcNow)
         $owner = Get-App
         Assert-Condition ($owner.Id -ne $baselinePid) 'The final process identity wasn''t replaced.'
         Assert-Live $owner
@@ -177,7 +177,7 @@ function Invoke-AutomaticUpgrade {
         Assert-Condition ($owner.Id -ne $bridgePid) 'The final process is still the bridge.'
         $events = Get-Content -LiteralPath (Join-Path $private 'events.json') -Raw | ConvertFrom-Json
         Assert-Condition (@($events | Where-Object { $_.code -match 'reject|error' }).Count -eq 0) 'The automatic fixture rejected a request or had a handler error.'
-        foreach ($version in @('1.6.1','1.7.0')) {
+        foreach ($version in @('1.6.1',$native.version)) {
             foreach ($code in @('redirect-request','payload-request','payload-complete')) {
                 Assert-Condition (@($events | Where-Object { $_.code -ceq $code -and $_.version -ceq $version }).Count -eq 1) 'The application didn''t download exactly one validated payload for each hop.'
             }

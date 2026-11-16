@@ -182,6 +182,8 @@ jobs:
             release: v1.6.0
           - scenario: Direct
             release: v1.4.2
+          - scenario: Direct
+            release: v1.7.0
           - scenario: Bridge
             release: v1.4.2
     steps:
@@ -216,8 +218,16 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Pinned historical installer download failed.' }
             $extra = @{BaselineSha256='31695b0eabb66fa52b69ac71a177c1a95480e2516678fdb8d519914e39639197'; BaselineBytes=59084561}
           }
+          if ('${{ matrix.release }}' -eq 'v1.7.0') {
+            $baseline = 'artifacts/NetLights-Setup-win-x64-1.7.0.exe'
+            & curl.exe --fail --location --proto '=https' --max-time 120 --max-redirs 5 --max-filesize 9685535 --output $baseline 'https://github.com/AryaPaw/net-lights/releases/download/v1.7.0/NetLights-Setup-win-x64-1.7.0.exe'
+            if ($LASTEXITCODE -ne 0) { throw 'Pinned native installer download failed.' }
+            $extra = @{BaselineSha256='4b36b1f7957cff32234fd6456ead1f29f9f68d635981c2f89af4b46972527931'; BaselineBytes=9685535}
+          }
+          $nativeInstallers = @(Get-ChildItem artifacts/native-ci/setup -File -Filter 'NetLights-Setup-win-x64-*.exe')
+          if ($nativeInstallers.Count -ne 1) { throw 'Expected exactly one verified native installer.' }
           $releasePath = '${{ matrix.release }}'.Replace('.','-')
-          scripts/test-ci-upgrade.ps1 -Scenario '${{ matrix.scenario }}' -ReleaseTag '${{ matrix.release }}' @extra -BaselineInstaller $baseline -BridgeInstaller artifacts/bridge-1.6.1-ci/setup/NetLights-Setup-win-x64-1.6.1.exe -BridgePublishDirectory artifacts/bridge-1.6.1-ci/publish -NativeInstaller artifacts/native-ci/setup/NetLights-Setup-win-x64-1.7.0.exe -NativePublishDirectory artifacts/native-ci/publish -ResultsDirectory "artifacts/ci-upgrade-${{ matrix.scenario }}-$releasePath"
+          scripts/test-ci-upgrade.ps1 -Scenario '${{ matrix.scenario }}' -ReleaseTag '${{ matrix.release }}' @extra -BaselineInstaller $baseline -BridgeInstaller artifacts/bridge-1.6.1-ci/setup/NetLights-Setup-win-x64-1.6.1.exe -BridgePublishDirectory artifacts/bridge-1.6.1-ci/publish -NativeInstaller $nativeInstallers[0].FullName -NativePublishDirectory artifacts/native-ci/publish -ResultsDirectory "artifacts/ci-upgrade-${{ matrix.scenario }}-$releasePath"
       - name: Upload upgrade evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -284,7 +294,9 @@ jobs:
         run: |
           uv python install 3.11
           if ($LASTEXITCODE -ne 0) { throw 'Fixture Python bootstrap failed.' }
-          scripts/test-ci-upgrade.ps1 -Scenario Automatic -BaselineInstaller artifacts/bridge-1.6.1-ci/NetLights-Setup-win-x64-1.6.0.exe -BridgeInstaller artifacts/bridge-1.6.1-ci/setup/NetLights-Setup-win-x64-1.6.1.exe -BridgePublishDirectory artifacts/bridge-1.6.1-ci/publish -NativeInstaller artifacts/native-ci/setup/NetLights-Setup-win-x64-1.7.0.exe -NativePublishDirectory artifacts/native-ci/publish -ResultsDirectory artifacts/ci-upgrade-Automatic
+          $nativeInstallers = @(Get-ChildItem artifacts/native-ci/setup -File -Filter 'NetLights-Setup-win-x64-*.exe')
+          if ($nativeInstallers.Count -ne 1) { throw 'Expected exactly one verified native installer.' }
+          scripts/test-ci-upgrade.ps1 -Scenario Automatic -BaselineInstaller artifacts/bridge-1.6.1-ci/NetLights-Setup-win-x64-1.6.0.exe -BridgeInstaller artifacts/bridge-1.6.1-ci/setup/NetLights-Setup-win-x64-1.6.1.exe -BridgePublishDirectory artifacts/bridge-1.6.1-ci/publish -NativeInstaller $nativeInstallers[0].FullName -NativePublishDirectory artifacts/native-ci/publish -ResultsDirectory artifacts/ci-upgrade-Automatic
       - name: Upload automatic chain evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
