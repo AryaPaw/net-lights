@@ -2406,7 +2406,6 @@ class Runner:
                 last_rect,settled_since=rect,time.monotonic()
             return rect if time.monotonic()-settled_since>=.35 else None
         caption=wait_for(settled_caption,5,"scrolling settles before marker coordinate measurement")
-        wait_for(lambda:int(time.time())%10<=2,8,"marker hover starts after the live axis refresh")
         outer = self.api.outer(self.uia.hwnd)
         safe = (outer[0]+100, outer[1]+100)
         self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,safe)
@@ -2442,10 +2441,30 @@ class Runner:
         observed=[]
         try:
             for row,(before,after) in enumerate(close):
+                self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,safe)
+                self.api.hover(self.uia.hwnd,safe)
+                def fresh_frame():
+                    controls=self.uia.call("inventory")
+                    bounds=sorted((r for r in controls if r["kind"]=="Text" and r["visible"]
+                        and re.fullmatch(r"\d{2}\.\d{2} \d{2}:\d{2}:\d{2}",r["name"])),key=lambda r:r["rect"][0])
+                    heading=next((r for r in controls if r["kind"]=="Text" and r["name"]=="Смена страны" and r["visible"]),None)
+                    if len(bounds)!=2 or heading is None:
+                        return None
+                    end=parse_bound(bounds[1]["name"])
+                    age=time.time()-end.timestamp()
+                    # Wait for the rendered model, not just the wall-clock phase.
+                    # Each hover gets its own window before the next invalidation.
+                    return (bounds,heading,end) if 0<=age<=3 and end.timestamp()%10<=3 else None
+                bounds,heading,domain_end=wait_for(fresh_frame,8,"a fresh painted axis before each marker hover")
+                domain_start=parse_bound(bounds[0]["name"])
+                assert (domain_end-domain_start).total_seconds()==3600
+                left,right=bounds[0]["rect"][0],bounds[1]["rect"][2]
+                caption=heading["rect"]
                 fraction=(parse(after["startedUtc"])-domain_start).total_seconds()/3600
                 x=left+(right-left)*fraction
                 # Caption gap + label top + measured row height + label centre.
                 target=(round(x),round(caption[3]+(4+12+18*row+7)*scale))
+                print(json.dumps(dict(marker_row=row,target=target,axis_start=stamp(domain_start),axis_end=stamp(domain_end),measured_utc=stamp(dt.datetime.now(dt.timezone.utc)))),flush=True)
                 a,b,c,d=self.content_bounds()
                 assert a<=target[0]<c and b<=target[1]<d, "A label escaped the visible page"
                 self.input_policy.move(self.api,self.uia.hwnd,self.process.pid,target)
