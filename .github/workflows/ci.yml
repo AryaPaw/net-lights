@@ -268,7 +268,7 @@ jobs:
           if ($env:SOURCE_RUN -cnotmatch '^[1-9][0-9]{0,15}$') { throw 'Expected a completed source CI run ID.' }
           $source = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Source run lookup failed.' }
-          if ($source.head_branch -cne 'codex/1.7.0-ci' -or $source.path -cne '.github/workflows/ci.yml' -or $source.status -cne 'completed' -or $source.head_repository.full_name -cne $env:GITHUB_REPOSITORY) { throw 'Source run identity is invalid.' }
+          if ($source.head_branch -cnotin @('main','codex/1.7.0-ci') -or $source.path -cne '.github/workflows/ci.yml' -or $source.status -cne 'completed' -or $source.conclusion -cne 'success' -or $source.event -cnotin @('push','workflow_dispatch') -or $source.head_repository.full_name -cne $env:GITHUB_REPOSITORY) { throw 'Source must be a successful full CI run of main or the authorized diagnostic branch in this repository.' }
           $jobs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN/jobs?per_page=100" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $jobs.total_count -gt 100) { throw 'Source job inventory is unavailable or exceeds its bound.' }
           foreach ($name in @('windows','bridge')) {
