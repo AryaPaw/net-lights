@@ -860,10 +860,11 @@ def native_clock_diagnostic(raw):
         readback_fields={"age_micros","pending_readbacks","map_ready","system_memory","front_present_qpc",
                          "poll_qpc","frequency","captured_frames","last_acquired_qpc","last_readback_qpc",
                          "last_released_qpc","last_enqueued_qpc"}
+        backend_fields={"system_memory","readback_frames"}
         if not isinstance(pairs,list):
             raise ValueError()
         fields={key for key,_ in pairs}
-        if fields not in (clock_fields,desktop_fields,readback_fields) or len(pairs)!=len(fields):
+        if fields not in (clock_fields,desktop_fields,readback_fields,backend_fields) or len(pairs)!=len(fields):
             raise ValueError()
         if any(type(value) is not int or not -(2**63)<=value<2**63 for _,value in pairs):
             raise ValueError()
@@ -875,6 +876,8 @@ def native_clock_diagnostic(raw):
         if fields==readback_fields and (not 0<=value["age_micros"] or not 1<=value["pending_readbacks"]<=16
                 or value["map_ready"] not in (-1,0,1) or value["system_memory"] not in (0,1)
                 or not 0<=value["captured_frames"]<=512):
+            raise ValueError()
+        if fields==backend_fields and (value["system_memory"] not in (0,1) or not 0<=value["readback_frames"]<=512):
             raise ValueError()
         return value
     except (UnicodeError,ValueError,TypeError):
@@ -903,7 +906,7 @@ class NavigationFrames:
         try:
             diagnostic=native_clock_diagnostic(self.process.stderr.read(8193))
             if diagnostic is not None:
-                field="desktop_diagnostic" if "accumulated_frames" in diagnostic else "readback_diagnostic" if "pending_readbacks" in diagnostic else "clock_diagnostic"
+                field="readback_backend" if "readback_frames" in diagnostic else "desktop_diagnostic" if "accumulated_frames" in diagnostic else "readback_diagnostic" if "pending_readbacks" in diagnostic else "clock_diagnostic"
                 self.report[field]=diagnostic
         finally:
             self.diagnostics_read=True
@@ -1011,6 +1014,9 @@ class NavigationFrames:
         self.reader.join(timeout=max(.001,deadline-time.monotonic()))
         if code!=0 or self.reader.is_alive() or self.reader_error is not None:
             raise RuntimeError("Native capture worker didn't exit cleanly")
+        backend=self.report.get("readback_backend")
+        if backend is None or backend["readback_frames"]!=len(self.frames):
+            raise RuntimeError("Native readback frame count differs from the received stream")
         self.process.stdin.close()
         self.process.stdout.close()
         self.finished=True
@@ -3619,7 +3625,9 @@ def navigation_motion_selftest():
         def __init__(self,**_):pass
         def start(self):raise RuntimeError("Injected reader start failure")
         def is_alive(self):return False
-    def scenario(records,success,code=0,hang=False,queue_size=256,start_failure=False,diagnostic=b""):
+    def scenario(records,success,code=0,hang=False,queue_size=256,start_failure=False,diagnostic=None):
+        if diagnostic is None:
+            diagnostic=encode(dict(system_memory=1,readback_frames=sum(record["kind"]=="frame" for record in records)))
         process=Process(b"".join(encode(record) for record in records),code,hang,diagnostic)
         reports=[]
         capture=NavigationFrames(None,None,23,17,(0,0,16,1),"owned-helper","a"*64,reports,
@@ -3643,10 +3651,11 @@ def navigation_motion_selftest():
         assert process.returncode is not None
         if diagnostic and len(diagnostic)<=8192:
             decoded=json.loads(diagnostic)
-            field="desktop_diagnostic" if "accumulated_frames" in decoded else "readback_diagnostic" if "pending_readbacks" in decoded else "clock_diagnostic"
+            field="readback_backend" if "readback_frames" in decoded else "desktop_diagnostic" if "accumulated_frames" in decoded else "readback_diagnostic" if "pending_readbacks" in decoded else "clock_diagnostic"
             assert reports[0][field]==decoded
     complete=[ready,frame,dict(frame,qpc=300),end]
     scenario(complete,True)
+    scenario(complete,False,diagnostic=b"")
     scenario([ready,frame],False)
     scenario(complete,False,code=7)
     scenario(complete,False,hang=True)
@@ -3660,7 +3669,7 @@ def navigation_motion_selftest():
     for invalid in (b"x"*8193,encode(dict(diagnostic,frequency=True)),encode(dict(diagnostic,duration=2**63)),
                     encode(dict(diagnostic,path="secret")),encode(diagnostic)+encode(diagnostic),b'{"duration":1,"duration":2}\n'):
         rejected(lambda:native_clock_diagnostic(invalid))
-    scenario(complete,True,diagnostic=encode(diagnostic))
+    scenario(complete,False,diagnostic=encode(diagnostic))
     scenario(complete,False,code=7,diagnostic=encode(diagnostic))
     desktop=dict(present_qpc=122,accumulated_frames=2,metadata_bytes=8,mouse_qpc=0,
                  received_qpc=123,previous_qpc=120,frequency=1000,last_acquired_qpc=120,
@@ -3673,6 +3682,13 @@ def navigation_motion_selftest():
     for invalid in (dict(readback,pending_readbacks=17),dict(readback,map_ready=True),dict(readback,system_memory=2),dict(readback,age_micros=-1),dict(readback,extra=0)):
         rejected(lambda:native_clock_diagnostic(encode(invalid)))
     scenario(complete,False,code=7,diagnostic=encode(readback))
+    backend=dict(system_memory=1,readback_frames=2)
+    scenario(complete,True,diagnostic=encode(backend))
+    scenario(complete,False,code=7,diagnostic=encode(backend))
+    scenario(complete,False,diagnostic=encode(dict(backend,readback_frames=1)))
+    for invalid in (dict(backend,system_memory=True),dict(backend,system_memory=2),
+                    dict(backend,readback_frames=-1),dict(backend,readback_frames=513),dict(backend,extra=0)):
+        rejected(lambda:native_clock_diagnostic(encode(invalid)))
     for invalid in (dict(desktop,accumulated_frames=True),dict(desktop,accumulated_frames=2**32),
                     dict(desktop,metadata_bytes=-1),dict(desktop,captured_frames=513),
                     dict(desktop,extra=0)):

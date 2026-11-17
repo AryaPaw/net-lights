@@ -1,4 +1,6 @@
-use super::super::readback::{CAPACITY, Queue};
+use super::super::readback::{CAPACITY, DEADLINE, Queue};
+#[path = "capture_desktop.rs"]
+mod desktop_memory;
 use super::stream::{self, Event};
 use super::*;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
@@ -241,6 +243,7 @@ fn capture_frames(
         return Err(Failure("duplication_geometry", 0));
     }
     let (width, height) = dimensions(spec.roi).ok_or(Failure("roi_size", 0))?;
+    let system_memory = duplication_desc.DesktopImageInSystemMemory.as_bool();
     let staging_desc = D3D11_TEXTURE2D_DESC {
         Width: width,
         Height: height,
@@ -256,7 +259,7 @@ fn capture_frames(
         ..Default::default()
     };
     let mut free = Vec::with_capacity(CAPACITY);
-    for _ in 0..CAPACITY {
+    for _ in 0..if system_memory { 0 } else { CAPACITY } {
         let mut texture = None;
         checked(
             unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut texture)) },
@@ -427,6 +430,40 @@ fn capture_frames(
         {
             return Err(Failure("source_layout", 0));
         }
+        if system_memory {
+            // DXGI already owns CPU-readable pixels here. A staging roundtrip
+            // adds unnecessary work and delays readback behind acquisition.
+            let pixels = desktop_memory::read(&duplication, (size.0 as u32, size.1 as u32), local)?;
+            checked(
+                unsafe { QueryPerformanceCounter(&mut previous_stages[1]) },
+                "frame_qpc",
+            )?;
+            drop(source);
+            acquired.close()?;
+            previous_stages[0] = acquired_qpc;
+            checked(
+                unsafe { QueryPerformanceCounter(&mut previous_stages[2]) },
+                "release_qpc",
+            )?;
+            previous = present.ok_or(Failure("missing_present_time", 0))?;
+            unobscured(spec, initial)?;
+            bytes += pixels.len();
+            if bytes > 32 * 1024 * 1024 {
+                return Err(Failure("pixel_bound", 0));
+            }
+            emit(Event::Frame {
+                qpc: previous,
+                width,
+                height,
+                pixels,
+            })?;
+            checked(
+                unsafe { QueryPerformanceCounter(&mut previous_stages[3]) },
+                "enqueue_qpc",
+            )?;
+            captured_frames += 1;
+            continue;
+        }
         let texture = free.pop().ok_or(Failure("readback_queue_overflow", 0))?;
         let submitted = Instant::now();
         // Submit a copy to our own surface before releasing DXGI ownership.
@@ -455,6 +492,11 @@ fn capture_frames(
     }
     let mut end = 0;
     checked(unsafe { QueryPerformanceCounter(&mut end) }, "end_qpc")?;
+    eprintln!(
+        "{{\"system_memory\":{},\"readback_frames\":{}}}",
+        i32::from(system_memory),
+        captured_frames
+    );
     emit(Event::End(end))?;
     Ok(())
 }

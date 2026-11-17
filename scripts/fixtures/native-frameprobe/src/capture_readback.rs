@@ -7,7 +7,7 @@ use std::{
 // Sixteen maximum-sized ROIs contain 4 MiB of pixel payload; driver allocation
 // and row-pitch alignment can add overhead to the staging surfaces.
 pub(super) const CAPACITY: usize = 16;
-const DEADLINE: Duration = Duration::from_millis(100);
+pub(super) const DEADLINE: Duration = Duration::from_millis(100);
 
 pub(super) struct Queue<T> {
     items: VecDeque<(Instant, T)>,
