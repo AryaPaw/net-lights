@@ -5,6 +5,7 @@ param(
     [string]$ExpectedSha256,
     [switch]$FunctionalUI,
     [switch]$NavigationMeasurement,
+    [switch]$CaptureStartupOnly,
     [switch]$HostedResource,
     [string]$RawProfileDirectory,
     [switch]$CoverageInstrumented,
@@ -194,6 +195,7 @@ function Assert-Amd64Pe([string]$Path) {
     }finally{$reader.Dispose()}
 }
 function Assert-UiEvidence($Evidence,[string]$Scope,[string]$Nonce,[string]$AppHash,[string]$RunnerHash,[bool]$ExpectCoverageInstrumented=$false,[bool]$ExpectHostedResource=$false,[bool]$ExpectNavigationMeasurement=$true) {
+    if($Evidence.metadata.capture_startup_only -isnot [bool] -or $Evidence.metadata.capture_startup_only) {throw 'A focused capture run cannot satisfy the full UI gate.'}
     if($ExpectHostedResource) {
         $measurement=@($Evidence.checks | Where-Object check -CEQ 'resource-measurement')
         if($Evidence.metadata.evidenceLevel -cne 'GitHub-hosted Windows resource measurement' -or $Evidence.metadata.visualAcceptance -cne 'NOT RUN' -or
@@ -223,21 +225,55 @@ function Assert-UiEvidence($Evidence,[string]$Scope,[string]$Nonce,[string]$AppH
     $navigation=@($Evidence.checks|Where-Object check -CEQ 'fluent-tabs-about-and-settings-navigation')
     if($navigation[0].detail.navigation_motion.smoothness -cne $smoothness) {throw 'Navigation detail contradicts the requested smoothness evidence.'}
 }
-function Assert-FrameprobeEvidence($Evidence,[string]$ExpectedHash) {
-    if($ExpectedHash -cnotmatch '^[A-Fa-f0-9]{64}$' -or $Evidence.metadata.navigation_frameprobe_sha256 -ine $ExpectedHash) {throw 'Native frame producer identity differs.'}
-    $workers=@($Evidence.metadata.navigation_capture_workers)
-    if($workers.Count -ne 3 -or @($workers.pid|Sort-Object -Unique).Count -ne 3) {throw 'Three owned native frame producers are required.'}
+function Assert-CaptureWorkers($Workers,[string]$ExpectedHash,[int]$ExpectedCount,[bool]$RequireMotion) {
+    $workers=@($Workers)
+    if($ExpectedHash -cnotmatch '^[A-Fa-f0-9]{64}$' -or $workers.Count -ne $ExpectedCount -or @($workers.pid|Sort-Object -Unique).Count -ne $ExpectedCount) {throw 'Owned native frame producer identities are incomplete.'}
+    $index=0
     foreach($worker in $workers) {
         foreach($field in @('pid','exit_code','frames','frequency','end_qpc','pointer_updates')) {
             if($worker.$field -isnot [long] -and $worker.$field -isnot [int]) {throw 'Native frame producer numeric evidence is invalid.'}
         }
         if($worker.pid -lt 1 -or $worker.sha256 -ine $ExpectedHash -or $worker.mode -cne 'DXGI Desktop Duplication' -or $worker.pointer_updates -lt 0 -or $worker.pointer_updates -gt 512 -or
-           $worker.cleanup -cne 'PASS' -or $worker.exit_code -ne 0 -or $worker.frames -lt 1 -or $worker.frames -gt 512 -or $worker.frequency -le 0 -or $worker.frequency -gt 10000000000 -or $worker.end_qpc -lt 1) {throw 'Native frame producer cleanup or clock evidence is incomplete.'}
+           $worker.cleanup -cne 'PASS' -or $worker.exit_code -ne 0 -or $worker.frames -lt 0 -or $worker.frames -ge 512 -or $worker.frequency -le 0 -or $worker.frequency -gt 10000000000 -or $worker.end_qpc -lt 1) {throw 'Native frame producer cleanup or clock evidence is incomplete.'}
+        foreach($field in @('qpc','accumulated_frames')) {
+            if($worker.baseline.$field -isnot [long] -and $worker.baseline.$field -isnot [int]) {throw 'The actual initial image metadata is missing.'}
+        }
+        foreach($field in @('system_memory','readback_frames')) {
+            if($worker.readback_backend.$field -isnot [long] -and $worker.readback_backend.$field -isnot [int]) {throw 'The native readback backend is missing.'}
+        }
+        if($worker.baseline.qpc -lt 1 -or $worker.baseline.qpc -gt $worker.end_qpc -or $worker.baseline.accumulated_frames -lt 1 -or
+           $worker.baseline.accumulated_frames -gt 4294967295 -or $worker.readback_backend.system_memory -notin @(0,1) -or
+           $worker.readback_backend.readback_frames -ne (1+$worker.frames) -or ($RequireMotion -and $index -lt 2 -and $worker.frames -lt 1)) {throw 'Initial image, runtime frames and native readback counts disagree.'}
+        if($RequireMotion -and $index -lt 2) {
+            if(($worker.input_qpc -isnot [long] -and $worker.input_qpc -isnot [int]) -or $worker.input_qpc -le $worker.baseline.qpc -or $worker.input_qpc -gt $worker.end_qpc) {throw 'The measured input barrier is missing or precedes the initial image.'}
+        }
+        $index++
     }
+}
+function Assert-FrameprobeEvidence($Evidence,[string]$ExpectedHash) {
+    if($Evidence.metadata.navigation_frameprobe_sha256 -ine $ExpectedHash) {throw 'Native frame producer identity differs.'}
+    Assert-CaptureWorkers $Evidence.metadata.navigation_capture_workers $ExpectedHash 3 $true
+}
+function Assert-CaptureStartupEvidence($Evidence,[string]$AppHash,[string]$ExpectedHash) {
+    foreach($field in @('capture_startup_only','assertions_enabled','coverage_instrumented','navigation_measurement_requested','physical_input')) {
+        if($Evidence.metadata.$field -isnot [bool]) {throw 'Focused startup evidence flags must be booleans.'}
+    }
+    if($Evidence.metadata.capture_startup_only -cne $true -or $Evidence.metadata.assertions_enabled -cne $true -or
+       $Evidence.metadata.exe_sha256 -ine $AppHash -or $Evidence.metadata.navigation_frameprobe_sha256 -ine $ExpectedHash -or
+       $Evidence.metadata.coverage_instrumented -cne $false -or $Evidence.metadata.navigation_measurement_requested -cne $false -or
+       $Evidence.metadata.navigation_smoothness -cne 'NOT RUN' -or $Evidence.metadata.physical_input -cne $true -or
+       $Evidence.metadata.input_isolation.scope -cne 'GitHub-hosted Windows VM' -or
+       $Evidence.metadata.fixture.offline_availability_endpoints -cne $true -or $Evidence.metadata.fixture.live_country_detection -cne $false -or
+       $Evidence.metadata.evidenceLevel -cne 'functional' -or $Evidence.metadata.visualAcceptance -cne 'NOT RUN' -or
+       @($Evidence.metadata.pids).Count -ne 1 -or $Evidence.metadata.pids[0] -lt 1 -or @($Evidence.cleanup_errors).Count -or @($Evidence.resource_errors).Count -or
+       @($Evidence.checks|Where-Object {$_.result -cne 'PASS' -and -not($_.check -ceq 'resource-measurement' -and $_.result -ceq 'NOT RUN')}).Count) {throw 'Focused startup evidence is failed, incomplete or belongs to other inputs.'}
+    $check=@($Evidence.checks|Where-Object check -CEQ 'capture-startup')
+    if($check.Count -ne 1 -or $check[0].result -cne 'PASS' -or $check[0].detail.starts -ne 10 -or @($Evidence.metadata.navigation_capture_workers).Count) {throw 'The ten independent startup checks are missing.'}
+    Assert-CaptureWorkers $Evidence.metadata.capture_startup_workers $ExpectedHash 10 $false
 }
 
 if($SelfTest) {
-    if($Executable -or $ExpectedSha256 -or $RawProfileDirectory -or $FunctionalUI -or $NavigationMeasurement -or $HostedResource -or $CoverageInstrumented -or $MeasureSeconds -or $EnableCountryForMeasurement -or $MaximumHistory) {throw 'SelfTest cannot be combined with a UI run.'}
+    if($Executable -or $ExpectedSha256 -or $RawProfileDirectory -or $FunctionalUI -or $NavigationMeasurement -or $CaptureStartupOnly -or $HostedResource -or $CoverageInstrumented -or $MeasureSeconds -or $EnableCountryForMeasurement -or $MaximumHistory) {throw 'SelfTest cannot be combined with a UI run.'}
     & uv run --offline --cache-dir (Join-Path $repository 'artifacts/uv-cache') --python 3.11 python (Join-Path $PSScriptRoot 'native-ui-smoke.py') --self-test-uia
     if($LASTEXITCODE -ne 0){throw 'Read-only UIA retry controls FAIL.'}
     $rejected=$false;try{Assert-ArtifactPath (Join-Path $repository 'native')|Out-Null}catch{$rejected=$true}
@@ -253,7 +289,7 @@ if($SelfTest) {
     $functionText=${function:Assert-UiEvidence}.ToString()
     if(-not $functionText.Contains("'locale-English-restart-system-Russian'") -or -not $functionText.Contains("'state-no-duplicate-provider-world'")){throw 'Locale acceptance guards are missing.'}
     $good=@{metadata=@{exe_sha256=('a'*64);physical_input=$true;input_isolation=@{scope='Windows Sandbox';nonce=('b'*32);app_sha256=('a'*64);runner_sha256=('c'*64)};
-        fixture=@{offline_availability_endpoints=$true;live_country_detection=$false};coverage_instrumented=$false;navigation_measurement_requested=$true;navigation_capture_workers=@();navigation_smoothness='PASS';assertions_enabled=$true;locale_required=$true;locale_verified=$true;pids=@(1,2,3,4,5)};
+        fixture=@{offline_availability_endpoints=$true;live_country_detection=$false};capture_startup_only=$false;coverage_instrumented=$false;navigation_measurement_requested=$true;navigation_capture_workers=@();navigation_smoothness='PASS';assertions_enabled=$true;locale_required=$true;locale_verified=$true;pids=@(1,2,3,4,5)};
         cleanup_errors=@();resource_errors=@();resource_samples=1;checks=@()}
     $names=@('fluent-tabs-about-and-settings-navigation','physical-outer-geometry-reset-and-restart','native-caption-controls-and-hittest','default-debug-off','dropdown-wheel-does-not-change-settings','X-hide-and-show-local-same-PID','Debug-on-and-off-survive-restart','history-end-and-single-scroll-owner','state-no-duplicate-provider-world','locale-English-restart-system-Russian')
     foreach($page in @('Состояние','Локации')){foreach($hours in @(1,3,6,12,24,72,120,168)){$names+="$page-${hours}h"}}
@@ -333,9 +369,9 @@ if($SelfTest) {
         $rejected=$false;try{Assert-UiEvidence $bad 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64) -ExpectCoverageInstrumented $true -ExpectNavigationMeasurement $false}catch{$rejected=$true}
         if(-not $rejected){throw "Invalid instrumented $kind evidence was accepted."}
     }
-    $capture=@{metadata=@{navigation_frameprobe_sha256=('d'*64);navigation_capture_workers=@(1..3|ForEach-Object {@{pid=$_;sha256=('d'*64);mode='DXGI Desktop Duplication';cleanup='PASS';exit_code=0;frames=3;frequency=1000;end_qpc=10000;pointer_updates=0}})}}
+    $capture=@{metadata=@{navigation_frameprobe_sha256=('d'*64);navigation_capture_workers=@(1..3|ForEach-Object {@{pid=$_;sha256=('d'*64);mode='DXGI Desktop Duplication';cleanup='PASS';exit_code=0;frames=3;frequency=1000;end_qpc=10000;pointer_updates=0;input_qpc=100;baseline=@{qpc=50;accumulated_frames=2};readback_backend=@{system_memory=1;readback_frames=4}}})}}
     Assert-FrameprobeEvidence $capture ('d'*64)
-    foreach($kind in @('hash','missing','duplicate','cleanup','exit','clock','source','pointer-bound')) {
+    foreach($kind in @('hash','missing','duplicate','cleanup','exit','clock','source','pointer-bound','baseline','baseline-clock','backend-count','runtime-missing','input-clock')) {
         $bad=ConvertFrom-Json (ConvertTo-Json $capture -Depth 12)
         switch($kind) {
             'hash'{$bad.metadata.navigation_frameprobe_sha256=('e'*64)}
@@ -346,10 +382,52 @@ if($SelfTest) {
             'clock'{$bad.metadata.navigation_capture_workers[0].frequency=0}
             'source'{$bad.metadata.navigation_capture_workers[0].mode='Windows.Graphics.Capture'}
             'pointer-bound'{$bad.metadata.navigation_capture_workers[0].pointer_updates=513}
+            'baseline'{$bad.metadata.navigation_capture_workers[0].baseline.accumulated_frames=0}
+            'baseline-clock'{$bad.metadata.navigation_capture_workers[0].baseline.qpc=10001}
+            'backend-count'{$bad.metadata.navigation_capture_workers[0].readback_backend.readback_frames=3}
+            'runtime-missing'{$bad.metadata.navigation_capture_workers[0].frames=0;$bad.metadata.navigation_capture_workers[0].readback_backend.readback_frames=1}
+            'input-clock'{$bad.metadata.navigation_capture_workers[0].input_qpc=50}
         }
         $rejected=$false;try{Assert-FrameprobeEvidence $bad ('d'*64)}catch{$rejected=$true}
         if(-not $rejected){throw "Invalid native capture $kind evidence was accepted."}
     }
+    $baselineOnly=ConvertFrom-Json (ConvertTo-Json $capture -Depth 12)
+    $baselineOnly.metadata.navigation_capture_workers[2].frames=0
+    $baselineOnly.metadata.navigation_capture_workers[2].readback_backend.readback_frames=1
+    Assert-FrameprobeEvidence $baselineOnly ('d'*64)
+    $startup=ConvertFrom-Json (ConvertTo-Json $good -Depth 12)
+    $startup.metadata.capture_startup_only=$true
+    $startup.metadata.navigation_measurement_requested=$false
+    $startup.metadata.navigation_smoothness='NOT RUN'
+    $startup.metadata.pids=@(77)
+    $startup.metadata.input_isolation.scope='GitHub-hosted Windows VM'
+    $startup.metadata | Add-Member -NotePropertyName evidenceLevel -NotePropertyValue 'functional'
+    $startup.metadata | Add-Member -NotePropertyName visualAcceptance -NotePropertyValue 'NOT RUN'
+    $startup.metadata | Add-Member -NotePropertyName navigation_frameprobe_sha256 -NotePropertyValue ('d'*64)
+    $startup.metadata | Add-Member -NotePropertyName capture_startup_workers -NotePropertyValue @(1..10|ForEach-Object {
+        @{pid=$_;sha256=('d'*64);mode='DXGI Desktop Duplication';cleanup='PASS';exit_code=0;frames=0;frequency=1000;end_qpc=10000;pointer_updates=0;baseline=@{qpc=50;accumulated_frames=2};readback_backend=@{system_memory=1;readback_frames=1}}
+    })
+    $startup.checks=@(@{check='capture-startup';result='PASS';detail=@{starts=10}},@{check='resource-measurement';result='NOT RUN'})
+    Assert-CaptureStartupEvidence $startup ('a'*64) ('d'*64)
+    foreach($kind in @('scope','scope-type','hash','missing-start','failed','smoothness','cleanup','input')) {
+        $bad=ConvertFrom-Json (ConvertTo-Json $startup -Depth 12)
+        switch($kind) {
+            'scope'{$bad.metadata.capture_startup_only=$false}
+            'scope-type'{$bad.metadata.capture_startup_only='True'}
+            'hash'{$bad.metadata.exe_sha256=('e'*64)}
+            'missing-start'{$bad.metadata.capture_startup_workers=$bad.metadata.capture_startup_workers[0..8]}
+            'failed'{$bad.checks[0].result='FAIL'}
+            'smoothness'{$bad.metadata.navigation_smoothness='PASS'}
+            'cleanup'{$bad.cleanup_errors=@('owned cleanup failure')}
+            'input'{$bad.metadata.physical_input=$false}
+        }
+        $rejected=$false;try{Assert-CaptureStartupEvidence $bad ('a'*64) ('d'*64)}catch{$rejected=$true}
+        if(-not $rejected){throw "Invalid focused startup $kind evidence was accepted."}
+    }
+    $bad=ConvertFrom-Json (ConvertTo-Json $good -Depth 12)
+    $bad.metadata.capture_startup_only=$true
+    $rejected=$false;try{Assert-UiEvidence $bad 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64)}catch{$rejected=$true}
+    if(-not $rejected){throw 'Focused startup evidence satisfied the mandatory full UI gate.'}
     $fixture=Join-Path $repository ('artifacts/ui-runtime-controls-'+[Guid]::NewGuid().ToString('N'))
     $alias=Join-Path $fixture 'cpython-3.11-windows-x86_64-none'
     $physical=Join-Path $fixture 'cpython-3.11.15-windows-x86_64-none'
@@ -389,6 +467,7 @@ if(-not $Executable -or $ExpectedSha256 -cnotmatch '^[A-Fa-f0-9]{64}$') {throw '
 if($CoverageInstrumented -and -not $RawProfileDirectory) {throw 'CoverageInstrumented requires an explicit RawProfileDirectory.'}
 if($FunctionalUI -and ($MeasureSeconds -or $EnableCountryForMeasurement)) {throw 'FunctionalUI requires offline checks without measurement.'}
 if($NavigationMeasurement -and (-not $FunctionalUI -or $CoverageInstrumented)) {throw 'NavigationMeasurement requires non-instrumented FunctionalUI.'}
+if($CaptureStartupOnly -and (-not $FunctionalUI -or $NavigationMeasurement -or $CoverageInstrumented -or $HostedResource -or $MeasureSeconds -or $EnableCountryForMeasurement -or $MaximumHistory)) {throw 'CaptureStartupOnly requires a separate non-instrumented functional run.'}
 $expectNavigationMeasurement=-not $CoverageInstrumented -and (-not $FunctionalUI -or $NavigationMeasurement)
 if($HostedResource -and ($FunctionalUI -or $CoverageInstrumented -or $MeasureSeconds -ne 3600 -or -not $EnableCountryForMeasurement -or -not $MaximumHistory)) {throw 'HostedResource requires a normal executable, one hour, both databases and maximum history.'}
 if($EnableCountryForMeasurement -and -not $MeasureSeconds) {throw 'Country measurement requires a positive duration.'}
@@ -670,14 +749,19 @@ try {
         $arguments=$uvPrefix+@('--exe',$app,'--output',$ui,'--expected-sha256',$ExpectedSha256,'--isolated-ci-input','--measure-seconds',[string]$MeasureSeconds,'--frameprobe',$frameprobe,'--frameprobe-sha256',$frameprobeHash)
         if($FunctionalUI){$arguments+='--functional-evidence'}
         if($NavigationMeasurement){$arguments+='--navigation-measurement'}
+        if($CaptureStartupOnly){$arguments+='--capture-startup-only'}
         if($HostedResource){$arguments+='--hosted-resource-evidence'}
         if($CoverageInstrumented){$arguments+='--coverage-instrumented'}
         if($MaximumHistory){$arguments+='--maximum-history'}
         if($EnableCountryForMeasurement){$arguments+='--enable-country-for-measurement'}
         Invoke-CommandBounded 'isolated-ci-ui' $uv $arguments $timeout -Environment $environment|Out-Null
         $evidence=Get-Content -LiteralPath (Join-Path $ui 'results.json') -Raw|ConvertFrom-Json
-        Assert-UiEvidence $evidence 'GitHub-hosted Windows VM' $nonce $ExpectedSha256 $runnerHash ([bool]$CoverageInstrumented) ([bool]$HostedResource) ([bool]$expectNavigationMeasurement)
-        if($expectNavigationMeasurement){Assert-FrameprobeEvidence $evidence $frameprobeHash}
+        if($CaptureStartupOnly) {
+            Assert-CaptureStartupEvidence $evidence $ExpectedSha256 $frameprobeHash
+        } else {
+            Assert-UiEvidence $evidence 'GitHub-hosted Windows VM' $nonce $ExpectedSha256 $runnerHash ([bool]$CoverageInstrumented) ([bool]$HostedResource) ([bool]$expectNavigationMeasurement)
+            if($expectNavigationMeasurement){Assert-FrameprobeEvidence $evidence $frameprobeHash}
+        }
         $receipt.uiResults=Join-Path $ui 'results.json'
     }else {
         if(@(Sandbox-Ids).Count){throw 'Another Sandbox exists; no environment will be reused, reconnected or stopped.'}

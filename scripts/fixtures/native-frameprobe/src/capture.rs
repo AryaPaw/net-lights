@@ -200,6 +200,21 @@ fn desktop_frame_time(
     }
     checked_qpc(present, received, previous).map(Some)
 }
+// Before the consumer can send input, establish the actual initial image.
+// DXGI may have accumulated desktop updates before this first acquisition.
+// Keep its real counter; this snapshot isn't an animation sample.
+fn desktop_baseline_time(
+    present: i64,
+    accumulated: u32,
+    metadata: u32,
+    mouse: i64,
+    received: i64,
+) -> Result<Option<i64>, Failure> {
+    if accumulated == 0 {
+        return desktop_frame_time(present, accumulated, metadata, mouse, received, 0);
+    }
+    checked_qpc(present, received, 0).map(Some)
+}
 pub fn error(code: &'static str, hresult: i32) {
     println!("{{\"kind\":\"error\",\"code\":\"{code}\",\"hresult\":{hresult}}}");
 }
@@ -373,6 +388,27 @@ mod tests {
             assert!(
                 desktop_frame_time(event.0, event.1, event.2, event.3, event.4, event.5).is_err()
             );
+        }
+    }
+    #[test]
+    fn initial_snapshot_keeps_its_real_count_but_runtime_loss_remains_an_error() {
+        assert_eq!(desktop_baseline_time(98, 2, 8, 99, 100).unwrap(), Some(98));
+        assert_eq!(desktop_baseline_time(0, 0, 0, 99, 100).unwrap(), None);
+        assert_eq!(
+            desktop_frame_time(101, 2, 8, 99, 102, 98),
+            Err(Failure("accumulated_frames", 0))
+        );
+        assert_eq!(
+            desktop_frame_time(101, 1, 8, 99, 102, 98).unwrap(),
+            Some(101)
+        );
+        for event in [
+            (0, 2, 8, 99, 100),
+            (101, 2, 8, 99, 100),
+            (0, 0, 8, 99, 100),
+            (0, 0, 0, 101, 100),
+        ] {
+            assert!(desktop_baseline_time(event.0, event.1, event.2, event.3, event.4).is_err());
         }
     }
     #[test]

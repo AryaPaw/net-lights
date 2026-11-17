@@ -5,13 +5,15 @@ param(
     [switch]$FunctionalUI,
     [switch]$Legacy,
     [switch]$ResourceRun,
-    [switch]$Preflight
+    [switch]$Preflight,
+    [switch]$CapturePreflight
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($NativeUI -and $FunctionalUI) { throw 'Select visual NativeUI or FunctionalUI evidence, not both.' }
 if ($ResourceRun -and $FunctionalUI) { throw 'ResourceRun requires visual UI evidence, not offline FunctionalUI.' }
 if ($Preflight -and ($NativeUI -or $FunctionalUI -or $Legacy -or $ResourceRun)) { throw 'Preflight is a separate headless check, not full verification.' }
+if ($CapturePreflight -and ($Preflight -or $NativeUI -or $FunctionalUI -or $Legacy -or $ResourceRun)) { throw 'CapturePreflight is a separate headless fixture check.' }
 $root = Split-Path -Parent $PSScriptRoot
 $savedRustupToolchain = [Environment]::GetEnvironmentVariable('RUSTUP_TOOLCHAIN','Process')
 $savedPythonOptimize = [Environment]::GetEnvironmentVariable('PYTHONOPTIMIZE','Process')
@@ -65,6 +67,36 @@ try {
     )
     $syntaxErrors | Set-Content -LiteralPath (Join-Path $results 'powershell-syntax.log') -Encoding utf8
     if ($syntaxErrors.Count) { throw 'PowerShell syntax checks FAIL; see powershell-syntax.log.' }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'check-workflows.ps1') -ResultsDirectory (Join-Path $results 'workflows') *> (Join-Path $results 'workflow-controls.log')
+    if ($LASTEXITCODE -ne 0) { Get-Content -LiteralPath (Join-Path $results 'workflow-controls.log') -Tail 40; throw 'Workflow static checks FAIL.' }
+    function Invoke-Cargo([string]$Name,[string[]]$Arguments) {
+        $log = Join-Path $results "$Name.log"
+        Write-Host "RUN: cargo $($Arguments -join ' ')"
+        & cargo @Arguments *> $log
+        if ($LASTEXITCODE -ne 0) { Get-Content -LiteralPath $log -Tail 100; throw "$Name FAIL ($LASTEXITCODE): $log" }
+        Get-Content -LiteralPath $log -Tail 8
+    }
+    $nativeRustChannel = [regex]::Match((Get-Content -LiteralPath (Join-Path $root 'rust-toolchain.toml') -Raw),'(?m)^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$').Groups[1].Value
+    if (-not $nativeRustChannel) { throw 'The native test toolchain must be pinned to an exact Rust version.' }
+    [Environment]::SetEnvironmentVariable('RUSTUP_TOOLCHAIN',$nativeRustChannel,'Process')
+    [string[]]$cargoProfileArguments = @(if ($Configuration -eq 'Release') { '--release' })
+    $frameArguments=@('--manifest-path','scripts/fixtures/native-frameprobe/Cargo.toml','--locked','--target-dir','artifacts/frameprobe-target','-j','4')+$cargoProfileArguments
+    function Test-Frameprobe {
+        Invoke-Cargo 'format-frameprobe' @('fmt','--manifest-path','scripts/fixtures/native-frameprobe/Cargo.toml','--','--check')
+        Invoke-Cargo 'lint-frameprobe' (@('clippy','--all-targets')+$frameArguments+@('--','-D','warnings'))
+        Invoke-Cargo 'tests-frameprobe' (@('test')+$frameArguments+@('--','--test-threads=1'))
+    }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'select-verification-scope.ps1') -SelfTest *> (Join-Path $results 'verification-scope-controls.log')
+    if ($LASTEXITCODE -ne 0) { throw 'Verification scope controls FAIL.' }
+    if ($CapturePreflight) {
+        & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-native-ui.ps1') -SelfTest *> (Join-Path $results 'ui-isolation-controls.log')
+        if ($LASTEXITCODE -ne 0) { throw 'UI isolation controls FAIL.' }
+        Test-Frameprobe
+        Assert-SourceUnchanged
+        Write-Host "RUN - PASS: capture contract $Configuration preflight. Logs: $results"
+        Write-Host 'NOT RUN: application tests/build, runtime coverage, GUI, installed updates, motion and resources. This is not full verification.'
+        return
+    }
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-resource-stability.ps1') -SelfTest *> (Join-Path $results 'resource-gate-selftest.log')
     if ($LASTEXITCODE -ne 0) { throw 'Resource analyzer controls FAIL.' }
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test-native-ui.ps1') -SelfTest *> (Join-Path $results 'ui-isolation-controls.log')
@@ -85,20 +117,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Verified release promotion controls FAIL.' }
     & uv run --offline --cache-dir (Join-Path $root 'artifacts/uv-cache') --python 3.11 python (Join-Path $PSScriptRoot 'fixtures/automatic-update-feed.py') --self-test *> (Join-Path $results 'automatic-feed-controls.log')
     if ($LASTEXITCODE -ne 0) { throw 'Automatic update feed controls FAIL.' }
-    function Invoke-Cargo([string]$Name,[string[]]$Arguments) {
-        $log = Join-Path $results "$Name.log"
-        Write-Host "RUN: cargo $($Arguments -join ' ')"
-        & cargo @Arguments *> $log
-        if ($LASTEXITCODE -ne 0) { Get-Content -LiteralPath $log -Tail 100; throw "$Name FAIL ($LASTEXITCODE): $log" }
-        Get-Content -LiteralPath $log -Tail 8
-    }
-    $nativeRustChannel = [regex]::Match(
-        (Get-Content -LiteralPath (Join-Path $root 'rust-toolchain.toml') -Raw),
-        '(?m)^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$'
-    ).Groups[1].Value
-    if (-not $nativeRustChannel) { throw 'The native test toolchain must be pinned to an exact Rust version.' }
-    [Environment]::SetEnvironmentVariable('RUSTUP_TOOLCHAIN',$nativeRustChannel,'Process')
-    [string[]]$cargoProfileArguments = @(if ($Configuration -eq 'Release') { '--release' })
     $common = @('--workspace','--locked','--target-dir','artifacts/rust-target','-j','4') + $cargoProfileArguments
     [xml]$props = Get-Content -LiteralPath Directory.Build.props -Raw
     $manifest = Get-Content -LiteralPath Cargo.toml -Raw
@@ -122,10 +140,7 @@ try {
         Invoke-Cargo ("tests-" + $package.name) (@('test','--package',$package.name) + $packageArguments + @('--','--test-threads=1'))
     }
     Invoke-Cargo 'tests-gpui-cursor-patch' (@('test','--package','gpui-pre-windows','--lib') + $packageArguments + @('netlights_cursor_tests','--','--test-threads=1'))
-    $frameArguments=@('--manifest-path','scripts/fixtures/native-frameprobe/Cargo.toml','--locked','--target-dir','artifacts/frameprobe-target','-j','4')+$cargoProfileArguments
-    Invoke-Cargo 'format-frameprobe' @('fmt','--manifest-path','scripts/fixtures/native-frameprobe/Cargo.toml','--','--check')
-    Invoke-Cargo 'lint-frameprobe' (@('clippy','--all-targets')+$frameArguments+@('--','-D','warnings'))
-    Invoke-Cargo 'tests-frameprobe' (@('test')+$frameArguments+@('--','--test-threads=1'))
+    Test-Frameprobe
     if ($Preflight) {
         Assert-SourceUnchanged
         Write-Host "RUN - PASS: headless $Configuration preflight (syntax, controls, format, Clippy, workspace and frameprobe tests). Logs: $results"

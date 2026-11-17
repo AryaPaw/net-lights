@@ -31,8 +31,49 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      selected: ${{ steps.select.outputs.scope }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 2
+      - id: select
+        shell: pwsh
+        run: scripts/select-verification-scope.ps1
+  capture-contract:
+    needs: scope
+    if: needs.scope.outputs.selected == 'capture'
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: '0.11.7'
+          enable-cache: false
+      - name: Prepare pinned headless tools
+        shell: pwsh
+        run: |
+          uv python install 3.11
+          if ($LASTEXITCODE -ne 0) { throw 'Python bootstrap failed.' }
+          $channel = [regex]::Match((Get-Content rust-toolchain.toml -Raw), '(?m)^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$').Groups[1].Value
+          if (-not $channel) { throw 'Pinned Rust channel is missing.' }
+          rustup toolchain install $channel --profile minimal --component rustfmt --component clippy --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'Rust bootstrap failed.' }
+      - name: Capture contract only, no application build or desktop input
+        shell: pwsh
+        run: scripts/verify.ps1 -CapturePreflight -ResultsDirectory TestResults/capture-contract
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: capture-contract-results
+          path: TestResults/capture-contract
   windows:
-    if: ${{ !inputs.upgrade_payload_run }}
+    needs: scope
+    if: ${{ !inputs.upgrade_payload_run && needs.scope.outputs.selected == 'full' }}
     runs-on: windows-2022
     timeout-minutes: 90
     env:
@@ -129,7 +170,8 @@ jobs:
             artifacts/rust-target
             artifacts/rust-coverage-target
   bridge:
-    if: ${{ !inputs.upgrade_payload_run || inputs.upgrade_rebuild_bridge }}
+    needs: scope
+    if: ${{ needs.scope.outputs.selected == 'full' && (!inputs.upgrade_payload_run || inputs.upgrade_rebuild_bridge) }}
     runs-on: windows-2022
     timeout-minutes: 45
     outputs:

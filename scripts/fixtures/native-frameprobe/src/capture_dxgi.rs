@@ -130,6 +130,7 @@ fn try_read_pixels(
 }
 
 struct Pending {
+    baseline: Option<u32>,
     qpc: i64,
     texture: ID3D11Texture2D,
 }
@@ -328,6 +329,7 @@ fn capture_frames(
                 return Err(Failure("pixel_bound", 0));
             }
             emit(Event::Frame {
+                baseline: frame.baseline,
                 qpc: frame.qpc,
                 width,
                 height,
@@ -382,14 +384,25 @@ fn capture_frames(
             "frame_qpc",
         )?;
         let acquired_qpc = received;
-        let present = desktop_frame_time(
-            info.LastPresentTime,
-            info.AccumulatedFrames,
-            info.TotalMetadataBufferSize,
-            info.LastMouseUpdateTime,
-            received,
-            previous,
-        )
+        let baseline = (previous == 0).then_some(info.AccumulatedFrames);
+        let present = if baseline.is_some() {
+            desktop_baseline_time(
+                info.LastPresentTime,
+                info.AccumulatedFrames,
+                info.TotalMetadataBufferSize,
+                info.LastMouseUpdateTime,
+                received,
+            )
+        } else {
+            desktop_frame_time(
+                info.LastPresentTime,
+                info.AccumulatedFrames,
+                info.TotalMetadataBufferSize,
+                info.LastMouseUpdateTime,
+                received,
+                previous,
+            )
+        }
         .inspect_err(|_| {
             eprintln!(
                 concat!(
@@ -452,6 +465,7 @@ fn capture_frames(
                 return Err(Failure("pixel_bound", 0));
             }
             emit(Event::Frame {
+                baseline,
                 qpc: previous,
                 width,
                 height,
@@ -481,7 +495,14 @@ fn capture_frames(
             "release_qpc",
         )?;
         previous = qpc;
-        pending.push(submitted, Pending { qpc, texture })?;
+        pending.push(
+            submitted,
+            Pending {
+                baseline,
+                qpc,
+                texture,
+            },
+        )?;
     }
     if let Some(failure) = *signals
         .failure

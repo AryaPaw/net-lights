@@ -5,6 +5,7 @@ pub(super) enum Event {
     Ready(i64),
     Pointer(i64),
     Frame {
+        baseline: Option<u32>,
         qpc: i64,
         width: u32,
         height: u32,
@@ -88,6 +89,7 @@ pub(super) fn write_event(output: &mut impl Write, event: Event) -> Result<()> {
         Event::Pointer(qpc) => writeln!(output, "{{\"kind\":\"pointer\",\"qpc\":{qpc}}}"),
         Event::End(qpc) => writeln!(output, "{{\"kind\":\"end\",\"qpc\":{qpc}}}"),
         Event::Frame {
+            baseline,
             qpc,
             width,
             height,
@@ -97,6 +99,11 @@ pub(super) fn write_event(output: &mut impl Write, event: Event) -> Result<()> {
             if area == 0 || area > 65536 || pixels.len() as u64 != area * 4 {
                 return Err(Failure("pixel_layout", 0));
             }
+            let (kind, initial) = match baseline {
+                Some(0) => return Err(Failure("baseline_count", 0)),
+                Some(count) => ("baseline", format!(",\"accumulated_frames\":{count}")),
+                None => ("frame", String::new()),
+            };
             let mut hex = String::with_capacity(pixels.len() * 2);
             const DIGITS: &[u8; 16] = b"0123456789abcdef";
             for value in pixels {
@@ -105,7 +112,7 @@ pub(super) fn write_event(output: &mut impl Write, event: Event) -> Result<()> {
             }
             writeln!(
                 output,
-                "{{\"kind\":\"frame\",\"qpc\":{qpc},\"width\":{width},\"height\":{height},\"pixels\":\"{hex}\"}}"
+                "{{\"kind\":\"{kind}\",\"qpc\":{qpc},\"width\":{width},\"height\":{height},\"pixels\":\"{hex}\"{initial}}}"
             )
         }
     };
@@ -119,6 +126,7 @@ mod tests {
 
     fn frame(qpc: i64) -> Event {
         Event::Frame {
+            baseline: None,
             qpc,
             width: 1,
             height: 1,
@@ -252,6 +260,7 @@ mod tests {
             write_event(
                 &mut Vec::new(),
                 Event::Frame {
+                    baseline: None,
                     qpc: 1,
                     width: 1,
                     height: 1,
@@ -259,6 +268,38 @@ mod tests {
                 }
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn baseline_serialization_keeps_actual_pixels_clock_and_accumulation() {
+        let mut bytes = Vec::new();
+        write_event(
+            &mut bytes,
+            Event::Frame {
+                baseline: Some(2),
+                qpc: 17,
+                width: 1,
+                height: 1,
+                pixels: vec![1, 2, 3, 255],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "{\"kind\":\"baseline\",\"qpc\":17,\"width\":1,\"height\":1,\"pixels\":\"010203ff\",\"accumulated_frames\":2}\n"
+        );
+        assert_eq!(
+            write_event(
+                &mut Vec::new(),
+                Event::Frame {
+                    baseline: Some(0),
+                    qpc: 17,
+                    width: 1,
+                    height: 1,
+                    pixels: vec![1, 2, 3, 255],
+                }
+            ),
+            Err(Failure("baseline_count", 0))
         );
     }
 }

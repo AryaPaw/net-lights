@@ -744,6 +744,7 @@ class NavigationProtocol:
         self.ended=False
         self.count=self.byte_count=0
         self.pointer_count=0
+        self.baseline_seen=False
 
     def accept(self,line):
         if not line or len(line)>self.MAX_LINE or not line.endswith(b"\n"):
@@ -776,12 +777,19 @@ class NavigationProtocol:
             self.pointer_count+=1
             if self.pointer_count>512:
                 raise RuntimeError("Native pointer update count exceeded its bound")
-        elif kind in ("frame","end"):
-            expected={"kind","qpc","width","height","pixels"} if kind=="frame" else {"kind","qpc"}
+        elif kind in ("baseline","frame","end"):
+            image=kind in ("baseline","frame")
+            expected={"kind","qpc","width","height","pixels"} if image else {"kind","qpc"}
+            if kind=="baseline":
+                expected.add("accumulated_frames")
+                if self.baseline_seen or type(record.get("accumulated_frames")) is not int or not 1<=record["accumulated_frames"]<2**32:
+                    raise RuntimeError("Invalid or duplicate native baseline")
+            elif not self.baseline_seen:
+                raise RuntimeError("Native capture omitted its initial image")
             qpc=record.get("qpc")
-            if self.frequency is None or set(record)!=expected or type(qpc) is not int or not 0<=qpc<2**63 or qpc<self.last_qpc or (kind=="frame" and qpc==self.last_qpc):
+            if self.frequency is None or set(record)!=expected or type(qpc) is not int or not 0<qpc<2**63 or qpc<self.last_qpc or (image and qpc==self.last_qpc):
                 raise RuntimeError("Invalid native capture clock or fields")
-            if kind=="frame":
+            if image:
                 if type(record["width"]) is not int or type(record["height"]) is not int or (record["width"],record["height"])!=(self.width,self.height):
                     raise RuntimeError("Native capture ROI changed")
                 pixels=record["pixels"]
@@ -792,6 +800,8 @@ class NavigationProtocol:
                 self.byte_count+=len(record["pixels"])
                 if self.count>512 or self.byte_count>32*1024*1024:
                     raise RuntimeError("Native capture stream exceeded its bounds")
+                if kind=="baseline":
+                    self.baseline_seen=True
             else:
                 self.ended=True
             self.last_qpc=qpc
@@ -800,7 +810,7 @@ class NavigationProtocol:
         return record
 
     def eof(self):
-        if self.frequency is None or not self.ended or not self.count:
+        if self.frequency is None or not self.ended or not self.baseline_seen or not self.count:
             raise RuntimeError("Native capture ended without a complete frame stream")
 
 
@@ -894,6 +904,8 @@ class NavigationFrames:
         self.events=queue.Queue(maxsize=256)
         self.reader_error=None
         self.frames=[]
+        self.baseline=None
+        self.input_qpc=None
         self.report=None
         self.finished=False
         self.diagnostics_read=False
@@ -946,11 +958,14 @@ class NavigationFrames:
             return None
         if record["kind"]=="ready" and record["frequency"]!=self.clock.frequency:
             raise RuntimeError("Native capture and input QPC clocks differ")
-        if record["kind"] in ("frame","pointer"):
+        if record["kind"] in ("baseline","frame","pointer"):
             if record["qpc"]>self.clock.now():
                 raise RuntimeError("Native capture timestamp is ahead of the common QPC clock")
         if record["kind"]=="frame":
             self.frames.append(record)
+        elif record["kind"]=="baseline":
+            self.baseline=record
+            self.report["baseline"]={key:record[key] for key in ("qpc","accumulated_frames","width","height")}
         return record
 
     def __enter__(self):
@@ -968,7 +983,7 @@ class NavigationFrames:
         try:
             self.reader.start()
             deadline=time.monotonic()+5
-            while not self.frames:
+            while self.baseline is None:
                 remaining=deadline-time.monotonic()
                 if remaining<=0:
                     raise TimeoutError("Native capture did not provide an initial real frame")
@@ -980,7 +995,20 @@ class NavigationFrames:
             self.abort()
             raise
 
+    def input_epoch(self):
+        self.guard()
+        if self.baseline is None or self.finished or self.input_qpc is not None:
+            raise RuntimeError("Animation input requires one live initial image")
+        epoch=self.clock.now()
+        if type(epoch) is not int or epoch<=self.baseline["qpc"]:
+            raise RuntimeError("Animation input clock must follow the actual initial image")
+        self.input_qpc=epoch
+        self.report["input_qpc"]=epoch
+        return epoch
+
     def observe(self,epoch):
+        if self.baseline is None or self.input_qpc is None or epoch!=self.input_qpc or epoch<=self.baseline["qpc"]:
+            raise RuntimeError("Animation input must follow the actual initial image")
         boundary=epoch+round(self.clock.frequency*.8)
         while self.clock.now()<boundary:
             record=self.receive(.02)
@@ -1015,7 +1043,7 @@ class NavigationFrames:
         if code!=0 or self.reader.is_alive() or self.reader_error is not None:
             raise RuntimeError("Native capture worker didn't exit cleanly")
         backend=self.report.get("readback_backend")
-        if backend is None or backend["readback_frames"]!=len(self.frames):
+        if backend is None or self.baseline is None or backend["readback_frames"]!=1+len(self.frames):
             raise RuntimeError("Native readback frame count differs from the received stream")
         self.process.stdin.close()
         self.process.stdout.close()
@@ -1502,13 +1530,15 @@ def validate_navigation_mode(functional, coverage, measure):
 
 
 class Runner:
-    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None, coverage_instrumented=False, frameprobe=None, frameprobe_sha=None, hosted_resource=False, measure_navigation=True):
+    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None, coverage_instrumented=False, frameprobe=None, frameprobe_sha=None, hosted_resource=False, measure_navigation=True, capture_startup_only=False):
         if not __debug__:
             raise RuntimeError("Проверки требуют включённых assert: уберите -O и PYTHONOPTIMIZE")
         if functional_evidence and (measure_seconds or enable_country):
             raise ValueError("Функциональный offline UI-режим не допускает ресурсный прогон или публичное Geo-определение")
         validate_resource_mode(hosted_resource, functional_evidence, measure_seconds, enable_country, maximum, coverage_instrumented, input_policy is not None and input_policy.ci)
         validate_navigation_mode(functional_evidence, coverage_instrumented, measure_navigation)
+        if capture_startup_only and (not functional_evidence or coverage_instrumented or measure_navigation or measure_seconds or hosted_resource or maximum or enable_country):
+            raise ValueError("Capture startup mode is separate from full UI, coverage, animation and resources")
         if hosted_resource:
             input_policy.assert_pointer_input_allowed()
         self.exe, self.output, self.profile = exe, output, output/"profile"
@@ -1516,6 +1546,7 @@ class Runner:
         self.measure_seconds, self.results, self.captures = measure_seconds, [], []
         self.functional_evidence=functional_evidence
         self.measure_navigation=measure_navigation
+        self.capture_startup_only=capture_startup_only
         self.compact_hosted_geometry=functional_evidence or hosted_resource
         self.coverage_instrumented=coverage_instrumented
         self.frameprobe,self.frameprobe_sha=frameprobe,frameprobe_sha
@@ -1534,10 +1565,12 @@ class Runner:
         self.meta["evidenceLevel"] = "GitHub-hosted Windows resource measurement" if hosted_resource else ("functional" if functional_evidence else "Windows 11 native visual")
         self.meta["visualAcceptance"] = "NOT RUN" if functional_evidence or hosted_resource else "requires screenshot review"
         self.meta["navigation_measurement_requested"]=measure_navigation
+        self.meta["capture_startup_only"]=capture_startup_only
+        self.meta["capture_startup_workers"]=[]
         self.meta["coverage_instrumented"] = coverage_instrumented
         self.meta["navigation_capture_workers"] = []
         self.meta["navigation_frameprobe_sha256"] = frameprobe_sha
-        self.meta["navigation_smoothness"] = "NOT RUN" if coverage_instrumented else "PENDING"
+        self.meta["navigation_smoothness"] = "PENDING" if measure_navigation else "NOT RUN"
         self.meta["country_measurement_requested"] = enable_country
         self.meta["locale_required"] = (pathlib.Path(__file__).resolve().parents[1]/"native/core/src/locale.rs").is_file()
         self.meta["input_isolation"] = input_policy.evidence if input_policy else dict(scope="host-owned HWND messages", guard="no-real-pointer-input")
@@ -1937,7 +1970,7 @@ class Runner:
             assert bool(result.value)==value, "Guest motion preference didn't change"
         return bool(result.value)
 
-    def navigation_motion(self, tabs):
+    def navigation_motion(self, tabs, startup_only=False):
         from PIL import Image
         self.input_policy.assert_identity()
         hwnd,pid=self.uia.hwnd,self.process.pid
@@ -1955,7 +1988,7 @@ class Runner:
         clock=QpcClock(self.api.kernel)
         def source():
             return NavigationFrames(self.api,self.input_policy,hwnd,pid,band,self.frameprobe,self.frameprobe_sha,
-                                    self.meta["navigation_capture_workers"],clock)
+                                    self.meta["capture_startup_workers" if startup_only else "navigation_capture_workers"],clock)
         def click(name):
             r=rectangles[name]
             self.api.click(hwnd,((r[0]+r[2])//2,(r[1]+r[3])//2))
@@ -1964,14 +1997,23 @@ class Runner:
             return (r[0]+r[2])/2
         self.page("Состояние")
         time.sleep(.3)
+        if startup_only:
+            for index in range(10):
+                with source() as capture:
+                    capture.finish()
+                image=Image.frombytes("RGB",(capture.baseline["width"],capture.baseline["height"]),capture.baseline["pixels"],"raw","BGRX")
+                capture.report["baseline_file"]=f"capture-startup-{index:02}-baseline.png"
+                image.save(self.output/capture.report["baseline_file"])
+                initial=navigation_frame_pixels(capture.baseline,left,scale)
+                assert abs(initial-center("Состояние"))<=3*scale, "Initial image lost the real selected indicator"
+            return dict(starts=10,baseline_separate=True,smoothness="NOT RUN")
         results=[]
         for target in ("О программе","Состояние"):
             with source() as capture:
                 # A real initial frame is available before input. Its pixel
                 # analysis and all image work happen after the producer stops.
-                initial_frame=capture.frames[-1]
-                capture.guard()
-                epoch=clock.now()
+                initial_frame=capture.baseline
+                epoch=capture.input_epoch()
                 click(target)
                 observed=capture.observe(epoch)
             initial=navigation_frame_pixels(initial_frame,left,scale)
@@ -1979,8 +2021,10 @@ class Runner:
                      Image.frombytes("RGB",(frame["width"],frame["height"]),frame["pixels"],"raw","BGRX"),frame["qpc"])
                     for elapsed,frame in observed]
             finish=center(target)
+            baseline_image=Image.frombytes("RGB",(initial_frame["width"],initial_frame["height"]),initial_frame["pixels"],"raw","BGRX")
+            baseline_image.save(self.output/f"navigation-motion-{len(results)}-baseline.png")
             (self.output/f"navigation-motion-{len(results)}-trace.json").write_text(
-                json.dumps(dict(initial=initial,initial_qpc=initial_frame["qpc"],target=finish,epoch_qpc=epoch,frequency=clock.frequency,
+                json.dumps(dict(initial=initial,initial_qpc=initial_frame["qpc"],baseline_accumulated_frames=initial_frame["accumulated_frames"],target=finish,epoch_qpc=epoch,frequency=clock.frequency,
                                 source="DXGI Desktop Duplication",samples=[dict(seconds=t,x=x,qpc=qpc) for t,x,_,qpc in frames]),indent=2),encoding="utf-8")
             for index,(_,_,image,_) in enumerate(frames):
                 image.save(self.output/f"navigation-motion-{len(results)}-frame-{index:02}.png")
@@ -1996,7 +2040,7 @@ class Runner:
         assert self.uia.call("selected","Параметры"), "Rapid navigation lost the final selection"
         with source() as capture:
             capture.finish()
-        position=navigation_frame_pixels(capture.frames[-1],left,scale)
+        position=navigation_frame_pixels(capture.frames[-1] if capture.frames else capture.baseline,left,scale)
         assert abs(position-center("Параметры"))<=3*scale, "Interrupted indicator missed the last target"
         self.page("Состояние")
         time.sleep(.3)
@@ -2941,12 +2985,15 @@ class Runner:
     def run(self, inventory_only=False):
         original_motion=None
         try:
-            if not inventory_only and self.input_policy:
+            if not inventory_only and self.input_policy and not self.capture_startup_only:
                 original_motion=self.motion_preference()
                 self.meta["motion_fixture"]=dict(original=original_motion,enabled=True,restored=False)
                 self.motion_preference(True)
             self.start()
             self.inventory("initial-state")
+            if self.capture_startup_only:
+                self.check("capture-startup",lambda:self.navigation_motion(self.uia.call("inventory"),startup_only=True))
+                return
             self.capture("state-initial")
             if inventory_only:
                 return
@@ -3568,22 +3615,25 @@ def navigation_motion_selftest():
     rejected(lambda:navigation_observation_frames([dict(qpc=900)],1000,1000))
     ready=dict(kind="ready",frequency=1000,source="DXGI Desktop Duplication")
     frame=dict(kind="frame",qpc=100,width=16,height=1,pixels="ffc24cff"*16)
+    baseline=dict(frame,kind="baseline",qpc=50,accumulated_frames=2)
     end=dict(kind="end",qpc=400)
     encode=lambda value:(json.dumps(value,separators=(",",":"))+"\n").encode("ascii")
     protocol=NavigationProtocol(16,1)
     protocol.accept(encode(ready))
+    protocol.accept(encode(baseline))
     decoded=protocol.accept(encode(frame))
     assert decoded["pixels"]==bytes((255,194,76,255))*16
     assert navigation_frame_pixels(decoded,50,1)==57.5
     packed=decoded["pixels"]+bytes((3,2,1,255))*16
     rows=NavigationProtocol(16,2)
     rows.accept(encode(ready))
+    rows.accept(encode(dict(baseline,height=2,pixels=packed.hex())))
     top_down=rows.accept(encode(dict(frame,height=2,pixels=packed.hex())))["pixels"]
     assert top_down[:64]==decoded["pixels"] and top_down[64:]==bytes((3,2,1,255))*16
     protocol.accept(encode(end));protocol.eof()
-    pointer=NavigationProtocol(16,1);pointer.accept(encode(ready));pointer.accept(encode(frame))
+    pointer=NavigationProtocol(16,1);pointer.accept(encode(ready));pointer.accept(encode(baseline));pointer.accept(encode(frame))
     pointer.accept(encode(dict(kind="pointer",qpc=125)))
-    assert pointer.count==1 and pointer.last_qpc==100 and pointer.pointer_count==1
+    assert pointer.count==2 and pointer.last_qpc==100 and pointer.pointer_count==1
     for bad in (dict(kind="pointer",qpc=0),dict(kind="pointer",qpc=True),dict(kind="pointer",qpc=125,pixels="ff")):
         rejected(lambda:pointer.accept(encode(bad)))
     pointer.pointer_count=512
@@ -3591,19 +3641,27 @@ def navigation_motion_selftest():
     rejected(lambda:NavigationProtocol(16,1).accept(encode(dict(ready,source="Windows.Graphics.Capture"))))
     rejected(lambda:protocol.accept(encode(end)))
     for bad in (dict(frame,qpc=99),dict(frame,qpc=True),dict(frame,width=15),dict(frame,pixels="zz"*64),dict(frame,pixels="ff"),dict(kind="unknown")):
-        p=NavigationProtocol(16,1);p.accept(encode(ready));p.accept(encode(frame))
+        p=NavigationProtocol(16,1);p.accept(encode(ready));p.accept(encode(baseline));p.accept(encode(frame))
         rejected(lambda:p.accept(encode(bad)))
     for bad in (b"{}",b"x\n",b'{"kind":"ready","frequency":1,"frequency":2}\n',b"x"*(NavigationProtocol.MAX_LINE+1)):
         rejected(lambda:NavigationProtocol(16,1).accept(bad))
     rejected(lambda:NavigationProtocol(16,1).accept(encode(dict(ready,frequency=True))))
     rejected(lambda:NavigationProtocol(16,1).accept(encode(frame)))
     rejected(lambda:NavigationProtocol(16,1).accept(encode(dict(kind="error",code="queue_overflow",hresult=-1))))
-    p=NavigationProtocol(16,1);p.accept(encode(ready));p.accept(encode(frame))
+    p=NavigationProtocol(16,1);p.accept(encode(ready));p.accept(encode(baseline));p.accept(encode(frame))
     rejected(p.eof)
     p.count=512
     rejected(lambda:p.accept(encode(dict(frame,qpc=101))))
-    p=NavigationProtocol(16,1);p.accept(encode(ready));p.byte_count=32*1024*1024
+    p=NavigationProtocol(16,1);p.accept(encode(ready));p.accept(encode(baseline));p.byte_count=32*1024*1024
     rejected(lambda:p.accept(encode(frame)))
+    for bad in (dict(baseline,accumulated_frames=0),dict(baseline,accumulated_frames=True),
+                dict(baseline,accumulated_frames=2**32),dict(baseline,qpc=0)):
+        p=NavigationProtocol(16,1);p.accept(encode(ready))
+        rejected(lambda:p.accept(encode(bad)))
+    p=NavigationProtocol(16,1);p.accept(encode(ready));p.accept(encode(baseline))
+    rejected(lambda:p.accept(encode(dict(baseline,qpc=60))))
+    rejected(lambda:p.accept(encode(dict(frame,accumulated_frames=2))))
+    p.accept(encode(end));p.eof()
     rejected(lambda:navigation_frame_pixels(dict(decoded,pixels=bytes(64)),50,1))
     class Function:
         def __init__(self,value,ok=True):self.value,self.ok=value,ok
@@ -3625,9 +3683,9 @@ def navigation_motion_selftest():
         def __init__(self,**_):pass
         def start(self):raise RuntimeError("Injected reader start failure")
         def is_alive(self):return False
-    def scenario(records,success,code=0,hang=False,queue_size=256,start_failure=False,diagnostic=None):
+    def scenario(records,success,code=0,hang=False,queue_size=256,start_failure=False,diagnostic=None,observe=True,clean_capture=None):
         if diagnostic is None:
-            diagnostic=encode(dict(system_memory=1,readback_frames=sum(record["kind"]=="frame" for record in records)))
+            diagnostic=encode(dict(system_memory=1,readback_frames=sum(record["kind"] in ("baseline","frame") for record in records)))
         process=Process(b"".join(encode(record) for record in records),code,hang,diagnostic)
         reports=[]
         capture=NavigationFrames(None,None,23,17,(0,0,16,1),"owned-helper","a"*64,reports,
@@ -3641,28 +3699,50 @@ def navigation_motion_selftest():
         with patch.object(capture,"guard"),patch(__name__+".checked_frameprobe",return_value="owned-helper"),patch.object(subprocess,"Popen",launch),patch.object(threading,"Thread",FailingThread if start_failure else threading.Thread),patch.dict(os.environ,{"LLVM_PROFILE_FILE":"secret-profile","LLVM_PROFILE_FILE_NAME":"secret-name","RUSTFLAGS":"coverage","CARGO_ENCODED_RUSTFLAGS":"coverage"}):
             try:
                 with capture:
-                    observed=capture.observe(200)
+                    assert capture.baseline is not None and capture.baseline not in capture.frames
+                    if observe:
+                        calls=iter((200,10000))
+                        capture.clock.now=lambda:next(calls,10000)
+                        observed=capture.observe(capture.input_epoch())
+                    else:
+                        capture.finish()
             except (RuntimeError,TimeoutError,subprocess.TimeoutExpired):
                 assert not success
             else:
-                assert success and observed[0][1]["qpc"]==300
-        assert reports[0]["cleanup"]==("PASS" if success else "FAIL")
+                assert success and (not observe or observed[0][1]["qpc"]==300)
+        assert reports[0]["cleanup"]==("PASS" if (success if clean_capture is None else clean_capture) else "FAIL")
         assert not capture.reader.is_alive() and process.stdin.closed and process.stdout.closed and process.stderr.closed
         assert process.returncode is not None
         if diagnostic and len(diagnostic)<=8192:
             decoded=json.loads(diagnostic)
             field="readback_backend" if "readback_frames" in decoded else "desktop_diagnostic" if "accumulated_frames" in decoded else "readback_diagnostic" if "pending_readbacks" in decoded else "clock_diagnostic"
             assert reports[0][field]==decoded
-    complete=[ready,frame,dict(frame,qpc=300),end]
+    complete=[ready,baseline,frame,dict(frame,qpc=300),end]
     scenario(complete,True)
+    scenario([ready,baseline,end],True,observe=False)
+    scenario([ready,baseline,end],False,clean_capture=True)
+    scenario([ready,frame,end],False)
+    scenario([ready,dict(baseline,qpc=10001),dict(end,qpc=10002)],False)
     scenario(complete,False,diagnostic=b"")
+    for missing,value in ((True,200),(False,49),(False,50),(False,True)):
+        capture=NavigationFrames(None,None,23,17,(0,0,16,1),"owned-helper","a"*64,[],SimpleNamespace(now=lambda:value))
+        capture.guard=lambda:None
+        capture.baseline=None if missing else baseline
+        capture.report={}
+        rejected(capture.input_epoch)
+    capture=NavigationFrames(None,None,23,17,(0,0,16,1),"owned-helper","a"*64,[],SimpleNamespace(now=lambda:200))
+    capture.guard=lambda:None;capture.baseline=baseline;capture.report={}
+    rejected(lambda:capture.observe(200))
+    assert capture.input_epoch()==200 and capture.report["input_qpc"]==200
+    rejected(capture.input_epoch)
+    rejected(lambda:capture.observe(201))
     scenario([ready,frame],False)
     scenario(complete,False,code=7)
     scenario(complete,False,hang=True)
     scenario(complete,False,queue_size=1)
     scenario(complete,False,start_failure=True)
-    scenario([dict(ready,frequency=999),frame,end],False)
-    scenario([ready,dict(frame,qpc=10001),dict(end,qpc=10002)],False)
+    scenario([dict(ready,frequency=999),baseline,frame,end],False)
+    scenario([ready,baseline,dict(frame,qpc=10001),dict(end,qpc=10002)],False)
     diagnostic=dict(duration=-1,frequency=1000,acquired_qpc=120,received_qpc=123,previous_qpc=124)
     assert native_clock_diagnostic(encode(diagnostic))==diagnostic
     assert native_clock_diagnostic(b"") is None
@@ -3682,7 +3762,7 @@ def navigation_motion_selftest():
     for invalid in (dict(readback,pending_readbacks=17),dict(readback,map_ready=True),dict(readback,system_memory=2),dict(readback,age_micros=-1),dict(readback,extra=0)):
         rejected(lambda:native_clock_diagnostic(encode(invalid)))
     scenario(complete,False,code=7,diagnostic=encode(readback))
-    backend=dict(system_memory=1,readback_frames=2)
+    backend=dict(system_memory=1,readback_frames=3)
     scenario(complete,True,diagnostic=encode(backend))
     scenario(complete,False,code=7,diagnostic=encode(backend))
     scenario(complete,False,diagnostic=encode(dict(backend,readback_frames=1)))
@@ -3695,7 +3775,7 @@ def navigation_motion_selftest():
         rejected(lambda:native_clock_diagnostic(encode(invalid)))
     rejected(lambda:native_clock_diagnostic(encode(desktop).replace(b'"accumulated_frames":2',b'"accumulated_frames":2,"accumulated_frames":2')))
     scenario(complete,False,code=7,diagnostic=encode(desktop))
-    scenario([ready,frame,dict(kind="error",code="accumulated_frames",hresult=0)],False,code=1,diagnostic=encode(desktop))
+    scenario([ready,baseline,frame,dict(kind="error",code="accumulated_frames",hresult=0)],False,code=1,diagnostic=encode(desktop))
     scenario(complete,False,diagnostic=b"x"*8193)
     capture=NavigationFrames.__new__(NavigationFrames)
     capture.process=Process(b"")
@@ -3794,6 +3874,8 @@ def main():
                         help="Функциональные native UI-проверки на Windows Server; визуальная приёмка Windows 11 остаётся NOT RUN")
     parser.add_argument("--navigation-measurement", action="store_true",
                         help="Отдельная обязательная проверка плавности на обычном exe")
+    parser.add_argument("--capture-startup-only", action="store_true",
+                        help="Только десять запусков DXGI, без полной UI-матрицы и без заявления о плавности")
     parser.add_argument("--hosted-resource-evidence", action="store_true",
                         help="Часовой ресурсный прогон на GitHub-hosted Windows; визуальная приёмка Windows 11 остаётся NOT RUN")
     parser.add_argument("--coverage-instrumented", action="store_true",
@@ -3803,6 +3885,8 @@ def main():
     args = parser.parse_args()
     if args.navigation_measurement and (not args.functional_evidence or args.coverage_instrumented):
         parser.error("--navigation-measurement requires non-instrumented --functional-evidence")
+    if args.capture_startup_only and (not args.functional_evidence or args.navigation_measurement or args.coverage_instrumented or args.maximum_history or args.inventory_only or args.measure_seconds or args.enable_country_for_measurement):
+        parser.error("--capture-startup-only requires a separate normal functional offline run")
     if args.enable_country_for_measurement and (not args.measure_seconds or args.inventory_only):
         parser.error("--enable-country-for-measurement требует --measure-seconds > 0 и полный UI-прогон")
     if args.functional_evidence and (args.measure_seconds or args.enable_country_for_measurement):
@@ -3817,7 +3901,7 @@ def main():
     except (OSError, ValueError) as error:
         parser.error(str(error))
     output.mkdir(parents=True, exist_ok=False)
-    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy, args.coverage_instrumented,frameprobe,args.frameprobe_sha256,args.hosted_resource_evidence,not args.coverage_instrumented and (not args.functional_evidence or args.navigation_measurement))
+    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy, args.coverage_instrumented,frameprobe,args.frameprobe_sha256,args.hosted_resource_evidence,not args.coverage_instrumented and (not args.functional_evidence or args.navigation_measurement),args.capture_startup_only)
     runner.run(args.inventory_only)
     print(json.dumps(dict(result="NOT RUN" if runner.measurement_blocked else "PASS", output=str(output), screenshots=len(runner.captures), resource_seconds=args.measure_seconds), ensure_ascii=False), flush=True)
     if runner.measurement_blocked:
