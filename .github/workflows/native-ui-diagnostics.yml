@@ -22,6 +22,11 @@ on:
         type: boolean
         required: false
         default: false
+      verification_scope:
+        description: 'Focused diagnostic only; Full retains the complete functional UI matrix'
+        type: choice
+        options: [Full, CaptureStartup, Navigation, Clipboard]
+        default: Full
 permissions:
   contents: read
   actions: read
@@ -105,6 +110,7 @@ jobs:
           SOURCE_RUN: ${{ inputs.payload_run }}
           MAXIMUM_HISTORY: ${{ inputs.maximum_history }}
           CAPTURE_STARTUP_ONLY: ${{ inputs.capture_startup_only }}
+          VERIFICATION_SCOPE: ${{ inputs.verification_scope }}
         run: |
           if ($env:SOURCE_RUN) {
             $exe = (Resolve-Path artifacts/native-reused/publish/NetLights.exe).Path
@@ -113,14 +119,22 @@ jobs:
           } else { $exe = (Resolve-Path artifacts/native-diagnostic/NetLights.exe).Path }
           if ($env:NETLIGHTS_NAVIGATION_MEASUREMENT -cnotin @('true','false')) { throw 'Expected a boolean navigation measurement option.' }
           $extra = @{}
-          if ($env:NETLIGHTS_NAVIGATION_MEASUREMENT -ceq 'true') { $extra.NavigationMeasurement = $true }
+          $selectedScope=$env:VERIFICATION_SCOPE
+          if ($selectedScope -cnotin @('Full','CaptureStartup','Navigation','Clipboard')) { throw 'Unknown verification scope.' }
           if ($env:MAXIMUM_HISTORY -cnotin @('true','false')) { throw 'Expected a boolean maximum-history option.' }
           if ($env:MAXIMUM_HISTORY -ceq 'true') { $extra.MaximumHistory = $true }
           if ($env:CAPTURE_STARTUP_ONLY -cnotin @('true','false')) { throw 'Expected a boolean startup measurement option.' }
           if ($env:CAPTURE_STARTUP_ONLY -ceq 'true') {
             if ($env:MAXIMUM_HISTORY -ceq 'true' -or $env:NETLIGHTS_NAVIGATION_MEASUREMENT -ceq 'true') { throw 'Capture startup is a separate diagnostic scope.' }
-            $extra.CaptureStartupOnly = $true
+            if ($selectedScope -cne 'Full') { throw 'Use one startup scope selector.' }
+            $selectedScope='CaptureStartup'
           }
+          if ($env:NETLIGHTS_NAVIGATION_MEASUREMENT -ceq 'true') {
+            if ($selectedScope -cnotin @('Full','Navigation')) { throw 'Navigation measurement cannot be combined with another focused scope.' }
+            $selectedScope='Navigation'
+          }
+          $extra.VerificationScope=$selectedScope
+          if ($selectedScope -ceq 'Navigation') { $extra.NavigationMeasurement=$true }
           scripts/test-native-ui.ps1 -FunctionalUI @extra -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory TestResults/diagnostic
       - name: Upload diagnostic evidence
         if: always()

@@ -383,7 +383,7 @@ jobs:
       - name: Require motion evidence from this run's exact normal executable
         run: |
           $exe = (Resolve-Path artifacts/motion-candidate/publish/NetLights.exe).Path
-          scripts/test-native-ui.ps1 -FunctionalUI -NavigationMeasurement -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory TestResults/motion
+          scripts/test-native-ui.ps1 -FunctionalUI -NavigationMeasurement -VerificationScope Navigation -Executable $exe -ExpectedSha256 (Get-FileHash -LiteralPath $exe).Hash -ResultsDirectory TestResults/motion
       - name: Upload motion evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

@@ -6,6 +6,7 @@ param(
     [switch]$FunctionalUI,
     [switch]$NavigationMeasurement,
     [switch]$CaptureStartupOnly,
+    [ValidateSet('Full','CaptureStartup','Navigation','Clipboard')][string]$VerificationScope='Full',
     [switch]$HostedResource,
     [string]$RawProfileDirectory,
     [switch]$CoverageInstrumented,
@@ -195,7 +196,7 @@ function Assert-Amd64Pe([string]$Path) {
     }finally{$reader.Dispose()}
 }
 function Assert-UiEvidence($Evidence,[string]$Scope,[string]$Nonce,[string]$AppHash,[string]$RunnerHash,[bool]$ExpectCoverageInstrumented=$false,[bool]$ExpectHostedResource=$false,[bool]$ExpectNavigationMeasurement=$true) {
-    if($Evidence.metadata.capture_startup_only -isnot [bool] -or $Evidence.metadata.capture_startup_only) {throw 'A focused capture run cannot satisfy the full UI gate.'}
+    if($Evidence.metadata.verification_scope -isnot [string] -or $Evidence.metadata.verification_scope -cne 'full' -or $Evidence.metadata.capture_startup_only -isnot [bool] -or $Evidence.metadata.capture_startup_only) {throw 'Focused evidence cannot satisfy the full UI gate.'}
     if($ExpectHostedResource) {
         $measurement=@($Evidence.checks | Where-Object check -CEQ 'resource-measurement')
         if($Evidence.metadata.evidenceLevel -cne 'GitHub-hosted Windows resource measurement' -or $Evidence.metadata.visualAcceptance -cne 'NOT RUN' -or
@@ -254,26 +255,39 @@ function Assert-FrameprobeEvidence($Evidence,[string]$ExpectedHash) {
     if($Evidence.metadata.navigation_frameprobe_sha256 -ine $ExpectedHash) {throw 'Native frame producer identity differs.'}
     Assert-CaptureWorkers $Evidence.metadata.navigation_capture_workers $ExpectedHash 3 $true
 }
-function Assert-CaptureStartupEvidence($Evidence,[string]$AppHash,[string]$ExpectedHash) {
+function Assert-FocusedEvidence($Evidence,[string]$AppHash,[string]$ExpectedHash,[ValidateSet('capture-startup','navigation','clipboard')][string]$VerificationScope='capture-startup') {
     foreach($field in @('capture_startup_only','assertions_enabled','coverage_instrumented','navigation_measurement_requested','physical_input')) {
         if($Evidence.metadata.$field -isnot [bool]) {throw 'Focused startup evidence flags must be booleans.'}
     }
-    if($Evidence.metadata.capture_startup_only -cne $true -or $Evidence.metadata.assertions_enabled -cne $true -or
+    $startup=$VerificationScope -ceq 'capture-startup'
+    $navigation=$VerificationScope -ceq 'navigation'
+    $smoothness=if($navigation){'PASS'}else{'NOT RUN'}
+    if($Evidence.metadata.verification_scope -isnot [string] -or $Evidence.metadata.verification_scope -cne $VerificationScope -or $Evidence.metadata.capture_startup_only -ne $startup -or $Evidence.metadata.assertions_enabled -cne $true -or
        $Evidence.metadata.exe_sha256 -ine $AppHash -or $Evidence.metadata.navigation_frameprobe_sha256 -ine $ExpectedHash -or
-       $Evidence.metadata.coverage_instrumented -cne $false -or $Evidence.metadata.navigation_measurement_requested -cne $false -or
-       $Evidence.metadata.navigation_smoothness -cne 'NOT RUN' -or $Evidence.metadata.physical_input -cne $true -or
+       $Evidence.metadata.coverage_instrumented -cne $false -or $Evidence.metadata.navigation_measurement_requested -ne $navigation -or
+       $Evidence.metadata.navigation_smoothness -cne $smoothness -or $Evidence.metadata.physical_input -cne $true -or
        $Evidence.metadata.input_isolation.scope -cne 'GitHub-hosted Windows VM' -or
        $Evidence.metadata.fixture.offline_availability_endpoints -cne $true -or $Evidence.metadata.fixture.live_country_detection -cne $false -or
        $Evidence.metadata.evidenceLevel -cne 'functional' -or $Evidence.metadata.visualAcceptance -cne 'NOT RUN' -or
-       @($Evidence.metadata.pids).Count -ne 1 -or $Evidence.metadata.pids[0] -lt 1 -or @($Evidence.cleanup_errors).Count -or @($Evidence.resource_errors).Count -or
+       @($Evidence.metadata.pids).Count -ne 1 -or ($Evidence.metadata.pids[0] -isnot [int] -and $Evidence.metadata.pids[0] -isnot [long]) -or $Evidence.metadata.pids[0] -lt 1 -or @($Evidence.cleanup_errors).Count -or @($Evidence.resource_errors).Count -or
        @($Evidence.checks|Where-Object {$_.result -cne 'PASS' -and -not($_.check -ceq 'resource-measurement' -and $_.result -ceq 'NOT RUN')}).Count) {throw 'Focused startup evidence is failed, incomplete or belongs to other inputs.'}
-    $check=@($Evidence.checks|Where-Object check -CEQ 'capture-startup')
-    if($check.Count -ne 1 -or $check[0].result -cne 'PASS' -or $check[0].detail.starts -ne 10 -or @($Evidence.metadata.navigation_capture_workers).Count) {throw 'The ten independent startup checks are missing.'}
-    Assert-CaptureWorkers $Evidence.metadata.capture_startup_workers $ExpectedHash 10 $false
+    $name=if($startup){'capture-startup'}elseif($navigation){'navigation-motion'}else{'about-copy-version'}
+    $check=@($Evidence.checks|Where-Object check -CEQ $name)
+    if($check.Count -ne 1 -or $check[0].result -cne 'PASS') {throw 'The requested focused check is missing or failed.'}
+    if($startup) {
+        if($check[0].detail.starts -ne 10 -or @($Evidence.metadata.navigation_capture_workers).Count) {throw 'The ten independent startup checks are missing.'}
+        Assert-CaptureWorkers $Evidence.metadata.capture_startup_workers $ExpectedHash 10 $false
+    } elseif($navigation) {
+        if(@($Evidence.metadata.capture_startup_workers).Count -or $check[0].detail.smoothness -cne 'PASS' -or @($check[0].detail.switches).Count -ne 2 -or $check[0].detail.rapid_reversal -cne $true) {throw 'Focused navigation evidence is incomplete.'}
+        Assert-FrameprobeEvidence $Evidence $ExpectedHash
+    } else {
+        if(@($Evidence.metadata.capture_startup_workers).Count -or @($Evidence.metadata.navigation_capture_workers).Count -or
+           $check[0].detail.version -cnotmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$' -or $check[0].detail.publication_acknowledged -cne $true) {throw 'Focused clipboard evidence is incomplete.'}
+    }
 }
 
 if($SelfTest) {
-    if($Executable -or $ExpectedSha256 -or $RawProfileDirectory -or $FunctionalUI -or $NavigationMeasurement -or $CaptureStartupOnly -or $HostedResource -or $CoverageInstrumented -or $MeasureSeconds -or $EnableCountryForMeasurement -or $MaximumHistory) {throw 'SelfTest cannot be combined with a UI run.'}
+    if($Executable -or $ExpectedSha256 -or $RawProfileDirectory -or $FunctionalUI -or $NavigationMeasurement -or $CaptureStartupOnly -or $VerificationScope -cne 'Full' -or $HostedResource -or $CoverageInstrumented -or $MeasureSeconds -or $EnableCountryForMeasurement -or $MaximumHistory) {throw 'SelfTest cannot be combined with a UI run.'}
     & uv run --offline --cache-dir (Join-Path $repository 'artifacts/uv-cache') --python 3.11 python (Join-Path $PSScriptRoot 'native-ui-smoke.py') --self-test-uia
     if($LASTEXITCODE -ne 0){throw 'Read-only UIA retry controls FAIL.'}
     $rejected=$false;try{Assert-ArtifactPath (Join-Path $repository 'native')|Out-Null}catch{$rejected=$true}
@@ -289,7 +303,7 @@ if($SelfTest) {
     $functionText=${function:Assert-UiEvidence}.ToString()
     if(-not $functionText.Contains("'locale-English-restart-system-Russian'") -or -not $functionText.Contains("'state-no-duplicate-provider-world'")){throw 'Locale acceptance guards are missing.'}
     $good=@{metadata=@{exe_sha256=('a'*64);physical_input=$true;input_isolation=@{scope='Windows Sandbox';nonce=('b'*32);app_sha256=('a'*64);runner_sha256=('c'*64)};
-        fixture=@{offline_availability_endpoints=$true;live_country_detection=$false};capture_startup_only=$false;coverage_instrumented=$false;navigation_measurement_requested=$true;navigation_capture_workers=@();navigation_smoothness='PASS';assertions_enabled=$true;locale_required=$true;locale_verified=$true;pids=@(1,2,3,4,5)};
+        fixture=@{offline_availability_endpoints=$true;live_country_detection=$false};verification_scope='full';capture_startup_only=$false;coverage_instrumented=$false;navigation_measurement_requested=$true;navigation_capture_workers=@();navigation_smoothness='PASS';assertions_enabled=$true;locale_required=$true;locale_verified=$true;pids=@(1,2,3,4,5)};
         cleanup_errors=@();resource_errors=@();resource_samples=1;checks=@()}
     $names=@('fluent-tabs-about-and-settings-navigation','physical-outer-geometry-reset-and-restart','native-caption-controls-and-hittest','default-debug-off','dropdown-wheel-does-not-change-settings','X-hide-and-show-local-same-PID','Debug-on-and-off-survive-restart','history-end-and-single-scroll-owner','state-no-duplicate-provider-world','locale-English-restart-system-Russian')
     foreach($page in @('Состояние','Локации')){foreach($hours in @(1,3,6,12,24,72,120,168)){$names+="$page-${hours}h"}}
@@ -397,6 +411,7 @@ if($SelfTest) {
     Assert-FrameprobeEvidence $baselineOnly ('d'*64)
     $startup=ConvertFrom-Json (ConvertTo-Json $good -Depth 12)
     $startup.metadata.capture_startup_only=$true
+    $startup.metadata.verification_scope='capture-startup'
     $startup.metadata.navigation_measurement_requested=$false
     $startup.metadata.navigation_smoothness='NOT RUN'
     $startup.metadata.pids=@(77)
@@ -408,7 +423,7 @@ if($SelfTest) {
         @{pid=$_;sha256=('d'*64);mode='DXGI Desktop Duplication';cleanup='PASS';exit_code=0;frames=0;frequency=1000;end_qpc=10000;pointer_updates=0;baseline=@{qpc=50;accumulated_frames=2};readback_backend=@{system_memory=1;readback_frames=1}}
     })
     $startup.checks=@(@{check='capture-startup';result='PASS';detail=@{starts=10}},@{check='resource-measurement';result='NOT RUN'})
-    Assert-CaptureStartupEvidence $startup ('a'*64) ('d'*64)
+    Assert-FocusedEvidence $startup ('a'*64) ('d'*64)
     foreach($kind in @('scope','scope-type','hash','missing-start','failed','smoothness','cleanup','input')) {
         $bad=ConvertFrom-Json (ConvertTo-Json $startup -Depth 12)
         switch($kind) {
@@ -421,13 +436,49 @@ if($SelfTest) {
             'cleanup'{$bad.cleanup_errors=@('owned cleanup failure')}
             'input'{$bad.metadata.physical_input=$false}
         }
-        $rejected=$false;try{Assert-CaptureStartupEvidence $bad ('a'*64) ('d'*64)}catch{$rejected=$true}
+        $rejected=$false;try{Assert-FocusedEvidence $bad ('a'*64) ('d'*64)}catch{$rejected=$true}
         if(-not $rejected){throw "Invalid focused startup $kind evidence was accepted."}
     }
     $bad=ConvertFrom-Json (ConvertTo-Json $good -Depth 12)
     $bad.metadata.capture_startup_only=$true
     $rejected=$false;try{Assert-UiEvidence $bad 'Windows Sandbox' ('b'*32) ('a'*64) ('c'*64)}catch{$rejected=$true}
     if(-not $rejected){throw 'Focused startup evidence satisfied the mandatory full UI gate.'}
+    $navigation=ConvertFrom-Json (ConvertTo-Json $startup -Depth 12)
+    $navigation.metadata.verification_scope='navigation'
+    $navigation.metadata.capture_startup_only=$false
+    $navigation.metadata.navigation_measurement_requested=$true
+    $navigation.metadata.navigation_smoothness='PASS'
+    $navigation.metadata.capture_startup_workers=@()
+    $navigation.metadata.navigation_capture_workers=$capture.metadata.navigation_capture_workers
+    $navigation.checks=@(@{check='navigation-motion';result='PASS';detail=@{smoothness='PASS';rapid_reversal=$true;switches=@(@{},@{})}},@{check='resource-measurement';result='NOT RUN'})
+    Assert-FocusedEvidence $navigation ('a'*64) ('d'*64) 'navigation'
+    $clipboard=ConvertFrom-Json (ConvertTo-Json $startup -Depth 12)
+    $clipboard.metadata.verification_scope='clipboard'
+    $clipboard.metadata.capture_startup_only=$false
+    $clipboard.metadata.capture_startup_workers=@()
+    $clipboard.checks=@(@{check='about-copy-version';result='PASS';detail=@{version='1.7.1';publication_acknowledged=$true}},@{check='resource-measurement';result='NOT RUN'})
+    Assert-FocusedEvidence $clipboard ('a'*64) ('d'*64) 'clipboard'
+    foreach($focus in @('navigation','clipboard')) {
+        $positive=if($focus -ceq 'navigation'){$navigation}else{$clipboard}
+        foreach($kind in @('wrong-scope','scope-array','pid-type','full-gate','missing-check','failed-check','claimed-startup','missing-detail')) {
+            $bad=ConvertFrom-Json (ConvertTo-Json $positive -Depth 12)
+            switch($kind) {
+                'wrong-scope'{$bad.metadata.verification_scope='full'}
+                'scope-array'{$bad.metadata.verification_scope=@($focus,$focus)}
+                'pid-type'{$bad.metadata.pids=@('not-a-pid')}
+                'missing-check'{$bad.checks=@()}
+                'failed-check'{$bad.checks[0].result='FAIL'}
+                'claimed-startup'{$bad.metadata.capture_startup_only=$true}
+                'missing-detail'{$bad.checks[0].detail=[pscustomobject]@{}}
+            }
+            $rejected=$false
+            try {
+                if($kind -ceq 'full-gate'){Assert-UiEvidence $bad 'GitHub-hosted Windows VM' '' ('a'*64) ('c'*64)}
+                else{Assert-FocusedEvidence $bad ('a'*64) ('d'*64) $focus}
+            }catch{$rejected=$true}
+            if(-not $rejected){throw "Focused $focus accepted invalid $kind evidence."}
+        }
+    }
     $fixture=Join-Path $repository ('artifacts/ui-runtime-controls-'+[Guid]::NewGuid().ToString('N'))
     $alias=Join-Path $fixture 'cpython-3.11-windows-x86_64-none'
     $physical=Join-Path $fixture 'cpython-3.11.15-windows-x86_64-none'
@@ -467,7 +518,13 @@ if(-not $Executable -or $ExpectedSha256 -cnotmatch '^[A-Fa-f0-9]{64}$') {throw '
 if($CoverageInstrumented -and -not $RawProfileDirectory) {throw 'CoverageInstrumented requires an explicit RawProfileDirectory.'}
 if($FunctionalUI -and ($MeasureSeconds -or $EnableCountryForMeasurement)) {throw 'FunctionalUI requires offline checks without measurement.'}
 if($NavigationMeasurement -and (-not $FunctionalUI -or $CoverageInstrumented)) {throw 'NavigationMeasurement requires non-instrumented FunctionalUI.'}
-if($CaptureStartupOnly -and (-not $FunctionalUI -or $NavigationMeasurement -or $CoverageInstrumented -or $HostedResource -or $MeasureSeconds -or $EnableCountryForMeasurement -or $MaximumHistory)) {throw 'CaptureStartupOnly requires a separate non-instrumented functional run.'}
+if($CaptureStartupOnly) {
+    if($VerificationScope -cne 'Full') {throw 'Use either the startup alias or an explicit verification scope.'}
+    $VerificationScope='CaptureStartup'
+}
+if($VerificationScope -cne 'Full' -and (-not $FunctionalUI -or $CoverageInstrumented -or $HostedResource -or $MeasureSeconds -or $EnableCountryForMeasurement -or ($MaximumHistory -and $VerificationScope -cne 'Navigation') -or
+   (($VerificationScope -ceq 'Navigation') -ne [bool]$NavigationMeasurement))) {throw 'Focused verification requires its exact normal offline functional mode.'}
+$verificationScopeArgument=@{Full='full';CaptureStartup='capture-startup';Navigation='navigation';Clipboard='clipboard'}[$VerificationScope]
 $expectNavigationMeasurement=-not $CoverageInstrumented -and (-not $FunctionalUI -or $NavigationMeasurement)
 if($HostedResource -and ($FunctionalUI -or $CoverageInstrumented -or $MeasureSeconds -ne 3600 -or -not $EnableCountryForMeasurement -or -not $MaximumHistory)) {throw 'HostedResource requires a normal executable, one hour, both databases and maximum history.'}
 if($EnableCountryForMeasurement -and -not $MeasureSeconds) {throw 'Country measurement requires a positive duration.'}
@@ -749,15 +806,15 @@ try {
         $arguments=$uvPrefix+@('--exe',$app,'--output',$ui,'--expected-sha256',$ExpectedSha256,'--isolated-ci-input','--measure-seconds',[string]$MeasureSeconds,'--frameprobe',$frameprobe,'--frameprobe-sha256',$frameprobeHash)
         if($FunctionalUI){$arguments+='--functional-evidence'}
         if($NavigationMeasurement){$arguments+='--navigation-measurement'}
-        if($CaptureStartupOnly){$arguments+='--capture-startup-only'}
+        $arguments+=@('--verification-scope',$verificationScopeArgument)
         if($HostedResource){$arguments+='--hosted-resource-evidence'}
         if($CoverageInstrumented){$arguments+='--coverage-instrumented'}
         if($MaximumHistory){$arguments+='--maximum-history'}
         if($EnableCountryForMeasurement){$arguments+='--enable-country-for-measurement'}
         Invoke-CommandBounded 'isolated-ci-ui' $uv $arguments $timeout -Environment $environment|Out-Null
         $evidence=Get-Content -LiteralPath (Join-Path $ui 'results.json') -Raw|ConvertFrom-Json
-        if($CaptureStartupOnly) {
-            Assert-CaptureStartupEvidence $evidence $ExpectedSha256 $frameprobeHash
+        if($VerificationScope -cne 'Full') {
+            Assert-FocusedEvidence $evidence $ExpectedSha256 $frameprobeHash $verificationScopeArgument
         } else {
             Assert-UiEvidence $evidence 'GitHub-hosted Windows VM' $nonce $ExpectedSha256 $runnerHash ([bool]$CoverageInstrumented) ([bool]$HostedResource) ([bool]$expectNavigationMeasurement)
             if($expectNavigationMeasurement){Assert-FrameprobeEvidence $evidence $frameprobeHash}

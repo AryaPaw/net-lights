@@ -381,6 +381,19 @@ def clipboard_equals(read, expected, busy_error):
         return False
 
 
+def wait_for_clipboard_publication(acknowledged,read,expected,busy_error,timeout=5):
+    # Opening the clipboard before the UI handler publishes can make that
+    # handler fail OpenClipboard. First observe its acknowledgement via UIA.
+    deadline=time.monotonic()+timeout
+    wait_for(acknowledged,timeout,"Copy action acknowledged publication")
+    remaining=deadline-time.monotonic()
+    if remaining<=0:
+        raise TimeoutError("Clipboard publication exceeded its total deadline")
+    wait_for(lambda:clipboard_equals(read,expected,busy_error),remaining,"About copied actual version")
+    if time.monotonic()>deadline:
+        raise TimeoutError("Clipboard publication exceeded its total deadline")
+
+
 def notification_rect_inside(read_rect, outer):
     rect = read_rect()
     x,y,width,height = outer
@@ -1529,16 +1542,24 @@ def validate_navigation_mode(functional, coverage, measure):
         raise ValueError("Navigation mode must preserve native measurement and keep coverage unmeasured")
 
 
+def validate_verification_scope(scope,functional,coverage,measure_navigation,resources,maximum,country,hosted):
+    if scope not in ("full","capture-startup","navigation","clipboard"):
+        raise ValueError("Unknown verification scope")
+    if scope!="full" and (not functional or coverage or resources or (maximum and scope!="navigation") or country or hosted or measure_navigation!=(scope=="navigation")):
+        raise ValueError("Focused verification requires its exact normal offline functional mode")
+
+
 class Runner:
-    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None, coverage_instrumented=False, frameprobe=None, frameprobe_sha=None, hosted_resource=False, measure_navigation=True, capture_startup_only=False):
+    def __init__(self, exe, output, measure_seconds, expected_sha=None, enable_country=False, maximum=False, functional_evidence=False, input_policy=None, coverage_instrumented=False, frameprobe=None, frameprobe_sha=None, hosted_resource=False, measure_navigation=True, verification_scope="full"):
         if not __debug__:
             raise RuntimeError("Проверки требуют включённых assert: уберите -O и PYTHONOPTIMIZE")
         if functional_evidence and (measure_seconds or enable_country):
             raise ValueError("Функциональный offline UI-режим не допускает ресурсный прогон или публичное Geo-определение")
         validate_resource_mode(hosted_resource, functional_evidence, measure_seconds, enable_country, maximum, coverage_instrumented, input_policy is not None and input_policy.ci)
         validate_navigation_mode(functional_evidence, coverage_instrumented, measure_navigation)
-        if capture_startup_only and (not functional_evidence or coverage_instrumented or measure_navigation or measure_seconds or hosted_resource or maximum or enable_country):
-            raise ValueError("Capture startup mode is separate from full UI, coverage, animation and resources")
+        validate_verification_scope(verification_scope,functional_evidence,coverage_instrumented,measure_navigation,measure_seconds,maximum,enable_country,hosted_resource)
+        if verification_scope!="full" and (input_policy is None or not input_policy.ci):
+            raise ValueError("Focused verification requires the actual hosted input policy")
         if hosted_resource:
             input_policy.assert_pointer_input_allowed()
         self.exe, self.output, self.profile = exe, output, output/"profile"
@@ -1546,7 +1567,7 @@ class Runner:
         self.measure_seconds, self.results, self.captures = measure_seconds, [], []
         self.functional_evidence=functional_evidence
         self.measure_navigation=measure_navigation
-        self.capture_startup_only=capture_startup_only
+        self.verification_scope=verification_scope
         self.compact_hosted_geometry=functional_evidence or hosted_resource
         self.coverage_instrumented=coverage_instrumented
         self.frameprobe,self.frameprobe_sha=frameprobe,frameprobe_sha
@@ -1565,7 +1586,8 @@ class Runner:
         self.meta["evidenceLevel"] = "GitHub-hosted Windows resource measurement" if hosted_resource else ("functional" if functional_evidence else "Windows 11 native visual")
         self.meta["visualAcceptance"] = "NOT RUN" if functional_evidence or hosted_resource else "requires screenshot review"
         self.meta["navigation_measurement_requested"]=measure_navigation
-        self.meta["capture_startup_only"]=capture_startup_only
+        self.meta["verification_scope"]=verification_scope
+        self.meta["capture_startup_only"]=verification_scope=="capture-startup"
         self.meta["capture_startup_workers"]=[]
         self.meta["coverage_instrumented"] = coverage_instrumented
         self.meta["navigation_capture_workers"] = []
@@ -2139,14 +2161,49 @@ class Runner:
                 assert self.api.owner(hwnd)==pid
                 if not self.api.user.SetWindowPos(hwnd,None,*original,0x14):raise ct.WinError(ct.get_last_error())
 
+    def copy_version(self):
+        assert self.input_policy, "Copy interaction requires the isolated input policy"
+        self.input_policy.assert_identity()
+        from pywinauto import clipboard
+        import pywintypes
+        hwnd=self.uia.hwnd
+        self.page("О программе")
+        version=subprocess.run([str(self.exe),"--version"],capture_output=True,text=True,timeout=5,
+                               creationflags=NO_CONSOLE,check=True).stdout.strip()
+        assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?",version), "CLI version is missing"
+        assert self.uia.call("exists",version), "About differs from actual executable version"
+        version_rect_before = self.uia.call("rect", version)
+        self.uia.call("invoke","Скопировать версию")
+        first_feedback_at = time.monotonic()
+        def acknowledged():
+            if self.uia.call("exists","Не удалось скопировать версию. Повторите попытку; буфер обмена может быть занят другим приложением."):
+                raise AssertionError("The application reported a clipboard publication failure")
+            return self.uia.call("exists","Версия скопирована.")
+        wait_for_clipboard_publication(acknowledged,clipboard.GetData,f"Net Lights {version}",pywintypes.error)
+        assert self.uia.call("rect", version) == version_rect_before, "Copy feedback reflowed About"
+        outer = self.api.outer(hwnd)
+        # GPUI Kit enters from 96 px below the final position over 400 ms.
+        # Keep the geometry assertion strict, but measure the settled toast.
+        feedback_rect = wait_for(lambda:notification_rect_inside(
+            lambda:self.uia.call("rect", "Версия скопирована."),outer),1,"Copy feedback settles inside the lower-right corner")
+        self.meta["copy_feedback"] = dict(rect=feedback_rect,outer=outer,
+            elapsed_milliseconds=round((time.monotonic()-first_feedback_at)*1000,1))
+        time.sleep(max(0., .9-(time.monotonic()-first_feedback_at)))
+        assert self.uia.call("exists","Версия скопирована."), "The first feedback expired before the repeated action"
+        self.uia.call("invoke","Скопировать версию")
+        time.sleep(1.2)
+        assert self.uia.call("exists","Версия скопирована."), "An older deadline dismissed repeated feedback"
+        feedback_nodes = [r for r in self.uia.call("inventory") if r["visible"] and r["kind"]=="Text" and r["name"]=="Версия скопирована."]
+        assert len(feedback_nodes)==1, "Repeated copy produced duplicate notifications"
+        wait_for(lambda:not self.uia.call("exists","Версия скопирована."),5,"Copy feedback auto-dismisses")
+        return version
+
     def fluent_controls(self):
         assert self.input_policy, "Fluent interaction requires the isolated input policy"
         self.input_policy.assert_identity()
         cursors=self.cursor_affordances()
         self.meta["cursor_affordances"]=cursors
         self.page("Состояние")
-        from pywinauto import clipboard
-        import pywintypes
         pid, hwnd = self.process.pid, self.uia.hwnd
         original = self.api.outer(hwnd)
         _,_,original_width,original_height=original
@@ -2180,32 +2237,7 @@ class Runner:
             self.api.post(hwnd,0x0100,key,1)
             self.api.post(hwnd,0x0101,key,0xc0000001)
             wait_for(lambda name=name:self.uia.call("selected",name),5,f"keyboard selected {name}")
-        self.page("О программе")
-        version=subprocess.run([str(self.exe),"--version"],capture_output=True,text=True,timeout=5,
-                               creationflags=NO_CONSOLE,check=True).stdout.strip()
-        assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?",version), "CLI version is missing"
-        assert self.uia.call("exists",version), "About differs from actual executable version"
-        version_rect_before = self.uia.call("rect", version)
-        self.uia.call("invoke","Скопировать версию")
-        first_feedback_at = time.monotonic()
-        wait_for(lambda:clipboard_equals(clipboard.GetData,f"Net Lights {version}",pywintypes.error),5,"About copied actual version")
-        wait_for(lambda:self.uia.call("exists","Версия скопирована."),5,"Copy feedback is visible")
-        assert self.uia.call("rect", version) == version_rect_before, "Copy feedback reflowed About"
-        outer = self.api.outer(hwnd)
-        # GPUI Kit enters from 96 px below the final position over 400 ms.
-        # Keep the geometry assertion strict, but measure the settled toast.
-        feedback_rect = wait_for(lambda:notification_rect_inside(
-            lambda:self.uia.call("rect", "Версия скопирована."),outer),1,"Copy feedback settles inside the lower-right corner")
-        self.meta["copy_feedback"] = dict(rect=feedback_rect,outer=outer,
-            elapsed_milliseconds=round((time.monotonic()-first_feedback_at)*1000,1))
-        time.sleep(max(0., .9-(time.monotonic()-first_feedback_at)))
-        assert self.uia.call("exists","Версия скопирована."), "The first feedback expired before the repeated action"
-        self.uia.call("invoke","Скопировать версию")
-        time.sleep(1.2)
-        assert self.uia.call("exists","Версия скопирована."), "An older deadline dismissed repeated feedback"
-        feedback_nodes = [r for r in self.uia.call("inventory") if r["visible"] and r["kind"]=="Text" and r["name"]=="Версия скопирована."]
-        assert len(feedback_nodes)==1, "Repeated copy produced duplicate notifications"
-        wait_for(lambda:not self.uia.call("exists","Версия скопирована."),5,"Copy feedback auto-dismisses")
+        version=self.copy_version()
         self.uia.call("invoke","Источники и лицензии")
         self.visible_control("Файлы лицензий")
         self.capture("fluent-about-licenses")
@@ -2985,14 +3017,20 @@ class Runner:
     def run(self, inventory_only=False):
         original_motion=None
         try:
-            if not inventory_only and self.input_policy and not self.capture_startup_only:
+            if not inventory_only and self.input_policy and self.verification_scope!="capture-startup":
                 original_motion=self.motion_preference()
                 self.meta["motion_fixture"]=dict(original=original_motion,enabled=True,restored=False)
                 self.motion_preference(True)
             self.start()
             self.inventory("initial-state")
-            if self.capture_startup_only:
+            if self.verification_scope=="capture-startup":
                 self.check("capture-startup",lambda:self.navigation_motion(self.uia.call("inventory"),startup_only=True))
+                return
+            if self.verification_scope=="navigation":
+                self.check("navigation-motion",lambda:self.navigation_motion(self.uia.call("inventory")))
+                return
+            if self.verification_scope=="clipboard":
+                self.check("about-copy-version",lambda:dict(version=self.copy_version(),publication_acknowledged=True))
                 return
             self.capture("state-initial")
             if inventory_only:
@@ -3361,6 +3399,68 @@ def notification_wait_selftest():
 
     class ClipboardError(Exception):
         pass
+    owner=Runner.__new__(Runner)
+    owner.input_policy=None
+    try:
+        owner.copy_version()
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("A copy interaction ran without isolated input")
+
+    published=False
+    calls=[]
+    def feedback():
+        nonlocal published
+        calls.append("feedback")
+        published=True
+        return True
+    def guarded_read():
+        calls.append("read")
+        assert published, "The observer stole the clipboard before publication"
+        return "expected"
+    try:
+        clipboard_equals(guarded_read,"expected",ClipboardError)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("The old read-before-publication race wasn't reproduced")
+    calls.clear()
+    wait_for_clipboard_publication(feedback,guarded_read,"expected",ClipboardError)
+    assert calls==["feedback","read"]
+    reader_before_ack=Mock(return_value="expected")
+    with patch.object(time,"sleep"),patch.object(time,"monotonic",side_effect=[10,10,10,11.01]):
+        try:
+            wait_for_clipboard_publication(lambda:False,reader_before_ack,"expected",ClipboardError,1)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("Missing publication acknowledgement didn't fail")
+    reader_before_ack.assert_not_called()
+    wrong=Mock(return_value="wrong")
+    with patch.object(time,"sleep"),patch.object(time,"monotonic",side_effect=[10,10,10,10,10,10,11.01]):
+        try:
+            wait_for_clipboard_publication(lambda:True,wrong,"expected",ClipboardError,1)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("Acknowledgement hid incorrect clipboard contents")
+    assert wrong.call_count==1
+    with patch.object(time,"sleep"),patch.object(time,"monotonic",side_effect=[10,10,10,10,10,10,11.01]):
+        try:
+            wait_for_clipboard_publication(lambda:True,lambda:"expected","expected",ClipboardError,1)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("Late clipboard contents bypassed the total deadline")
+    with patch.object(time,"monotonic",side_effect=[10,10,10,11.01]):
+        try:
+            wait_for_clipboard_publication(lambda:True,reader_before_ack,"expected",ClipboardError,1)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("Publication extended its total deadline")
+    reader_before_ack.assert_not_called()
 
     reader = Mock(side_effect=[ClipboardError(5,"OpenClipboard","busy"),"expected"])
     with patch.object(time,"sleep"), patch.object(time,"monotonic",side_effect=[10,10,10.08]):
@@ -3579,6 +3679,30 @@ def navigation_motion_selftest():
     from unittest.mock import patch
     from types import SimpleNamespace
     import io
+    for scope in ("capture-startup","navigation","clipboard"):
+        for policy in (None,SimpleNamespace(ci=False)):
+            try:
+                Runner(pathlib.Path("unused.exe"),pathlib.Path("unused"),0,functional_evidence=True,
+                       input_policy=policy,measure_navigation=scope=="navigation",verification_scope=scope)
+            except ValueError as error:
+                assert "actual hosted input policy" in str(error)
+            else:
+                raise AssertionError("Focused verification reached OS setup without hosted isolation")
+        validate_verification_scope(scope,True,False,scope=="navigation",0,False,False,False)
+        for args in ((False,False,scope=="navigation",0,False,False,False),
+                     (True,True,scope=="navigation",0,False,False,False),
+                     (True,False,scope!="navigation",0,False,False,False),
+                     (True,False,scope=="navigation",1,False,False,False),
+                     (True,False,scope=="navigation",0,True,False,False)):
+            if scope=="navigation" and args[4]:
+                validate_verification_scope(scope,*args)
+                continue
+            try:
+                validate_verification_scope(scope,*args)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("A focused run bypassed scope or instrumentation isolation")
 
     smooth=[(0.,10.),(.05,30.),(.1,60.),(.15,90.),(.25,110.)]
     sparse=[(0.,10.),(.312,37.),(.437,87.),(.531,110.)]
@@ -3876,6 +4000,7 @@ def main():
                         help="Отдельная обязательная проверка плавности на обычном exe")
     parser.add_argument("--capture-startup-only", action="store_true",
                         help="Только десять запусков DXGI, без полной UI-матрицы и без заявления о плавности")
+    parser.add_argument("--verification-scope",choices=("full","capture-startup","navigation","clipboard"),default="full")
     parser.add_argument("--hosted-resource-evidence", action="store_true",
                         help="Часовой ресурсный прогон на GitHub-hosted Windows; визуальная приёмка Windows 11 остаётся NOT RUN")
     parser.add_argument("--coverage-instrumented", action="store_true",
@@ -3883,10 +4008,18 @@ def main():
     parser.add_argument("--enable-country-for-measurement", action="store_true",
                         help="После synthetic-снимков включить настоящий IP-опрос и обе базы для ресурсного прогона")
     args = parser.parse_args()
+    if args.capture_startup_only:
+        if args.verification_scope!="full":
+            parser.error("Use either the startup alias or an explicit verification scope")
+        args.verification_scope="capture-startup"
     if args.navigation_measurement and (not args.functional_evidence or args.coverage_instrumented):
         parser.error("--navigation-measurement requires non-instrumented --functional-evidence")
-    if args.capture_startup_only and (not args.functional_evidence or args.navigation_measurement or args.coverage_instrumented or args.maximum_history or args.inventory_only or args.measure_seconds or args.enable_country_for_measurement):
-        parser.error("--capture-startup-only requires a separate normal functional offline run")
+    try:
+        validate_verification_scope(args.verification_scope,args.functional_evidence,args.coverage_instrumented,args.navigation_measurement,args.measure_seconds,args.maximum_history,args.enable_country_for_measurement,args.hosted_resource_evidence)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.verification_scope!="full" and args.inventory_only:
+        parser.error("A focused verification cannot be an inventory-only run")
     if args.enable_country_for_measurement and (not args.measure_seconds or args.inventory_only):
         parser.error("--enable-country-for-measurement требует --measure-seconds > 0 и полный UI-прогон")
     if args.functional_evidence and (args.measure_seconds or args.enable_country_for_measurement):
@@ -3901,7 +4034,7 @@ def main():
     except (OSError, ValueError) as error:
         parser.error(str(error))
     output.mkdir(parents=True, exist_ok=False)
-    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy, args.coverage_instrumented,frameprobe,args.frameprobe_sha256,args.hosted_resource_evidence,not args.coverage_instrumented and (not args.functional_evidence or args.navigation_measurement),args.capture_startup_only)
+    runner = Runner(exe, output, args.measure_seconds, args.expected_sha256, args.enable_country_for_measurement, args.maximum_history, args.functional_evidence, input_policy, args.coverage_instrumented,frameprobe,args.frameprobe_sha256,args.hosted_resource_evidence,not args.coverage_instrumented and (not args.functional_evidence or args.navigation_measurement),args.verification_scope)
     runner.run(args.inventory_only)
     print(json.dumps(dict(result="NOT RUN" if runner.measurement_blocked else "PASS", output=str(output), screenshots=len(runner.captures), resource_seconds=args.measure_seconds), ensure_ascii=False), flush=True)
     if runner.measurement_blocked:
