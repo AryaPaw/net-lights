@@ -1,4 +1,6 @@
 use std::collections::VecDeque;
+#[path = "capture_readback.rs"]
+mod readback;
 
 #[derive(Clone, Copy)]
 pub struct Spec {
@@ -149,7 +151,7 @@ impl Queue {
         Some(frame)
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Failure(&'static str, i32);
 fn captured_qpc(
     duration: i64,

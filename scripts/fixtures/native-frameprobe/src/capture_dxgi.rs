@@ -1,3 +1,4 @@
+use super::super::readback::{CAPACITY, Queue};
 use super::stream::{self, Event};
 use super::*;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
@@ -88,36 +89,25 @@ impl Drop for Acquired<'_> {
     }
 }
 
-fn read_pixels(
+fn try_read_pixels(
     context: &ID3D11DeviceContext,
     staging: &ID3D11Texture2D,
-    source: &ID3D11Texture2D,
-    region: &D3D11_BOX,
     width: u32,
     height: u32,
-) -> Result<Vec<u8>> {
-    unsafe {
-        context.CopySubresourceRegion(staging, 0, 0, 0, 0, source, 0, Some(region));
-        context.Flush();
-    }
+) -> Result<Option<Vec<u8>>> {
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-    let deadline = Instant::now() + Duration::from_millis(100);
-    loop {
-        match unsafe {
-            context.Map(
-                staging,
-                0,
-                D3D11_MAP_READ,
-                D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32,
-                Some(&mut mapped),
-            )
-        } {
-            Ok(()) => break,
-            Err(error) if error.code().0 as u32 == 0x887A000A && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(1))
-            }
-            Err(error) => return Err(Failure("staging_map", error.code().0)),
-        }
+    match unsafe {
+        context.Map(
+            staging,
+            0,
+            D3D11_MAP_READ,
+            D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32,
+            Some(&mut mapped),
+        )
+    } {
+        Ok(()) => (),
+        Err(error) if error.code().0 as u32 == 0x887A000A => return Ok(None),
+        Err(error) => return Err(Failure("staging_map", error.code().0)),
     }
     let row = width as usize * 4;
     if mapped.pData.is_null() || (mapped.RowPitch as usize) < row {
@@ -134,7 +124,12 @@ fn read_pixels(
         });
     }
     unsafe { context.Unmap(staging, 0) };
-    Ok(pixels)
+    Ok(Some(pixels))
+}
+
+struct Pending {
+    qpc: i64,
+    texture: ID3D11Texture2D,
 }
 
 pub(super) fn capture(spec: Spec, signals: Arc<Signals>, output: &mut impl Write) -> Result<()> {
@@ -260,12 +255,16 @@ fn capture_frames(
         CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
         ..Default::default()
     };
-    let mut staging = None;
-    checked(
-        unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) },
-        "staging_texture",
-    )?;
-    let staging = staging.ok_or(Failure("missing_staging", 0))?;
+    let mut free = Vec::with_capacity(CAPACITY);
+    for _ in 0..CAPACITY {
+        let mut texture = None;
+        checked(
+            unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut texture)) },
+            "staging_texture",
+        )?;
+        free.push(texture.ok_or(Failure("missing_staging", 0))?);
+    }
+    let mut pending: Queue<Pending> = Queue::new();
     let mut frequency = 0;
     checked(
         unsafe { QueryPerformanceFrequency(&mut frequency) },
@@ -286,7 +285,48 @@ fn capture_frames(
     let (mut previous, mut events, mut bytes) = (0, 0u32, 0usize);
     let mut previous_stages = [0i64; 4];
     let mut captured_frames = 0u32;
-    while !signals.stop.load(Ordering::Acquire) {
+    while !signals.stop.load(Ordering::Acquire) || !pending.is_empty() {
+        if let Some(failure) = *signals
+            .failure
+            .lock()
+            .map_err(|_| Failure("signals_lock", 0))?
+        {
+            return Err(failure);
+        }
+        while let Some((frame, pixels)) = pending.poll(Instant::now(), |frame| {
+            try_read_pixels(&context, &frame.texture, width, height)
+        })? {
+            let mut readback_qpc = 0;
+            checked(
+                unsafe { QueryPerformanceCounter(&mut readback_qpc) },
+                "frame_qpc",
+            )?;
+            previous_stages[1] = readback_qpc;
+            unobscured(spec, initial)?;
+            bytes += pixels.len();
+            if bytes > 32 * 1024 * 1024 {
+                return Err(Failure("pixel_bound", 0));
+            }
+            emit(Event::Frame {
+                qpc: frame.qpc,
+                width,
+                height,
+                pixels,
+            })?;
+            checked(
+                unsafe { QueryPerformanceCounter(&mut previous_stages[3]) },
+                "enqueue_qpc",
+            )?;
+            captured_frames += 1;
+            // Map/CPU copy/Unmap all completed before this slot becomes reusable.
+            free.push(frame.texture);
+        }
+        if signals.stop.load(Ordering::Acquire) {
+            if !pending.is_empty() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            continue;
+        }
         unobscured(spec, initial)?;
         let current = checked(unsafe { desktop.GetDesc() }, "output_desc")?;
         if current.DesktopCoordinates != rect
@@ -297,7 +337,13 @@ fn capture_frames(
         }
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
-        match unsafe { duplication.AcquireNextFrame(50, &mut info, &mut resource) } {
+        match unsafe {
+            duplication.AcquireNextFrame(
+                if pending.is_empty() { 50 } else { 5 },
+                &mut info,
+                &mut resource,
+            )
+        } {
             Ok(()) => (),
             Err(error) if error.code().0 as u32 == 0x887A0027 => continue,
             Err(error) => return Err(Failure("acquire_frame", error.code().0)),
@@ -364,43 +410,24 @@ fn capture_frames(
         {
             return Err(Failure("source_layout", 0));
         }
-        let pixels = read_pixels(&context, &staging, &source, &region, width, height)?;
-        checked(
-            unsafe { QueryPerformanceCounter(&mut received) },
-            "frame_qpc",
-        )?;
-        let readback_qpc = received;
-        let qpc = checked_qpc(
-            present.ok_or(Failure("missing_present_time", 0))?,
-            received,
-            previous,
-        )?;
-        unobscured(spec, initial)?;
+        let texture = free.pop().ok_or(Failure("readback_queue_overflow", 0))?;
+        let submitted = Instant::now();
+        // Submit a copy to our own surface before releasing DXGI ownership.
+        // No Map/wait here: keep accepting presentations while the GPU works.
+        unsafe {
+            context.CopySubresourceRegion(&texture, 0, 0, 0, 0, &source, 0, Some(&region));
+            context.Flush();
+        }
+        let qpc = present.ok_or(Failure("missing_present_time", 0))?;
         drop(source);
         acquired.close()?;
-        let mut released_qpc = 0;
+        previous_stages[0] = acquired_qpc;
         checked(
-            unsafe { QueryPerformanceCounter(&mut released_qpc) },
+            unsafe { QueryPerformanceCounter(&mut previous_stages[2]) },
             "release_qpc",
         )?;
         previous = qpc;
-        bytes += pixels.len();
-        if bytes > 32 * 1024 * 1024 {
-            return Err(Failure("pixel_bound", 0));
-        }
-        emit(Event::Frame {
-            qpc,
-            width,
-            height,
-            pixels,
-        })?;
-        let mut enqueued_qpc = 0;
-        checked(
-            unsafe { QueryPerformanceCounter(&mut enqueued_qpc) },
-            "enqueue_qpc",
-        )?;
-        previous_stages = [acquired_qpc, readback_qpc, released_qpc, enqueued_qpc];
-        captured_frames += 1;
+        pending.push(submitted, Pending { qpc, texture })?;
     }
     if let Some(failure) = *signals
         .failure
