@@ -21,6 +21,11 @@ impl<T> Queue<T> {
     pub(super) fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+    pub(super) fn diagnostic_front(&self, now: Instant) -> Option<(&T, Duration, usize)> {
+        self.items
+            .front()
+            .map(|(at, value)| (value, now.saturating_duration_since(*at), self.items.len()))
+    }
     pub(super) fn push(&mut self, submitted: Instant, value: T) -> Result<(), Failure> {
         if self.items.len() == CAPACITY {
             return Err(Failure("readback_queue_overflow", 0));

@@ -857,10 +857,13 @@ def native_clock_diagnostic(raw):
         desktop_fields={"present_qpc","accumulated_frames","metadata_bytes","mouse_qpc","received_qpc",
                         "previous_qpc","frequency","last_acquired_qpc","last_readback_qpc",
                         "last_released_qpc","last_enqueued_qpc","captured_frames"}
+        readback_fields={"age_micros","pending_readbacks","map_ready","system_memory","front_present_qpc",
+                         "poll_qpc","frequency","captured_frames","last_acquired_qpc","last_readback_qpc",
+                         "last_released_qpc","last_enqueued_qpc"}
         if not isinstance(pairs,list):
             raise ValueError()
         fields={key for key,_ in pairs}
-        if fields not in (clock_fields,desktop_fields) or len(pairs)!=len(fields):
+        if fields not in (clock_fields,desktop_fields,readback_fields) or len(pairs)!=len(fields):
             raise ValueError()
         if any(type(value) is not int or not -(2**63)<=value<2**63 for _,value in pairs):
             raise ValueError()
@@ -868,6 +871,10 @@ def native_clock_diagnostic(raw):
         if fields==desktop_fields and (not 0<=value["accumulated_frames"]<2**32 or
                                       not 0<=value["metadata_bytes"]<2**32 or
                                       not 0<=value["captured_frames"]<=512):
+            raise ValueError()
+        if fields==readback_fields and (not 0<=value["age_micros"] or not 1<=value["pending_readbacks"]<=16
+                or value["map_ready"] not in (-1,0,1) or value["system_memory"] not in (0,1)
+                or not 0<=value["captured_frames"]<=512):
             raise ValueError()
         return value
     except (UnicodeError,ValueError,TypeError):
@@ -896,7 +903,7 @@ class NavigationFrames:
         try:
             diagnostic=native_clock_diagnostic(self.process.stderr.read(8193))
             if diagnostic is not None:
-                field="desktop_diagnostic" if "accumulated_frames" in diagnostic else "clock_diagnostic"
+                field="desktop_diagnostic" if "accumulated_frames" in diagnostic else "readback_diagnostic" if "pending_readbacks" in diagnostic else "clock_diagnostic"
                 self.report[field]=diagnostic
         finally:
             self.diagnostics_read=True
@@ -3636,7 +3643,7 @@ def navigation_motion_selftest():
         assert process.returncode is not None
         if diagnostic and len(diagnostic)<=8192:
             decoded=json.loads(diagnostic)
-            field="desktop_diagnostic" if "accumulated_frames" in decoded else "clock_diagnostic"
+            field="desktop_diagnostic" if "accumulated_frames" in decoded else "readback_diagnostic" if "pending_readbacks" in decoded else "clock_diagnostic"
             assert reports[0][field]==decoded
     complete=[ready,frame,dict(frame,qpc=300),end]
     scenario(complete,True)
@@ -3659,6 +3666,13 @@ def navigation_motion_selftest():
                  received_qpc=123,previous_qpc=120,frequency=1000,last_acquired_qpc=120,
                  last_readback_qpc=121,last_released_qpc=121,last_enqueued_qpc=122,captured_frames=1)
     assert native_clock_diagnostic(encode(desktop))==desktop
+    readback=dict(age_micros=101000,pending_readbacks=2,map_ready=1,system_memory=0,front_present_qpc=120,
+        poll_qpc=123,frequency=1000,captured_frames=1,last_acquired_qpc=121,last_readback_qpc=121,
+        last_released_qpc=122,last_enqueued_qpc=121)
+    assert native_clock_diagnostic(encode(readback))==readback
+    for invalid in (dict(readback,pending_readbacks=17),dict(readback,map_ready=True),dict(readback,system_memory=2),dict(readback,age_micros=-1),dict(readback,extra=0)):
+        rejected(lambda:native_clock_diagnostic(encode(invalid)))
+    scenario(complete,False,code=7,diagnostic=encode(readback))
     for invalid in (dict(desktop,accumulated_frames=True),dict(desktop,accumulated_frames=2**32),
                     dict(desktop,metadata_bytes=-1),dict(desktop,captured_frames=513),
                     dict(desktop,extra=0)):

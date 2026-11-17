@@ -295,6 +295,23 @@ fn capture_frames(
         }
         while let Some((frame, pixels)) = pending.poll(Instant::now(), |frame| {
             try_read_pixels(&context, &frame.texture, width, height)
+        }).inspect_err(|_| {
+            if let Some((front, age, count)) = pending.diagnostic_front(Instant::now()) {
+                let mut poll_qpc = 0;
+                let _ = unsafe { QueryPerformanceCounter(&mut poll_qpc) };
+                // Observation only: the original failure is still returned.
+                let ready = match try_read_pixels(&context, &front.texture, width, height) {
+                    Ok(Some(_)) => 1, Ok(None) => 0, Err(_) => -1,
+                };
+                eprintln!(concat!(
+                    "{{\"age_micros\":{},\"pending_readbacks\":{},\"map_ready\":{},\"system_memory\":{},",
+                    "\"front_present_qpc\":{},\"poll_qpc\":{},\"frequency\":{},\"captured_frames\":{},",
+                    "\"last_acquired_qpc\":{},\"last_readback_qpc\":{},\"last_released_qpc\":{},\"last_enqueued_qpc\":{}}}"
+                ), age.as_micros().min(i64::MAX as u128), count, ready,
+                i32::from(duplication_desc.DesktopImageInSystemMemory.as_bool()),
+                front.qpc, poll_qpc, frequency, captured_frames,
+                previous_stages[0], previous_stages[1], previous_stages[2], previous_stages[3]);
+            }
         })? {
             let mut readback_qpc = 0;
             checked(
